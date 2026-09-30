@@ -7,13 +7,15 @@ final battle horseback sequences.
 Whenever Epona is present and no horseback-Zelda passenger already exists (e.g. from a story cutscene), the mod
 spawns one so she stays on the saddle. She remains there even after Link dismounts, sitting alone up front just as
 the game's own horseback-Zelda actor already supports; any story-placed horseback Zelda (such as the horseback
-archery duel, where she rides alone) is never touched or duplicated.
+archery duel, where she rides alone) is never touched or duplicated. The mod only manages Zelda during real
+gameplay (once a Link player actor exists), so scripted, non-playable sequences such as the title screen demo are
+left alone.
 
 The game normally treats *any* horseback-Zelda passenger as a sign that the scripted duel against Ganondorf is
 underway, which blocks normal dismounting, breaks the grass-whistle horse call, and (since dismounting is blocked)
-makes Wolf Link/Midna unreachable. The mod hooks the relevant game function to suppress that side effect for the
-Zelda it spawns, so dismounting, calling Epona, and Midna access all keep working normally; a real story-placed
-Zelda during the actual duel is left untouched.
+makes Wolf Link/Midna unreachable. The mod clears that flag back off every frame for the Zelda it spawns, so
+dismounting, calling Epona, and Midna access all keep working normally; a real story-placed Zelda during the actual
+duel is left untouched.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
