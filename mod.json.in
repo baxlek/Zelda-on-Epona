@@ -1,7 +1,29 @@
 {
-  "id": "com.example.zelda_on_epona",
+  "id": "dev.baxlek.zelda_on_epona",
   "name": "Zelda on Epona",
   "version": "@PROJECT_VERSION@",
-  "author": "You",
-  "description": "Zelda rides along on Epona with Link at all times, just like in the final battle sequences."
+  "author": "baxlek",
+  "description": "Zelda rides along on Epona with you at all times.",
+  "abi": 1,
+  "imports": [
+    {
+      "service_id": "dev.twilitrealm.dusklight.hook",
+      "major": 1,
+      "min_minor": 1,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.actor",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.log",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    }
+  ],
+  "exports": []
 }
