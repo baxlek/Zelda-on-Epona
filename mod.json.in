@@ -1,7 +1,7 @@
 {
-  "id": "com.example.my_mod",
-  "name": "My Mod",
+  "id": "com.example.zelda_on_epona",
+  "name": "Zelda on Epona",
   "version": "@PROJECT_VERSION@",
   "author": "You",
-  "description": "An example Dusklight mod"
+  "description": "Zelda rides along on Epona with Link at all times, just like in the final battle sequences."
 }

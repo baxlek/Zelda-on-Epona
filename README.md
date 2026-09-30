@@ -1,18 +1,23 @@
-# Dusklight Mod Template
+# Zelda on Epona
 
-A standalone template for [Dusklight](https://github.com/TwilitRealm/dusklight) mods.
+A [Dusklight](https://github.com/TwilitRealm/dusklight) mod for The Legend of Zelda: Twilight Princess that keeps
+Zelda riding along on Epona with Link all the time, just like she does during the game's scripted final battle
+horseback sequences.
+
+Whenever Link mounts Epona and no horseback-Zelda passenger is already present (e.g. from a story cutscene), the mod
+spawns one so she rides double with Link. Dismounting removes the passenger this mod added; any story-placed
+horseback Zelda (such as the horseback archery duel, where she rides alone) is never touched.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
 
 ## Quick start
 
-1. Click "Use this template" to create a new repository for your mod.
-2. Edit `mod.json.in`: set your mod's `id` (reverse-DNS style, e.g. `com.example.my_mod`),
+1. Edit `mod.json.in`: set your mod's `id` (reverse-DNS style, e.g. `com.example.my_mod`),
    `name`, `author`, and `description`.
-3. Rename the target in `CMakeLists.txt` (`add_mod(my_mod ...)`) (this names the `.dusk` file).
-4. Write your mod in `src/mod.cpp`.
-5. Build locally:
+2. Rename the target in `CMakeLists.txt` (`add_mod(zelda_on_epona ...)`) (this names the `.dusk` file).
+3. Write your mod in `src/mod.cpp`.
+4. Build locally:
    ```sh
    cmake -B build
    cmake --build build
