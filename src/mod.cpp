@@ -1,5 +1,6 @@
 #include "mods/service.hpp"
 #include "mods/svc/actor.h"
+#include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
 
 // Game includes
@@ -13,6 +14,7 @@ DEFINE_MOD();
 
 IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(ActorService, svc_actor);
+IMPORT_SERVICE(HookService, svc_hook);
 
 // The stage name used by the game to load the horseback-Zelda actor (see `d_stage.cpp`'s
 // OBJNAME table: OBJNAME("HoZelda", fpcNm_HOZELDA_e, -1)).
@@ -44,9 +46,12 @@ static fopAc_ac_c* find_spawned_zelda() {
 
     fopAc_ac_c* actor = nullptr;
     fopAcM_SearchByID((fpc_ProcID)s_spawnedZeldaId, &actor);
-    if (actor == nullptr) {
-        // The actor we spawned no longer exists (e.g. deleted on a room change).
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_HOZELDA_e) {
+        // The actor we spawned no longer exists (e.g. deleted on a room change), or its ProcID
+        // has since been recycled by the engine for an unrelated actor (ProcIDs are reused once
+        // freed). Either way, we no longer have a spawned Zelda to track.
         s_hasSpawnedZelda = false;
+        return nullptr;
     }
     return actor;
 }
@@ -85,8 +90,41 @@ static void remove_spawned_zelda() {
     s_hasSpawnedZelda = false;
 }
 
+// `daHorse_c::callHorseSubstance()` (the grass-whistle horse call) special-cases *any* moment
+// where the current HoZelda passenger is riding alone (`checkSingleRide()`, true whenever Link
+// isn't mounted) by assuming the scripted final-duel reunion is underway: instead of the normal
+// gallop-to-player behavior, it silently plays Epona's neigh, jumps straight to the duel's
+// "arrival" demo state, and never actually moves Epona. Since this mod keeps Zelda riding solo
+// for the entire game (not just the real duel), that special case would otherwise fire every
+// time the whistle is used while she's mounted.
+//
+// A real scripted duel always uses its own, story-placed HoZelda actor, never one this mod
+// spawned. So immediately before the original runs, if the actor currently attached to the horse
+// is ours, we briefly detach it (`setZeldaActor(nullptr)`) so `callHorseSubstance` takes its
+// normal path instead. This has no lasting effect: `daHoZelda_c::execute()` unconditionally
+// reattaches our Zelda to the horse (`horse->setZeldaActor(this)`) on every single tick anyway,
+// so by the very next frame she's back exactly where she was.
+DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);
+
+static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    fopAc_ac_c* currentZelda = horse->getZeldaActor();
+    if (s_hasSpawnedZelda && currentZelda != nullptr &&
+        (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+        horse->setZeldaActor(nullptr);
+    }
+    return HOOK_CONTINUE;
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
+    ModResult result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
+                         (int)result);
+        // Not fatal: the mod still works, just without the horse-call fix.
+    }
+
     mods::log::info("zelda_on_epona initialized");
     return MOD_OK;
 }
@@ -115,7 +153,20 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
-    find_spawned_zelda();
+    fopAc_ac_c* trackedZelda = find_spawned_zelda();
+
+    // Diagnostic: if our tracked actor is still alive but isn't the one currently attached to the
+    // horse, something else (the story, or another spawn we lost track of) has its own HoZelda
+    // riding at the same time as ours — i.e. exactly the "two overlapping Zelda models" bug. This
+    // should never happen given the checks below, but if it does, logging it (with both actors'
+    // IDs) is the best lead available for further diagnosis without being able to run the game.
+    fopAc_ac_c* attachedZelda = horse->getZeldaActor();
+    if (trackedZelda != nullptr && attachedZelda != nullptr && attachedZelda != trackedZelda) {
+        mods::log::warn(
+            "horse has HoZelda actor id {} attached, but our own HoZelda actor id {} is still "
+            "alive and unattached -- two Zelda actors may be visible at once",
+            (int)fopAcM_GetID(attachedZelda), (int)s_spawnedZeldaId);
+    }
 
     // Keep Zelda riding along on Epona at all times, even after Link dismounts: if nobody
     // (neither the story nor this mod) currently has her attached to the horse, spawn her.
@@ -155,6 +206,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
+    mods::hook::uninstall<HorseCallSubstance>();
     return MOD_OK;
 }
 }

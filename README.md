@@ -16,12 +16,13 @@ archery duel, where she rides alone) is never touched or duplicated.
 > the mod now clears that flag back off every tick while *its own* Zelda is riding, leaving it untouched whenever a
 > story-placed one is present (i.e. during the real duel, where dismounting and Midna should stay blocked as usual).
 >
-> The grass-whistle horse call is a separate story, though: the game's own horse-call logic special-cases *any*
-> moment where Zelda would be riding alone (which, under this mod, is most of the time once Link dismounts) by
-> triggering the scripted duel's arrival cutscene instead of Epona's normal gallop-to-player animation — which is
-> why you can hear Epona neigh but never see her actually arrive. That path isn't controlled by the flag above, so
-> it isn't fixed by this change; working around it would need hooking the game's horse-call function itself, which
-> hasn't been attempted yet given the risk already seen from other engine-timing issues (see below).
+> The grass-whistle horse call is fixed the same way: the game's own horse-call logic special-cases *any* moment
+> where Zelda would be riding alone (which, under this mod, is most of the time once Link dismounts) by triggering
+> the scripted duel's arrival cutscene instead of Epona's normal gallop-to-player animation — which is why you'd
+> hear Epona neigh but never see her actually arrive. The mod now hooks that horse-call function directly and briefly
+> detaches its own Zelda from the horse right before the call runs (she's reattached again by the very next tick, the
+> same way the flag above is), so the game takes its normal path instead. As with the flag fix, a story-placed
+> horseback Zelda is never touched, so the real duel's behavior is unaffected.
 >
 > Separately, enabling the mod while Epona is already loaded in the current scene was reported to cause a crash
 > (SIGABRT), and a related issue caused a black screen at boot. Both were traced to the same root cause: enabling
@@ -32,6 +33,15 @@ archery duel, where she rides alone) is never touched or duplicated.
 > happens a little into normal gameplay rather than during a loading screen, Zelda can visibly "pop in" onto an
 > already-visible Epona instead of appearing pre-mounted after a scene change; spawning her exactly in sync with a
 > scene transition instead is a possible future improvement.
+>
+> There have also been reports of two overlapping Zelda models appearing at once while riding, noticeably during a
+> horseback spin attack. A prior leaked-actor bug (an orphaned `HoZelda` actor left alive and un-deleted after the
+> horse it was riding disappeared) was found and fixed, but this issue has been reported as still persisting since.
+> No second in-engine mechanism that could explain a duplicate has been found through static analysis of the game's
+> source. The mod now also verifies its tracked actor by type (guarding against a stale `ActorId` being silently
+> recycled for an unrelated actor) and logs a warning if it ever detects a HoZelda actor attached to the horse that
+> isn't the one it's tracking — if this happens again, please share the mod's console/log output from around when
+> it occurs, which should help pin down the actual cause.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
