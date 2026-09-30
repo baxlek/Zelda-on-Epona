@@ -13,8 +13,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > The game normally treats *any* horseback-Zelda passenger as a sign that the scripted duel against Ganondorf is
 > underway, which blocks normal dismounting, breaks the grass-whistle horse call, and (since dismounting is
 > blocked) makes Wolf Link/Midna unreachable. An earlier version of this mod tried to clear that flag back off
-> automatically, but doing so was traced to a crash (black screen at boot, SIGABRT when enabling mid-game) and has
-> been reverted for now. Until a safe fix is found, expect those side effects while the mod is enabled.
+> automatically, but doing so was traced to a crash (black screen at boot) and has been reverted for now. Until a
+> safe fix is found, expect those side effects while the mod is enabled.
+>
+> Separately, enabling the mod mid-game (rather than at boot) has been reported to cause a crash (SIGABRT) even
+> with the flag-clearing code removed, and the exact cause hasn't been pinned down yet from source review alone.
+> If you hit this, please share any console/log output printed right before the crash (look for lines prefixed
+> with this mod's ID, e.g. `spawning HoZelda actor in room ...`) — that will help narrow down exactly which game
+> call is failing.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

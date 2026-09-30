@@ -46,12 +46,17 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
     params.angle = {horse->shape_angle.x, horse->shape_angle.y, horse->shape_angle.z};
     params.scale = {1.0f, 1.0f, 1.0f};
 
+    mods::log::info("spawning HoZelda actor in room {} at ({:.1f}, {:.1f}, {:.1f})", params.room_num,
+                     params.position.x, params.position.y, params.position.z);
+
     ActorId newId = 0;
     ModResult result = svc_actor->create_actor_from_name(mod_ctx, kHoZeldaStageName, &params, &newId);
     if (result != MOD_OK) {
         mods::log::warn("failed to spawn HoZelda actor: {}", (int)result);
         return;
     }
+
+    mods::log::info("spawned HoZelda actor id {}", newId);
 
     s_spawnedZeldaId = newId;
     s_hasSpawnedZelda = true;
@@ -77,8 +82,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     if (horse == nullptr) {
         // No horse actor is currently loaded (e.g. a different area, or before Epona is tamed).
-        // A HoZelda actor's lifetime is tied to the horse, so forget any stale tracked id.
-        s_hasSpawnedZelda = false;
+        // `daHoZelda_c` never deletes itself (it has no `is_delete` method), so if we don't
+        // explicitly delete the actor we spawned here it would keep existing and executing
+        // forever, orphaned from any horse. That leaked actor is a likely cause of the
+        // "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn
+        // a second HoZelda while the first, orphaned one is still alive and animating.
+        remove_spawned_zelda();
         return MOD_OK;
     }
 
