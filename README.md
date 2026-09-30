@@ -16,10 +16,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > automatically, but doing so was traced to a crash (black screen at boot) and has been reverted for now. Until a
 > safe fix is found, expect those side effects while the mod is enabled.
 >
-> Separately, enabling the mod mid-game (rather than at boot) has been reported to cause a crash (SIGABRT) even
-> with the flag-clearing code removed, and the exact cause hasn't been pinned down yet from source review alone.
-> If you hit this, please share any console/log output printed right before the crash (look for lines prefixed
-> with this mod's ID, e.g. `spawning HoZelda actor in room ...`) — that will help narrow down exactly which game
+> Separately, enabling the mod while Epona is already loaded in the current scene has been reported to cause a
+> crash (SIGABRT) — reliably reproducible, but not yet confirmed fixed since this couldn't be tested against the
+> actual game. The leading theory: enabling (or reloading) a mod applies "between frames," so the very first
+> `mod_update` tick after enabling can run outside the engine's normal per-frame actor loop, which may not be a
+> safe point to spawn a new actor from. The mod now waits ~30 frames after being enabled before attempting its
+> first spawn, so that spawn happens from an ordinary per-frame context instead. If this crash still happens after
+> this change, please share any console/log output printed right before it (look for lines prefixed with this
+> mod's ID, e.g. `spawning HoZelda actor in room ...`) — that will help narrow down exactly which game
 > call is failing.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)

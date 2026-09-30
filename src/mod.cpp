@@ -23,6 +23,19 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// Number of `mod_update` ticks to let pass before attempting our first actor spawn. Enabling (or
+// reloading) a mod applies "between frames" (see Dusklight's modding docs, Runtime Lifecycle), so
+// `mod_initialize`/the very first `mod_update` call can land at a point in the engine's frame
+// outside its normal per-frame actor loop. Calling `fopAcM_create` (which relies on per-frame
+// framework state, e.g. the "current layer" the process framework is iterating) from that point
+// is suspected to be the cause of a crash observed specifically when enabling the mod while Epona
+// is already loaded in the scene (i.e. whenever our very first `mod_update` call would otherwise
+// try to spawn immediately). Waiting a few ordinary frames first means our first spawn attempt
+// happens from a normal, well-defined point in the frame loop, same as every later spawn (e.g.
+// after a scene change) that does not crash.
+static const int kWarmupFrames = 30;
+static int s_framesSinceEnable = 0;
+
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -78,6 +91,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    // See `kWarmupFrames` above: skip actor-spawning logic entirely for the first several frames
+    // after enabling, so our first spawn attempt happens from a normal per-frame context rather
+    // than the "between frames" point where the mod was just enabled.
+    if (s_framesSinceEnable < kWarmupFrames) {
+        s_framesSinceEnable++;
+        return MOD_OK;
+    }
+
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
