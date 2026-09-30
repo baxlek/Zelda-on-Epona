@@ -27,23 +27,6 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
-// Number of `mod_update` ticks to let pass before attempting our first actor spawn. Enabling (or
-// reloading) a mod applies "between frames" (see Dusklight's modding docs, Runtime Lifecycle), so
-// `mod_initialize`/the very first `mod_update` call can land at a point in the engine's frame
-// outside its normal per-frame actor loop. Calling `fopAcM_create` (which relies on per-frame
-// framework state, e.g. the "current layer" the process framework is iterating) from that point
-// was suspected to be the cause of a crash observed specifically when enabling the mod while Epona
-// is already loaded in the scene (i.e. whenever our very first `mod_update` call would otherwise
-// try to spawn immediately).
-//
-// TESTING: set to 0 to confirm whether this delay is still needed now that `find_spawned_zelda()`
-// correctly handles an in-progress (not-yet-searchable) actor creation via `fpcM_IsCreating()` --
-// that fix, aimed at the "double Zelda" bug, also turned out to resolve this same SIGABRT, so the
-// warmup delay may have only ever been masking the same underlying issue. If the crash returns
-// with this at 0, restore a nonzero value (30 previously worked) and revert this note.
-static const int kWarmupFrames = 0;
-static int s_framesSinceEnable = 0;
-
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -82,17 +65,12 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
     params.angle = {horse->shape_angle.x, horse->shape_angle.y, horse->shape_angle.z};
     params.scale = {1.0f, 1.0f, 1.0f};
 
-    mods::log::info("spawning HoZelda actor in room {} at ({:.1f}, {:.1f}, {:.1f})", params.room_num,
-                     params.position.x, params.position.y, params.position.z);
-
     ActorId newId = 0;
     ModResult result = svc_actor->create_actor_from_name(mod_ctx, kHoZeldaStageName, &params, &newId);
     if (result != MOD_OK) {
         mods::log::warn("failed to spawn HoZelda actor: {}", (int)result);
         return;
     }
-
-    mods::log::info("spawned HoZelda actor id {}", newId);
 
     s_spawnedZeldaId = newId;
     s_hasSpawnedZelda = true;
@@ -147,14 +125,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    // See `kWarmupFrames` above: skip actor-spawning logic entirely for the first several frames
-    // after enabling, so our first spawn attempt happens from a normal per-frame context rather
-    // than the "between frames" point where the mod was just enabled.
-    if (s_framesSinceEnable < kWarmupFrames) {
-        s_framesSinceEnable++;
-        return MOD_OK;
-    }
-
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
