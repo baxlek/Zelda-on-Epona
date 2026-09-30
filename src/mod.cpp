@@ -1,6 +1,6 @@
 #include "mods/service.hpp"
-#include "mods/svc/actor.h"
 #include "mods/svc/hook.hpp"
+#include "mods/svc/actor.h"
 #include "mods/svc/log.hpp"
 
 // Game includes
@@ -13,9 +13,9 @@
 
 DEFINE_MOD();
 
-IMPORT_SERVICE(LogService, svc_log);
-IMPORT_SERVICE(ActorService, svc_actor);
 IMPORT_SERVICE(HookService, svc_hook);
+IMPORT_SERVICE(ActorService, svc_actor);
+IMPORT_SERVICE(LogService, svc_log);
 
 // The stage name used by the game to load the horseback-Zelda actor (see `d_stage.cpp`'s
 // OBJNAME table: OBJNAME("HoZelda", fpcNm_HOZELDA_e, -1)).
