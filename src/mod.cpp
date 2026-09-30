@@ -5,6 +5,7 @@
 // Game includes
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
+#include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 
@@ -125,6 +126,28 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // dual-ride animation blending, and the solo idle animation.
     if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         spawn_zelda_on_horse(horse);
+    }
+
+    // `daHoZelda_c::setMatrix()` unconditionally calls `onHorseZelda()` every tick whenever any
+    // HoZelda actor rides the current horse, marking Link's `FLG2_HORSE_ZELDA` player flag. The
+    // game uses that flag to recognize the scripted horseback duel against Ganondorf, and while
+    // it is set, several ordinary systems are deliberately disabled for the duration of that
+    // fight: dismounting (`checkSpecialHorseRide()` in `daAlink_c::checkHorseGetOffAndSetDoStatus`
+    // suppresses `BUTTON_STATUS_DISMOUNT`) and talking to/checking in with Midna
+    // (`daAlink_c::orderZTalk()` bails out early whenever `checkHorseZelda()` is true).
+    //
+    // Outside of that real story duel, this mod is the only thing keeping Zelda mounted, so we
+    // clear the flag right back every tick that our own actor (never a story-placed one) is the
+    // rider: since `setMatrix()` re-asserts it once per frame too, this turns into a one-flag
+    // tug-of-war that is won by whichever side runs last before the player's own logic reads it,
+    // but because we clear it every single tick, the flag is never left set for more than the
+    // single frame in which `daHoZelda_c` re-asserts it, and it is always false again by the time
+    // the player's dismount/Midna checks run on the next tick. A real scripted duel always places
+    // its own HoZelda actor (never ours), so this never touches the flag during the actual fight.
+    fopAc_ac_c* currentZelda = horse->getZeldaActor();
+    if (s_hasSpawnedZelda && currentZelda != nullptr &&
+        (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+        daPy_getLinkPlayerActorClass()->offHorseZelda();
     }
 
     return MOD_OK;

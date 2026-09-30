@@ -11,20 +11,27 @@ archery duel, where she rides alone) is never touched or duplicated.
 
 > [!NOTE]
 > The game normally treats *any* horseback-Zelda passenger as a sign that the scripted duel against Ganondorf is
-> underway, which blocks normal dismounting, breaks the grass-whistle horse call, and (since dismounting is
-> blocked) makes Wolf Link/Midna unreachable. An earlier version of this mod tried to clear that flag back off
-> automatically, but doing so was traced to a crash (black screen at boot) and has been reverted for now. Until a
-> safe fix is found, expect those side effects while the mod is enabled.
+> underway (Link's `FLG2_HORSE_ZELDA` player flag), which blocks normal dismounting and makes Wolf Link/Midna
+> unreachable. Since the actual duel always places its own horseback-Zelda actor (never the one this mod spawns),
+> the mod now clears that flag back off every tick while *its own* Zelda is riding, leaving it untouched whenever a
+> story-placed one is present (i.e. during the real duel, where dismounting and Midna should stay blocked as usual).
 >
-> Separately, enabling the mod while Epona is already loaded in the current scene has been reported to cause a
-> crash (SIGABRT) — reliably reproducible, but not yet confirmed fixed since this couldn't be tested against the
-> actual game. The leading theory: enabling (or reloading) a mod applies "between frames," so the very first
-> `mod_update` tick after enabling can run outside the engine's normal per-frame actor loop, which may not be a
-> safe point to spawn a new actor from. The mod now waits ~30 frames after being enabled before attempting its
-> first spawn, so that spawn happens from an ordinary per-frame context instead. If this crash still happens after
-> this change, please share any console/log output printed right before it (look for lines prefixed with this
-> mod's ID, e.g. `spawning HoZelda actor in room ...`) — that will help narrow down exactly which game
-> call is failing.
+> The grass-whistle horse call is a separate story, though: the game's own horse-call logic special-cases *any*
+> moment where Zelda would be riding alone (which, under this mod, is most of the time once Link dismounts) by
+> triggering the scripted duel's arrival cutscene instead of Epona's normal gallop-to-player animation — which is
+> why you can hear Epona neigh but never see her actually arrive. That path isn't controlled by the flag above, so
+> it isn't fixed by this change; working around it would need hooking the game's horse-call function itself, which
+> hasn't been attempted yet given the risk already seen from other engine-timing issues (see below).
+>
+> Separately, enabling the mod while Epona is already loaded in the current scene was reported to cause a crash
+> (SIGABRT), and a related issue caused a black screen at boot. Both were traced to the same root cause: enabling
+> (or reloading) a mod applies "between frames," so the very first `mod_update` tick after enabling can run outside
+> the engine's normal per-frame actor loop, which isn't a safe point to spawn a new actor from. The mod now waits
+> ~30 frames after being enabled before attempting its first spawn, so that spawn happens from an ordinary
+> per-frame context instead — this has been confirmed fixed. One remaining rough edge: since that first spawn now
+> happens a little into normal gameplay rather than during a loading screen, Zelda can visibly "pop in" onto an
+> already-visible Epona instead of appearing pre-mounted after a scene change; spawning her exactly in sync with a
+> scene transition instead is a possible future improvement.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
