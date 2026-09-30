@@ -1,18 +1,59 @@
-# Dusklight Mod Template
+# Zelda on Epona
 
-A standalone template for [Dusklight](https://github.com/TwilitRealm/dusklight) mods.
+A [Dusklight](https://github.com/TwilitRealm/dusklight) mod that keeps Zelda riding along on Epona at all times 
+while the mod is enabled, just like she does during the game's scripted final battle horseback sequences.
+
+Whenever Epona is present and no horseback-Zelda passenger already exists (e.g. from a story cutscene), the mod
+spawns one so she stays on the saddle. She remains there even after Link dismounts, sitting alone up front just as
+the game's own horseback-Zelda actor already supports; any story-placed horseback Zelda (such as the horseback
+archery duel, where she rides alone) is never touched or duplicated.
+
+> [!NOTE]
+> The game normally treats *any* horseback-Zelda passenger as a sign that the scripted duel against Ganondorf is
+> underway (Link's `FLG2_HORSE_ZELDA` player flag), which blocks normal dismounting and makes Wolf Link/Midna
+> unreachable. Since the actual duel always places its own horseback-Zelda actor (never the one this mod spawns),
+> the mod now clears that flag back off every tick while *its own* Zelda is riding, leaving it untouched whenever a
+> story-placed one is present (i.e. during the real duel, where dismounting and Midna should stay blocked as usual).
+>
+> The grass-whistle horse call is fixed the same way: the game's own horse-call logic special-cases *any* moment
+> where Zelda would be riding alone (which, under this mod, is most of the time once Link dismounts) by triggering
+> the scripted duel's arrival cutscene instead of Epona's normal gallop-to-player animation — which is why you'd
+> hear Epona neigh but never see her actually arrive. The mod now hooks that horse-call function directly and briefly
+> detaches its own Zelda from the horse right before the call runs (she's reattached again by the very next tick, the
+> same way the flag above is), so the game takes its normal path instead. As with the flag fix, a story-placed
+> horseback Zelda is never touched, so the real duel's behavior is unaffected.
+>
+> Separately, enabling the mod while Epona is already loaded in the current scene was previously reported to cause a
+> crash (SIGABRT), and a related issue caused a black screen at boot. Both were originally worked around with a ~30
+> frame warmup delay before the mod's first actor spawn, based on a "between frames" theory (enabling/reloading a mod
+> can land the very first `mod_update` tick outside the engine's normal per-frame actor loop). Once the "double
+> Zelda" root cause below was fixed, this same SIGABRT (enabling the mod while already riding Epona) stopped
+> reproducing even with the warmup delay removed entirely, confirming the delay had only ever been masking that same
+> underlying actor-creation-in-progress issue rather than a distinct "between frames" problem. The delay has since
+> been removed, so Zelda now spawns on the very first `mod_update` tick after enabling instead of a little into
+> normal gameplay.
+>
+> There have also been reports of two overlapping Zelda models appearing at once while riding. Debug logging confirmed
+> the mod itself was spawning two separate `HoZelda` actors back-to-back, a couple of frames apart, every single time
+> its spawn condition fired. The root cause: actor creation (`fopAcM_create`) isn't instantaneous — the new actor sits
+> in the engine's internal "create queue" for a frame or more (e.g. while its resources load) before it's fully
+> created, and while that's happening, the engine's own actor lookup (`fopAcM_SearchByID`) reports it as "not found,"
+> even though it isn't actually gone yet. The mod used to treat that as "our spawned Zelda disappeared," giving up on
+> it and immediately spawning a second one while the first was still mid-creation. The mod now checks whether its
+> tracked actor is still being created (`fpcM_IsCreating`) before concluding it's gone, so it no longer spawns a
+> duplicate while the first is still in flight — this has been confirmed fixed via log analysis, but please report
+> back if it's still reproducible in-game.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
 
 ## Quick start
 
-1. Click "Use this template" to create a new repository for your mod.
-2. Edit `mod.json.in`: set your mod's `id` (reverse-DNS style, e.g. `com.example.my_mod`),
+1. Edit `mod.json.in`: set your mod's `id` (reverse-DNS style, e.g. `com.example.my_mod`),
    `name`, `author`, and `description`.
-3. Rename the target in `CMakeLists.txt` (`add_mod(my_mod ...)`) (this names the `.dusk` file).
-4. Write your mod in `src/mod.cpp`.
-5. Build locally:
+2. Rename the target in `CMakeLists.txt` (`add_mod(zelda_on_epona ...)`) (this names the `.dusk` file).
+3. Write your mod in `src/mod.cpp`.
+4. Build locally:
    ```sh
    cmake -B build
    cmake --build build
