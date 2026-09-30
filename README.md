@@ -34,14 +34,16 @@ archery duel, where she rides alone) is never touched or duplicated.
 > already-visible Epona instead of appearing pre-mounted after a scene change; spawning her exactly in sync with a
 > scene transition instead is a possible future improvement.
 >
-> There have also been reports of two overlapping Zelda models appearing at once while riding, noticeably during a
-> horseback spin attack. A prior leaked-actor bug (an orphaned `HoZelda` actor left alive and un-deleted after the
-> horse it was riding disappeared) was found and fixed, but this issue has been reported as still persisting since.
-> No second in-engine mechanism that could explain a duplicate has been found through static analysis of the game's
-> source. The mod now also verifies its tracked actor by type (guarding against a stale `ActorId` being silently
-> recycled for an unrelated actor) and logs a warning if it ever detects a HoZelda actor attached to the horse that
-> isn't the one it's tracking — if this happens again, please share the mod's console/log output from around when
-> it occurs, which should help pin down the actual cause.
+> There have also been reports of two overlapping Zelda models appearing at once while riding. Debug logging confirmed
+> the mod itself was spawning two separate `HoZelda` actors back-to-back, a couple of frames apart, every single time
+> its spawn condition fired. The root cause: actor creation (`fopAcM_create`) isn't instantaneous — the new actor sits
+> in the engine's internal "create queue" for a frame or more (e.g. while its resources load) before it's fully
+> created, and while that's happening, the engine's own actor lookup (`fopAcM_SearchByID`) reports it as "not found,"
+> even though it isn't actually gone yet. The mod used to treat that as "our spawned Zelda disappeared," giving up on
+> it and immediately spawning a second one while the first was still mid-creation. The mod now checks whether its
+> tracked actor is still being created (`fpcM_IsCreating`) before concluding it's gone, so it no longer spawns a
+> duplicate while the first is still in flight — this has been confirmed fixed via log analysis, but please report
+> back if it's still reproducible in-game.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

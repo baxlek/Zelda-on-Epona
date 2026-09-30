@@ -9,6 +9,7 @@
 #include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
+#include "f_pc/f_pc_manager.h"
 
 DEFINE_MOD();
 
@@ -41,6 +42,18 @@ static int s_framesSinceEnable = 0;
 
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
+        return nullptr;
+    }
+
+    // Actor creation (`fopAcM_create`/`fpcSCtRq_Request`) is a multi-phase request that can take
+    // more than one frame to complete (e.g. resource loading), during which the new actor sits in
+    // the engine's "create queue" rather than its normal execute queue. While that's happening,
+    // `fopAcM_SearchByID` reports "not found" (a null actor, but still a success return) even
+    // though the actor we spawned is still on its way and hasn't actually disappeared. Treating
+    // that as "the actor is gone" made us give up tracking it and spawn a second HoZelda while the
+    // first spawn request was still in flight, producing two overlapping HoZelda actors (the
+    // "double Zelda" bug). `fpcM_IsCreating` lets us tell the two cases apart.
+    if (fpcM_IsCreating((fpc_ProcID)s_spawnedZeldaId)) {
         return nullptr;
     }
 
