@@ -5,7 +5,6 @@
 // Game includes
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
-#include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 
@@ -74,16 +73,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    // Only manage Zelda during real gameplay: `daPy_getLinkPlayerActorClass()` returns the
-    // registered "Link player" actor (set up once a real game/field session creates Link), and
-    // is null outside of that (e.g. the title screen attract-mode demo). Skipping everything in
-    // that case avoids spawning a second HoZelda actor into scripted, non-playable sequences and
-    // avoids ever touching the player actor pointer when it isn't valid.
-    daPy_py_c* linkPlayer = daPy_getLinkPlayerActorClass();
-    if (linkPlayer == nullptr) {
-        return MOD_OK;
-    }
-
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
@@ -95,7 +84,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
-    fopAc_ac_c* spawned = find_spawned_zelda();
+    find_spawned_zelda();
 
     // Keep Zelda riding along on Epona at all times, even after Link dismounts: if nobody
     // (neither the story nor this mod) currently has her attached to the horse, spawn her.
@@ -106,19 +95,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // dual-ride animation blending, and the solo idle animation.
     if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         spawn_zelda_on_horse(horse);
-        spawned = find_spawned_zelda();
-    }
-
-    // `daHoZelda_c::setMatrix()` runs every frame a HoZelda actor is attached to a horse, and
-    // unconditionally marks the player with `daPy_py_c::onHorseZelda()` (FLG2_HORSE_ZELDA). That
-    // flag is meant to gate the scripted horseback duel against Ganondorf: it blocks the normal
-    // dismount action, diverts the grass-whistle horse call into a duel-only demo instead of the
-    // usual "gallop to player" sequence, and (since dismounting is blocked) prevents reaching
-    // Wolf Link/Midna. Clear the flag back off every frame it is *our* spawned Zelda causing it,
-    // restoring normal dismounting, horse-calling, and Midna access, while leaving a real
-    // story-placed HoZelda actor (the actual duel) untouched.
-    if (spawned != nullptr && horse->getZeldaActor() == reinterpret_cast<daHoZelda_c*>(spawned)) {
-        linkPlayer->offHorseZelda();
     }
 
     return MOD_OK;
