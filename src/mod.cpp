@@ -32,12 +32,16 @@ static bool s_hasSpawnedZelda = false;
 // `mod_initialize`/the very first `mod_update` call can land at a point in the engine's frame
 // outside its normal per-frame actor loop. Calling `fopAcM_create` (which relies on per-frame
 // framework state, e.g. the "current layer" the process framework is iterating) from that point
-// is suspected to be the cause of a crash observed specifically when enabling the mod while Epona
+// was suspected to be the cause of a crash observed specifically when enabling the mod while Epona
 // is already loaded in the scene (i.e. whenever our very first `mod_update` call would otherwise
-// try to spawn immediately). Waiting a few ordinary frames first means our first spawn attempt
-// happens from a normal, well-defined point in the frame loop, same as every later spawn (e.g.
-// after a scene change) that does not crash.
-static const int kWarmupFrames = 30;
+// try to spawn immediately).
+//
+// TESTING: set to 0 to confirm whether this delay is still needed now that `find_spawned_zelda()`
+// correctly handles an in-progress (not-yet-searchable) actor creation via `fpcM_IsCreating()` --
+// that fix, aimed at the "double Zelda" bug, also turned out to resolve this same SIGABRT, so the
+// warmup delay may have only ever been masking the same underlying issue. If the crash returns
+// with this at 0, restore a nonzero value (30 previously worked) and revert this note.
+static const int kWarmupFrames = 0;
 static int s_framesSinceEnable = 0;
 
 static fopAc_ac_c* find_spawned_zelda() {

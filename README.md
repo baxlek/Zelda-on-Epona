@@ -25,14 +25,19 @@ archery duel, where she rides alone) is never touched or duplicated.
 > horseback Zelda is never touched, so the real duel's behavior is unaffected.
 >
 > Separately, enabling the mod while Epona is already loaded in the current scene was reported to cause a crash
-> (SIGABRT), and a related issue caused a black screen at boot. Both were traced to the same root cause: enabling
-> (or reloading) a mod applies "between frames," so the very first `mod_update` tick after enabling can run outside
-> the engine's normal per-frame actor loop, which isn't a safe point to spawn a new actor from. The mod now waits
-> ~30 frames after being enabled before attempting its first spawn, so that spawn happens from an ordinary
-> per-frame context instead — this has been confirmed fixed. One remaining rough edge: since that first spawn now
-> happens a little into normal gameplay rather than during a loading screen, Zelda can visibly "pop in" onto an
-> already-visible Epona instead of appearing pre-mounted after a scene change; spawning her exactly in sync with a
-> scene transition instead is a possible future improvement.
+> (SIGABRT), and a related issue caused a black screen at boot. Both were originally traced to a "between frames"
+> theory: enabling (or reloading) a mod applies "between frames," so the very first `mod_update` tick after enabling
+> can run outside the engine's normal per-frame actor loop, which wasn't thought to be a safe point to spawn a new
+> actor from. A ~30 frame warmup delay before the first spawn was added as a fix for this, and confirmed to work.
+> However, once the "double Zelda" root cause above was separately fixed, this same SIGABRT (enabling the mod while
+> already riding Epona) also stopped reproducing — suggesting the warmup delay may have only ever been masking that
+> same underlying actor-creation-in-progress issue, not a distinct "between frames" problem. The warmup delay is
+> currently set to 0 frames (`kWarmupFrames` in `src/mod.cpp`) to test this; if the crash returns, a nonzero delay
+> (30 previously worked) should be restored.
+>
+> A separate rough edge: since the first spawn can now happen a little into normal gameplay rather than during a
+> loading screen, Zelda can visibly "pop in" onto an already-visible Epona instead of appearing pre-mounted after a
+> scene change; spawning her exactly in sync with a scene transition instead is a possible future improvement.
 >
 > There have also been reports of two overlapping Zelda models appearing at once while riding. Debug logging confirmed
 > the mod itself was spawning two separate `HoZelda` actors back-to-back, a couple of frames apart, every single time
