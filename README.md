@@ -1,12 +1,13 @@
 # Zelda on Epona
 
 A [Dusklight](https://github.com/TwilitRealm/dusklight) mod for The Legend of Zelda: Twilight Princess that keeps
-Zelda riding along on Epona with Link all the time, just like she does during the game's scripted final battle
-horseback sequences.
+Zelda riding along on Epona at all times while the mod is enabled, just like she does during the game's scripted
+final battle horseback sequences.
 
-Whenever Link mounts Epona and no horseback-Zelda passenger is already present (e.g. from a story cutscene), the mod
-spawns one so she rides double with Link. Dismounting removes the passenger this mod added; any story-placed
-horseback Zelda (such as the horseback archery duel, where she rides alone) is never touched.
+Whenever Epona is present and no horseback-Zelda passenger already exists (e.g. from a story cutscene), the mod
+spawns one so she stays on the saddle. She remains there even after Link dismounts, sitting alone up front just as
+the game's own horseback-Zelda actor already supports; any story-placed horseback Zelda (such as the horseback
+archery duel, where she rides alone) is never touched or duplicated.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

@@ -5,7 +5,6 @@
 // Game includes
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
-#include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 
@@ -74,33 +73,26 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    daPy_py_c* player = daPy_getPlayerActorClass();
     daHorse_c* horse = dComIfGp_getHorseActor();
 
-    if (player == nullptr || horse == nullptr) {
-        // No horse actor exists at all (e.g. still on the title/file-select screens). If we
-        // previously spawned a passenger, its horse is long gone, so forget about it.
+    if (horse == nullptr) {
+        // No horse actor is currently loaded (e.g. a different area, or before Epona is tamed).
+        // A HoZelda actor's lifetime is tied to the horse, so forget any stale tracked id.
         s_hasSpawnedZelda = false;
         return MOD_OK;
     }
 
-    bool riding = player->checkHorseRide();
-    fopAc_ac_c* ourZelda = find_spawned_zelda();
+    // Refresh whether the actor we previously spawned is still alive (it may have been deleted
+    // by the game for reasons outside our control, e.g. a scene change).
+    find_spawned_zelda();
 
-    if (!riding) {
-        // Link dismounted: remove the passenger we added, if any. A vanilla HoZelda actor
-        // (e.g. the horseback archery duel where Zelda rides alone) is never touched here,
-        // since we only track actors created by `spawn_zelda_on_horse`.
-        if (ourZelda != nullptr) {
-            remove_spawned_zelda();
-        }
-        return MOD_OK;
-    }
-
-    // Link is riding Epona. If nobody (neither the story nor this mod) currently has Zelda
-    // riding along, spawn her. `daHoZelda_c::execute()` attaches itself to the current horse
-    // every tick (`horse->setZeldaActor(this)`), so once created it takes care of the rest:
-    // reins, dual-ride animation blending, etc.
+    // Keep Zelda riding along on Epona at all times, even after Link dismounts: if nobody
+    // (neither the story nor this mod) currently has her attached to the horse, spawn her.
+    // `daHoZelda_c::execute()` attaches itself to the current horse every tick
+    // (`horse->setZeldaActor(this)`), and `daHoZelda_c::setMatrix()`/`setRideOffset()`/`setAnm()`
+    // already support her sitting alone at the front of the saddle whenever Link isn't riding
+    // (the `mIsSingleRide` case), so once created it takes care of the rest on its own: reins,
+    // dual-ride animation blending, and the solo idle animation.
     if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         spawn_zelda_on_horse(horse);
     }
