@@ -1,0 +1,17 @@
+15:52:43.668 [INFO] [com.example.zelda_on_epona] found 'Zelda on Epona' v1.0.0 by You (/data/data/dev.twilitrealm.dusk/files/mods/zelda_on_epona.dusk)
+15:52:44.035 [INFO] [com.example.zelda_on_epona] activating mod
+15:52:44.035 [TRACE] [com.example.zelda_on_epona] calling mod_initialize
+15:52:44.036 [INFO] [com.example.zelda_on_epona] zelda_on_epona initialized
+15:52:44.036 [TRACE] [com.example.zelda_on_epona] mod_initialize succeeded
+15:52:46.470 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 0 at (-9704.9, 129.8, -81.6)
+15:52:46.470 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 48
+15:52:46.503 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 0 at (-9704.9, 129.8, -81.6)
+15:52:46.503 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 49
+15:53:27.038 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 6 at (-48227.2, -9504.3, 53544.3)
+15:53:27.038 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 266
+15:53:27.071 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 6 at (-48227.2, -9504.3, 53544.3)
+15:53:27.071 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 267
+15:53:37.337 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 16 at (-49600.0, -7564.5, 42750.0)
+15:53:37.337 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 565
+15:53:37.370 [INFO] [com.example.zelda_on_epona] spawning HoZelda actor in room 16 at (-49600.0, -7564.5, 42750.0)
+15:53:37.370 [INFO] [com.example.zelda_on_epona] spawned HoZelda actor id 566
