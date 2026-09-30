@@ -1,8 +1,7 @@
 # Zelda on Epona
 
-A [Dusklight](https://github.com/TwilitRealm/dusklight) mod for The Legend of Zelda: Twilight Princess that keeps
-Zelda riding along on Epona at all times while the mod is enabled, just like she does during the game's scripted
-final battle horseback sequences.
+A [Dusklight](https://github.com/TwilitRealm/dusklight) mod that keeps Zelda riding along on Epona at all times 
+while the mod is enabled, just like she does during the game's scripted final battle horseback sequences.
 
 Whenever Epona is present and no horseback-Zelda passenger already exists (e.g. from a story cutscene), the mod
 spawns one so she stays on the saddle. She remains there even after Link dismounts, sitting alone up front just as
