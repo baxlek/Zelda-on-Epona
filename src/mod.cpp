@@ -132,13 +132,28 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // `daAlink_c::setSyncHorsePos()` (`d_a_alink_horse.inc`) never uses the raw root matrix for
 // Link's own rotation while riding either.
 //
-// That same vanilla code gives the correct recipe instead: while Link needs to react to Epona's
-// actual pose (running/turning/rearing), it derives his angle from the *saddle* joint's matrix
-// (`getSaddleMtx()`, `m_model->getAnmMtx(21)`) via `mDoMtx_MtxToRot()`, with a fixed, known
-// -0x4000 (-90 degree) correction on the resulting Z angle to account for that joint's own bind
-// pose. Mirroring that exact technique for Zelda (instead of copying the possibly-stale
-// `shape_angle`) makes her track Epona's true rendered orientation -- including rearing up --
-// in cutscenes and ordinary gameplay alike.
+// That same vanilla code gives the correct recipe instead: while Link's own ride-sync is actively
+// tracking Epona's pose (`daAlink_c::setSyncHorsePos()`, running/turning/crouching), it derives
+// BOTH his position and his angle from the *saddle* joint's matrix (`getSaddleMtx()`,
+// `m_model->getAnmMtx(21)`) -- position via a plain point transform (`mDoMtx_multVec()`) of his
+// local seat offset, and angle via `mDoMtx_MtxToRot()` with a fixed, known -0x4000 (-90 degree)
+// correction on the resulting Z angle to account for that joint's own bind pose. Crucially, it
+// always derives position and angle from the *same* joint together, never mixing one joint's
+// position with another joint's angle.
+//
+// Mirroring that exact technique for Zelda -- deriving *both* her position and her angle from
+// `getSaddleMtx()`, instead of the original's root-joint position paired with the possibly-stale
+// `shape_angle` -- makes her track Epona's true rendered pose, including rearing up, in cutscenes
+// and ordinary gameplay alike, without ever letting position and angle disagree about which
+// joint's pose they're describing. Two earlier attempts broke that rule and both regressed as a
+// result: deriving the angle from the saddle joint while leaving position on the original's root
+// joint caused Zelda to sink into Epona's model while rearing (root and saddle rotate
+// independently enough in that extreme pose for the mismatch to become visible); re-anchoring
+// position to the root joint's translation while only re-orienting the local offset using the
+// saddle-derived angle caused her to float next to Epona instead (root's own rotation submatrix
+// carries its own bind-pose twist that the offset was never calibrated against). Deriving both
+// from the saddle joint together sidesteps both problems, since there is then only ever one joint
+// in play.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is (it's the one case this engine code was originally written for), so it's left
@@ -156,38 +171,28 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    // By this point the original (unhooked) `setMatrix()` has already run and computed
-    // `zelda->current.pos` by multiplying her local seat offset through `horse->getRootMtx()`
-    // (joint 0) -- a self-consistent calculation that has never been reported wrong, in any
-    // situation, including rearing, being led by Link, or being ridden by a bulblin. It's left
-    // completely untouched here.
-    //
-    // An earlier version of this fix instead re-derived position from scratch (root translation
-    // plus the local offset re-rotated by the corrected angle below), reasoning that position and
-    // rotation needed to come from the same consistent frame. That was wrong: the root joint's
-    // rotation submatrix (as used by the original position calculation) is not a plain
-    // `ZXYrotM`-style rotation -- it carries its own fixed, joint-local bind-pose twist (the same
-    // reason a first, even earlier attempt that substituted that submatrix wholesale for Zelda's
-    // *rotation* produced a constant ~90 degree orientation error in every situation). The local
-    // seat offset constants are calibrated specifically for that twisted basis, since that's
-    // exactly what the original function always multiplied them through. Re-rotating them with the
-    // corrected, non-twisted angle (below) instead pointed the offset in a different direction
-    // than the original calculation intended, moving Zelda away from Epona's actual surface --
-    // visible as her floating next to Epona rather than sitting on her, most noticeably whenever
-    // root and saddle diverge a lot, such as while rearing.
-    //
-    // So the position half of this bug plainly never existed: only the *rotation* used to draw
-    // Zelda's mesh needs fixing (replacing the possibly-stale `shape_angle` with a corrected angle
-    // derived from the saddle joint's actual rendered matrix), applied at this same,
-    // already-correct position.
+    // Re-derive both position and angle from the saddle joint together (see the explanatory
+    // comment above `DEFINE_HOOK` for why both must come from the same joint). This replaces the
+    // original (unhooked) `setMatrix()`'s own position calculation -- which multiplies the local
+    // seat offset through `horse->getRootMtx()` instead -- entirely, rather than layering a
+    // correction on top of it, so there's only ever one joint's pose in play for both values.
+    static const Vec localHorseRidePos = {-5.894f, 52.61f, 4.079f};
+    static const Vec localFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
+    const Vec* local_pos = daPy_getLinkPlayerActorClass()->checkHorseRide() ? &localHorseRidePos
+                                                                             : &localFrontHorseRidePos;
+
     csXyz rot;
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
 
+    cXyz pos;
+    mDoMtx_multVec(horse->getSaddleMtx(), local_pos, &pos);
+
+    zelda->current.pos = pos;
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
 
-    mDoMtx_stack_c::transS(zelda->current.pos);
+    mDoMtx_stack_c::transS(pos);
     mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }

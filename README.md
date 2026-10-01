@@ -71,10 +71,17 @@ archery duel, where she rides alone) is never touched or duplicated.
 > twist that made substituting it wholesale for Zelda's *rotation* produce the original constant ~90 degree error.
 > Zelda's seat offsets are calibrated specifically for that twisted root rotation, since that's exactly what the
 > original, unmodified function always multiplies them through — re-rotating them with the "clean" corrected angle
-> instead pointed the offset in a different direction than intended, most noticeably whenever root and saddle
-> diverge a lot, such as while rearing. The position half of this bug never actually existed: the mod now leaves
-> `current.pos` completely untouched, exactly as the original, unmodified function computes it, and only replaces
-> the rotation used to draw Zelda's mesh at that same, already-correct position.
+> instead pointed the offset in a different direction than intended.
+>
+> A third attempt tried leaving `current.pos` completely untouched (exactly as the original, unmodified function
+> computes it from the root joint) and only replacing the rotation used to draw Zelda's mesh — but that just
+> reintroduced the second problem (sinking while rearing), since position and rotation were once again being
+> derived from two different joints (root for position, saddle for rotation) that only agree while standing still.
+> The mod now derives *both* position and rotation from the saddle joint together, the same way
+> `daAlink_c::setSyncHorsePos()` derives Link's own position and angle together from that joint whenever it's
+> actively tracking Epona's pose — position via a plain point transform of the local seat offset through
+> `getSaddleMtx()`, and angle the same way as before. Keeping both values tied to one single joint's pose rules out
+> any possibility of position and rotation disagreeing with each other, in any pose, including rearing.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
