@@ -57,6 +57,17 @@ archery duel, where she rides alone) is never touched or duplicated.
 > track Epona's true rendered orientation — including rearing up — in both cutscenes and ordinary gameplay, and only
 > affects the mod's own spawned Zelda; the duel's story-placed one is untouched.
 >
+> That orientation fix initially introduced a new problem: Zelda would sink into Epona's model while rearing up, but
+> only in her dual-ride "rear" seat (sitting behind Link), never in her single-rider "actual saddle" seat, nor in
+> other cutscenes where root and saddle diverge a lot, such as Epona being led by Link or ridden by a bulblin. That's
+> because that attempt also re-derived Zelda's *position* from the saddle joint — but her seat offsets were never
+> calibrated against the saddle joint; they're multiplied through the *root* joint in the original, unmodified
+> function, which is exactly why the root-based position was already correct in every one of those other cases.
+> Moving the anchor point to the saddle joint's own translation put it in the wrong place; it only became noticeable
+> in an extreme pose like rearing. The mod now keeps the anchor point exactly as the original function computes it
+> (from the root joint), and only re-expresses the *direction* of the local seat offset using the corrected rotation
+> above, keeping Zelda's seat glued to Epona's actual surface without disturbing the anchor point itself.
+>
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
 > any horseback-Zelda. With this mod keeping Zelda riding at all times, she now ends up sharing the saddle with it.
