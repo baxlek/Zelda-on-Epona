@@ -48,40 +48,24 @@ archery duel, where she rides alone) is never touched or duplicated.
 > leaning back when Epona reared up — during some story cutscenes. `daHoZelda_c::setMatrix()` orients her by copying
 > Epona's separate, logical heading field (`shape_angle`) wholesale; that field is normally kept in lockstep with
 > Epona's own rendered pose, but scripted cutscenes that move Epona via demo data don't always keep it in sync, since
-> vanilla never needed it to be there (only the real duel ever has a horseback-Zelda riding along). An earlier fix
-> attempt substituted Epona's root joint matrix wholesale instead, which made things worse (a constant ~90 degree
-> orientation error in every situation, not just cutscenes) because that joint's bind pose uses a different basis
-> than the logical heading convention. The mod now uses the same technique the game itself already uses for Link's
-> own rotation while riding (`daAlink_c::setSyncHorsePos()`): deriving the angle from Epona's *saddle* joint's actual
-> rendered matrix, with the same fixed correction that code applies for that joint's bind pose. This makes Zelda
-> track Epona's true rendered orientation — including rearing up — in both cutscenes and ordinary gameplay, and only
-> affects the mod's own spawned Zelda; the duel's story-placed one is untouched.
+> vanilla never needed it to be there (only the real duel ever has a horseback-Zelda riding along) — leaving
+> `shape_angle` stale while Epona's actual animated pose (including rearing up) keeps changing underneath it.
 >
-> That orientation fix initially introduced a new problem: Zelda would sink into Epona's model while rearing up, but
-> only in her dual-ride "rear" seat (sitting behind Link), never in her single-rider "actual saddle" seat, nor in
-> other cutscenes where root and saddle diverge a lot, such as Epona being led by Link or ridden by a bulblin. That's
-> because that attempt also re-derived Zelda's *position* from the saddle joint — but her seat offsets were never
-> calibrated against the saddle joint; they're multiplied through the *root* joint in the original, unmodified
-> function, which is exactly why the root-based position was already correct in every one of those other cases.
+> Several earlier attempts at fixing this by instead *decomposing* a joint matrix into Euler angles (with some fixed
+> correction for that joint's own bind-pose twist, the same technique `daAlink_c::setSyncHorsePos()` uses for Link's
+> own rotation while riding) all regressed in one way or another — a constant ~90 degree orientation error, sinking
+> into Epona's model while rearing, floating next to her instead, or ending up noticeably off her normal seat even
+> outside of rearing — because any approach that recomputes position and rotation from *different* sources (or from
+> a different joint than the one her seat offsets were originally calibrated against) risks the two disagreeing with
+> each other in extreme poses, or shifting her seat outright.
 >
-> A follow-up attempt to fix that kept the anchor point at the root joint's translation, but still re-rotated the
-> local seat offset using the corrected, saddle-derived angle — which introduced a third problem: Zelda floating in
-> midair next to Epona, offset from her normal seat, again specifically while rearing. That's because the root
-> joint's rotation isn't a plain, "clean" rotation either — it carries the same kind of fixed, joint-local bind-pose
-> twist that made substituting it wholesale for Zelda's *rotation* produce the original constant ~90 degree error.
-> Zelda's seat offsets are calibrated specifically for that twisted root rotation, since that's exactly what the
-> original, unmodified function always multiplies them through — re-rotating them with the "clean" corrected angle
-> instead pointed the offset in a different direction than intended.
->
-> A third attempt tried leaving `current.pos` completely untouched (exactly as the original, unmodified function
-> computes it from the root joint) and only replacing the rotation used to draw Zelda's mesh — but that just
-> reintroduced the second problem (sinking while rearing), since position and rotation were once again being
-> derived from two different joints (root for position, saddle for rotation) that only agree while standing still.
-> The mod now derives *both* position and rotation from the saddle joint together, the same way
-> `daAlink_c::setSyncHorsePos()` derives Link's own position and angle together from that joint whenever it's
-> actively tracking Epona's pose — position via a plain point transform of the local seat offset through
-> `getSaddleMtx()`, and angle the same way as before. Keeping both values tied to one single joint's pose rules out
-> any possibility of position and rotation disagreeing with each other, in any pose, including rearing.
+> The mod now sidesteps Euler decomposition entirely: `horse->getRootMtx()` is a live, fully up-to-date animated
+> joint matrix in every situation (ordinary gameplay and demo-driven cutscenes alike; only the separate `shape_angle`
+> field goes stale, never the joint matrices themselves). The mod copies it verbatim and translates by Zelda's local
+> seat offset in its own local frame, reproducing the exact same seat point the original, unmodified function always
+> computed, while using that same matrix's own rotation to draw her mesh. Since her position and her drawn rotation
+> both come from one single, un-decomposed matrix, they can never disagree with each other, in any pose, including
+> rearing, being led by Link, or being ridden by a bulblin.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
