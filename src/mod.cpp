@@ -156,47 +156,38 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    static const Vec localHorseRidePos = {-5.894f, 52.61f, 4.079f};
-    static const Vec localFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
-    const Vec* local_pos = daPy_getLinkPlayerActorClass()->checkHorseRide() ? &localHorseRidePos
-                                                                             : &localFrontHorseRidePos;
-
-    // Derive the corrected orientation from the saddle joint, same as before (confirmed fix for
-    // Zelda facing the wrong way during cutscenes).
+    // By this point the original (unhooked) `setMatrix()` has already run and computed
+    // `zelda->current.pos` by multiplying her local seat offset through `horse->getRootMtx()`
+    // (joint 0) -- a self-consistent calculation that has never been reported wrong, in any
+    // situation, including rearing, being led by Link, or being ridden by a bulblin. It's left
+    // completely untouched here.
+    //
+    // An earlier version of this fix instead re-derived position from scratch (root translation
+    // plus the local offset re-rotated by the corrected angle below), reasoning that position and
+    // rotation needed to come from the same consistent frame. That was wrong: the root joint's
+    // rotation submatrix (as used by the original position calculation) is not a plain
+    // `ZXYrotM`-style rotation -- it carries its own fixed, joint-local bind-pose twist (the same
+    // reason a first, even earlier attempt that substituted that submatrix wholesale for Zelda's
+    // *rotation* produced a constant ~90 degree orientation error in every situation). The local
+    // seat offset constants are calibrated specifically for that twisted basis, since that's
+    // exactly what the original function always multiplied them through. Re-rotating them with the
+    // corrected, non-twisted angle (below) instead pointed the offset in a different direction
+    // than the original calculation intended, moving Zelda away from Epona's actual surface --
+    // visible as her floating next to Epona rather than sitting on her, most noticeably whenever
+    // root and saddle diverge a lot, such as while rearing.
+    //
+    // So the position half of this bug plainly never existed: only the *rotation* used to draw
+    // Zelda's mesh needs fixing (replacing the possibly-stale `shape_angle` with a corrected angle
+    // derived from the saddle joint's actual rendered matrix), applied at this same,
+    // already-correct position.
     csXyz rot;
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
 
-    // An earlier version of this fix also re-derived `current.pos` by multiplying `local_pos`
-    // through the saddle joint directly (mirroring `daAlink_c::setSyncHorsePos()`'s technique for
-    // Link). That made Zelda sink into Epona's model, but only in the dual-ride "rear" seat
-    // (`localHorseRidePos`) while rearing up -- never in the single-rider "actual saddle" seat
-    // (`localFrontHorseRidePos`), nor in other cutscenes with large root/saddle divergence, such as
-    // Epona being led by Link or ridden by a bulblin. That's because `local_pos` was never actually
-    // calibrated against the saddle joint at all -- it's multiplied through `getRootMtx()` in the
-    // original, unmodified function, and that calibration is exactly why the root-based position is
-    // already correct in every one of those other cases. Multiplying it through the saddle joint's
-    // translation instead moves the anchor point itself to the wrong place; it just so happens to
-    // be small enough to go unnoticed outside of an extreme pose like rearing.
-    //
-    // The actual anchor point (the root joint's translation) was never the problem, so it's kept
-    // exactly as the original function computes it. Only the *direction* of the local offset is
-    // re-expressed using the corrected rotation above (instead of root's own rotation), which keeps
-    // Zelda's seat glued to the horse's actual surface even when the saddle joint rotates further
-    // than the root does, such as during a rear, without disturbing the anchor point itself.
-    MtxP rootMtx = horse->getRootMtx();
-    mDoMtx_stack_c::transS(0.0f, 0.0f, 0.0f);
-    mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
-    Vec offset;
-    mDoMtx_stack_c::multVecSR(local_pos, &offset);
-
-    cXyz pos(rootMtx[0][3] + offset.x, rootMtx[1][3] + offset.y, rootMtx[2][3] + offset.z);
-
-    zelda->current.pos = pos;
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
 
-    mDoMtx_stack_c::transS(pos);
+    mDoMtx_stack_c::transS(zelda->current.pos);
     mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }
