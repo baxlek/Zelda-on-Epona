@@ -45,19 +45,25 @@ archery duel, where she rides alone) is never touched or duplicated.
 > back if it's still reproducible in-game.
 >
 > Zelda used to face the wrong way (often straight towards in-game North) and ignore Epona's own movement — e.g. not
-> leaning back when Epona reared up — during some story cutscenes. `daHoZelda_c::setMatrix()` positions her by
-> multiplying a saddle offset through Epona's actual, currently-rendered root matrix, but orients her using Epona's
-> separate logical heading field instead. Those two normally agree, but scripted cutscenes that move Epona via demo
-> data don't always keep her logical heading in sync with her rendered pose, since vanilla never needed it to be (only
-> the real duel ever has a horseback-Zelda riding along). The mod now hooks `setMatrix()` to re-derive Zelda's
-> rendered orientation from that same root matrix right after it runs, so she always visually matches Epona's actual
-> pose. This only affects the mod's own spawned Zelda; the duel's story-placed one is untouched.
+> leaning back when Epona reared up — during some story cutscenes. `daHoZelda_c::setMatrix()` orients her by copying
+> Epona's separate, logical heading field (`shape_angle`) wholesale; that field is normally kept in lockstep with
+> Epona's own rendered pose, but scripted cutscenes that move Epona via demo data don't always keep it in sync, since
+> vanilla never needed it to be there (only the real duel ever has a horseback-Zelda riding along). An earlier fix
+> attempt substituted Epona's root joint matrix wholesale instead, which made things worse (a constant ~90 degree
+> orientation error in every situation, not just cutscenes) because that joint's bind pose uses a different basis
+> than the logical heading convention. The mod now uses the same technique the game itself already uses for Link's
+> own rotation while riding (`daAlink_c::setSyncHorsePos()`): deriving the angle from Epona's *saddle* joint's actual
+> rendered matrix, with the same fixed correction that code applies for that joint's bind pose. This makes Zelda
+> track Epona's true rendered orientation — including rearing up — in both cutscenes and ordinary gameplay, and only
+> affects the mod's own spawned Zelda; the duel's story-placed one is untouched.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
 > any horseback-Zelda. With this mod keeping Zelda riding at all times, she now ends up sharing the saddle with it.
-> The mod removes that prop whenever it's actually coincident with Epona and its own Zelda is riding, leaving any
-> other, unrelated decorative bundles placed elsewhere in the game untouched.
+> The mod removes that prop whenever it's actually coincident with Epona, as long as this mod has a Zelda spawned at
+> all (rather than only once she's confirmed attached as the rider, since actor creation/attachment can straddle
+> frames and that check wasn't reliably true yet on the exact frame the prop loads in), leaving any other, unrelated
+> decorative bundles placed elsewhere in the game untouched.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

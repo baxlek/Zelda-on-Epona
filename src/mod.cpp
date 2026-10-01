@@ -11,6 +11,7 @@
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
+#include "m_Do/m_Do_mtx.h"
 
 DEFINE_MOD();
 
@@ -112,19 +113,32 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
-// `daHoZelda_c::setMatrix()` positions Zelda by multiplying a local saddle offset through
-// `horse->getRootMtx()` (the horse model's actual, currently-rendered root joint matrix), but
-// orients her using the separate, logical `horse->shape_angle` field instead. During ordinary
-// gameplay those two always agree, since `shape_angle` is exactly what feeds the horse's own base
-// matrix. But during story cutscenes driven by `daHorse_c::procToolDemo()` (scripted demo data
-// moving/animating Epona directly), `shape_angle` is only overwritten when the demo track has its
-// rotation channel enabled (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it
-// (e.g. because vanilla never needed Epona's logical heading, only her rendered pose), leaving
-// `shape_angle` frozen at a stale value (often whatever it was initialized to, which reads as a
-// fixed, arbitrary "facing North") while `getRootMtx()` keeps reflecting Epona's true animated
-// pose, including rearing up. Since position already tracks `getRootMtx()` correctly, this hook
-// re-derives Zelda's rendered rotation from that same matrix right after the original runs, so she
-// always visually matches Epona's actual pose instead of a potentially-stale logical heading.
+// `daHoZelda_c::setMatrix()` orients Zelda by copying `horse->shape_angle` wholesale, a separate,
+// logical heading field that is normally kept in lockstep with the horse's own rendered pose
+// (`daHorse_c::setMatrix()` builds the horse's own base matrix from that exact same field). During
+// ordinary gameplay those always agree. But during story cutscenes driven by
+// `daHorse_c::procToolDemo()` (scripted demo data moving/animating Epona directly), `shape_angle`
+// is only overwritten when the demo track has its rotation channel enabled
+// (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it (e.g. because vanilla never
+// needed Epona's logical heading there, only her rendered pose), leaving `shape_angle` frozen at a
+// stale value (often whatever it was before the cutscene started, which can read as a fixed,
+// arbitrary "facing North") while Epona's actual animated pose (including rearing up) keeps
+// changing underneath it.
+//
+// A first attempt at fixing this substituted the horse's root joint matrix (`getRootMtx()`,
+// i.e. `m_model->getAnmMtx(0)`) wholesale as Zelda's rotation. That made things worse (a constant
+// ~90 degree error in every situation, not just cutscenes), because the root joint's bind pose
+// uses a different basis than the `shape_angle`/`ZXYrotM` convention -- the very same reason
+// `daAlink_c::setSyncHorsePos()` (`d_a_alink_horse.inc`) never uses the raw root matrix for
+// Link's own rotation while riding either.
+//
+// That same vanilla code gives the correct recipe instead: while Link needs to react to Epona's
+// actual pose (running/turning/rearing), it derives his angle from the *saddle* joint's matrix
+// (`getSaddleMtx()`, `m_model->getAnmMtx(21)`) via `mDoMtx_MtxToRot()`, with a fixed, known
+// -0x4000 (-90 degree) correction on the resulting Z angle to account for that joint's own bind
+// pose. Mirroring that exact technique for Zelda (instead of copying the possibly-stale
+// `shape_angle`) makes her track Epona's true rendered orientation -- including rearing up --
+// in cutscenes and ordinary gameplay alike.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is (it's the one case this engine code was originally written for), so it's left
@@ -142,14 +156,19 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    // Keep the already-computed saddle position, but replace the rotation with the horse's real
-    // rendered orientation (translation column overwritten with Zelda's own position).
-    Mtx mtx;
-    MTXCopy(horse->getRootMtx(), mtx);
-    mtx[0][3] = zelda->current.pos.x;
-    mtx[1][3] = zelda->current.pos.y;
-    mtx[2][3] = zelda->current.pos.z;
-    zelda->model->setBaseTRMtx(mtx);
+    // Same technique `daAlink_c::setSyncHorsePos()` uses for Link: derive the angle from the
+    // saddle joint's actual rendered matrix instead of trusting the (possibly stale) logical
+    // `shape_angle`, applying the same fixed correction for that joint's bind pose.
+    csXyz rot;
+    mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
+    rot.z += -0x4000;
+
+    zelda->shape_angle = rot;
+    zelda->current.angle.y = rot.y;
+
+    mDoMtx_stack_c::transS(zelda->current.pos);
+    mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
+    zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }
 
 // The early "Ordon Bundle" story cutscene (`daObjToaruMaki_c`, stage name "T_Maki") shows Epona
@@ -267,9 +286,14 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (s_hasSpawnedZelda && currentZelda != nullptr &&
         (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
         daPy_getLinkPlayerActorClass()->offHorseZelda();
+    }
 
-        // See `remove_overlapping_firewood_bundle`'s comment: only relevant while our own Zelda
-        // is actually riding, so it never touches an unrelated decorative bundle elsewhere.
+    // See `remove_overlapping_firewood_bundle`'s comment. Deliberately not gated behind
+    // `currentZelda == s_spawnedZeldaId` above: during the very cutscene this targets, our Zelda
+    // may not have attached to the horse yet on the exact frame the bundle actor loads in (actor
+    // creation/attachment can straddle frames, see `find_spawned_zelda()`), so checking every tick
+    // the horse exists at all is what actually catches it reliably.
+    if (s_hasSpawnedZelda) {
         remove_overlapping_firewood_bundle(horse);
     }
 
