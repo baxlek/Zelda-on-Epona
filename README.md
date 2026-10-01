@@ -63,10 +63,18 @@ archery duel, where she rides alone) is never touched or duplicated.
 > because that attempt also re-derived Zelda's *position* from the saddle joint — but her seat offsets were never
 > calibrated against the saddle joint; they're multiplied through the *root* joint in the original, unmodified
 > function, which is exactly why the root-based position was already correct in every one of those other cases.
-> Moving the anchor point to the saddle joint's own translation put it in the wrong place; it only became noticeable
-> in an extreme pose like rearing. The mod now keeps the anchor point exactly as the original function computes it
-> (from the root joint), and only re-expresses the *direction* of the local seat offset using the corrected rotation
-> above, keeping Zelda's seat glued to Epona's actual surface without disturbing the anchor point itself.
+>
+> A follow-up attempt to fix that kept the anchor point at the root joint's translation, but still re-rotated the
+> local seat offset using the corrected, saddle-derived angle — which introduced a third problem: Zelda floating in
+> midair next to Epona, offset from her normal seat, again specifically while rearing. That's because the root
+> joint's rotation isn't a plain, "clean" rotation either — it carries the same kind of fixed, joint-local bind-pose
+> twist that made substituting it wholesale for Zelda's *rotation* produce the original constant ~90 degree error.
+> Zelda's seat offsets are calibrated specifically for that twisted root rotation, since that's exactly what the
+> original, unmodified function always multiplies them through — re-rotating them with the "clean" corrected angle
+> instead pointed the offset in a different direction than intended, most noticeably whenever root and saddle
+> diverge a lot, such as while rearing. The position half of this bug never actually existed: the mod now leaves
+> `current.pos` completely untouched, exactly as the original, unmodified function computes it, and only replaces
+> the rotation used to draw Zelda's mesh at that same, already-correct position.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
