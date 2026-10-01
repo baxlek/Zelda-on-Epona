@@ -119,43 +119,34 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // ordinary gameplay those always agree. But during story cutscenes driven by
 // `daHorse_c::procToolDemo()` (scripted demo data moving/animating Epona directly), `shape_angle`
 // is only overwritten when the demo track has its rotation channel enabled
-// (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it (e.g. because vanilla never
-// needed Epona's logical heading there, only her rendered pose), leaving `shape_angle` frozen at a
-// stale value (often whatever it was before the cutscene started, which can read as a fixed,
-// arbitrary "facing North") while Epona's actual animated pose (including rearing up) keeps
-// changing underneath it.
+// (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it, leaving `shape_angle` frozen
+// at a stale value while Epona's actual animated pose (including rearing up) keeps changing
+// underneath it.
 //
-// Several attempts at fixing this by instead *decomposing* a joint matrix into Euler angles (via
-// `mDoMtx_MtxToRot()`, with some fixed correction for that joint's own bind-pose twist, the same
-// technique `daAlink_c::setSyncHorsePos()` uses for Link's own rotation while riding) all
-// regressed in one way or another: substituting the root joint wholesale caused a constant ~90
-// degree error everywhere; deriving the angle from the saddle joint while leaving position on the
-// original's root joint caused Zelda to sink into Epona's model while rearing (root and saddle
-// rotate independently enough in that extreme pose for the mismatch to become visible);
-// re-anchoring position to the root joint's translation while only re-orienting the local offset
-// using the saddle-derived angle caused her to float next to Epona instead; and deriving *both*
-// position and angle from the saddle joint together (mirroring Link's own technique exactly)
-// moved her noticeably off her normal seat even outside of rearing, because her local seat offset
-// constants (`localHorseRidePos`/`localFrontHorseRidePos`) are calibrated specifically against the
-// *root* joint in the original, unmodified function -- transforming them through any other joint
-// moves the computed point, regardless of how internally consistent that joint's own position and
-// rotation are with each other.
+// Crucially, this only matters for cutscenes where *this mod's* Zelda rides solo (Link not also on
+// Epona): vanilla never had a reason to keep a solo rider's heading in sync in those cutscenes,
+// since no such rider existed before this mod. Dual-ride cutscenes (Link riding, Zelda on the rear
+// seat) are, per testing, already handled correctly by vanilla's own `shape_angle` logic in the
+// large majority of cases -- that's the one scenario this engine code was actually written for and
+// tested against. Overriding both seats indiscriminately was tried and regressed repeatedly
+// (constant ~90 degree error substituting the root joint wholesale; sinking into Epona while
+// rearing when deriving rotation from the saddle joint but leaving the rear seat's position as the
+// original computed it; floating next to Epona when re-anchoring position to the root joint
+// instead; an off-center seat entirely when deriving both position and rotation from the saddle
+// joint together). All of those regressions occurred in the rear (dual-ride) seat specifically,
+// which never needed fixing in the first place -- so the override below is scoped to the solo
+// (front saddle) seat only, leaving the dual-ride seat's already-working vanilla computation
+// completely untouched.
 //
-// The fix that actually keeps both constraints satisfied -- the anchor point must come from the
-// root joint (to match the calibrated seat offsets), and position/rotation must never disagree
-// about whose pose they describe (to avoid sinking/floating) -- is to stop decomposing into Euler
-// angles at all. `horse->getRootMtx()` is a live, fully up-to-date animated joint matrix in every
-// situation (ordinary gameplay and demo-driven cutscenes alike; only the separate `shape_angle`
-// field goes stale, never the joint matrices themselves). Copying it verbatim and translating by
-// the local seat offset in *its own* local frame reproduces the exact same point the original,
-// unmodified function computes (root's translation plus root's rotation applied to the offset),
-// while also using that same matrix's own rotation -- whatever bind-pose convention it carries --
-// to draw Zelda's mesh. Since position and the drawn rotation both come from one single,
-// un-decomposed matrix, they can never disagree with each other, in any pose, including rearing.
+// For the solo seat, position is left exactly as the original, unmodified function already
+// computed it (this hook runs *after* the original, so `current.pos` is already correct); only the
+// drawn rotation is replaced, derived from `horse->getSaddleMtx()` (a live, fully up-to-date
+// animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the
+// same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
+// uses for Link's own rotation while riding.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
-// correctly as-is (it's the one case this engine code was originally written for), so it's left
-// untouched to avoid any risk of regressing it.
+// correctly as-is, so it's left untouched to avoid any risk of regressing it.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
@@ -164,39 +155,27 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
+    // Dual-ride (Link also on Epona) already works correctly via vanilla's own computation; only
+    // the solo seat (no Link riding) needs the rotation override.
+    if (daPy_getLinkPlayerActorClass()->checkHorseRide()) {
+        return;
+    }
+
     daHorse_c* horse = dComIfGp_getHorseActor();
     if (horse == nullptr || zelda->model == nullptr) {
         return;
     }
 
-    // Build the final matrix directly from the root joint's own live matrix instead of
-    // decomposing/rebuilding via Euler angles (see the explanatory comment above `DEFINE_HOOK`).
-    // `transM` concatenates a local-frame translation onto `now` (`now = now * T(local_pos)`),
-    // which reproduces exactly the same point the original, unmodified function computes via
-    // `mDoMtx_multVec(horse->getRootMtx(), local_pos, &current.pos)` -- root's translation plus
-    // root's own rotation applied to the offset -- while keeping that same rotation for the drawn
-    // matrix, so the two can never disagree.
-    static const Vec localHorseRidePos = {-5.894f, 52.61f, 4.079f};
-    static const Vec localFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
-    const Vec* local_pos = daPy_getLinkPlayerActorClass()->checkHorseRide() ? &localHorseRidePos
-                                                                             : &localFrontHorseRidePos;
-
-    mDoMtx_stack_c::copy(horse->getRootMtx());
-    mDoMtx_stack_c::transM(local_pos->x, local_pos->y, local_pos->z);
-    MtxP finalMtx = mDoMtx_stack_c::get();
-
-    cXyz pos(finalMtx[0][3], finalMtx[1][3], finalMtx[2][3]);
-    zelda->current.pos = pos;
-
-    // `shape_angle` is still decomposed (best-effort, no bind-pose correction) purely to keep
-    // Zelda's logical heading field populated for any other game logic that reads it; it has no
-    // effect on how she's actually drawn, since `finalMtx` above is used for that directly.
     csXyz rot;
-    mDoMtx_MtxToRot(finalMtx, &rot);
+    mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
+    rot.z += -0x4000;
+
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
 
-    zelda->model->setBaseTRMtx(finalMtx);
+    mDoMtx_stack_c::transS(zelda->current.pos);
+    mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
+    zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }
 
 // The early "Ordon Bundle" story cutscene (`daObjToaruMaki_c`, stage name "T_Maki") shows Epona

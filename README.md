@@ -51,21 +51,30 @@ archery duel, where she rides alone) is never touched or duplicated.
 > vanilla never needed it to be there (only the real duel ever has a horseback-Zelda riding along) — leaving
 > `shape_angle` stale while Epona's actual animated pose (including rearing up) keeps changing underneath it.
 >
-> Several earlier attempts at fixing this by instead *decomposing* a joint matrix into Euler angles (with some fixed
-> correction for that joint's own bind-pose twist, the same technique `daAlink_c::setSyncHorsePos()` uses for Link's
-> own rotation while riding) all regressed in one way or another — a constant ~90 degree orientation error, sinking
-> into Epona's model while rearing, floating next to her instead, or ending up noticeably off her normal seat even
-> outside of rearing — because any approach that recomputes position and rotation from *different* sources (or from
-> a different joint than the one her seat offsets were originally calibrated against) risks the two disagreeing with
-> each other in extreme poses, or shifting her seat outright.
+> Several earlier attempts at fixing this by *decomposing* a joint matrix into Euler angles and/or recomputing
+> position from it (with some fixed correction for that joint's own bind-pose twist, the same technique
+> `daAlink_c::setSyncHorsePos()` uses for Link's own rotation while riding) all regressed in one way or another — a
+> constant ~90 degree orientation error, sinking into Epona's model while rearing, floating next to her instead, or
+> ending up noticeably off her normal seat even outside of rearing. The key realization was that every one of those
+> regressions showed up specifically in the dual-ride seat (Zelda riding behind Link) — because that seat already
+> works correctly via vanilla's own `shape_angle` logic in the large majority of cutscenes, which is the one case
+> this engine code was actually written and tested for. It's only the *solo* seat (no Link riding, which only this
+> mod's standalone Zelda ever uses) where `shape_angle` goes stale and needs a fix at all.
 >
-> The mod now sidesteps Euler decomposition entirely: `horse->getRootMtx()` is a live, fully up-to-date animated
-> joint matrix in every situation (ordinary gameplay and demo-driven cutscenes alike; only the separate `shape_angle`
-> field goes stale, never the joint matrices themselves). The mod copies it verbatim and translates by Zelda's local
-> seat offset in its own local frame, reproducing the exact same seat point the original, unmodified function always
-> computed, while using that same matrix's own rotation to draw her mesh. Since her position and her drawn rotation
-> both come from one single, un-decomposed matrix, they can never disagree with each other, in any pose, including
-> rearing, being led by Link, or being ridden by a bulblin.
+> The mod now scopes its override to the solo seat only, leaving the dual-ride seat's vanilla computation completely
+> untouched. For the solo seat, Zelda's position is left exactly as the original, unmodified function already
+> computed it, and only the rotation used to draw her is replaced — derived from `horse->getSaddleMtx()` (a live,
+> animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the same
+> `mDoMtx_MtxToRot()` + bind-pose correction technique `daAlink_c::setSyncHorsePos()` uses for Link. Since the
+> dual-ride seat is never touched, it can never regress, and the solo seat's position is never recomputed, so it
+> can never sink, float, or shift off-center. This also matches what was independently observed in-game: Zelda's
+> position had only ever been reported wrong in the dual-ride (actual saddle) seat, never while riding solo, being
+> led by Link, or being ridden alongside a bulblin.
+>
+> One known remaining edge case: a few dual-ride cutscenes (e.g. right after the first King Bulblin duel on Eldin
+> Bridge) still don't react to Epona's movement correctly, since that seat's vanilla logic isn't touched by this
+> fix. This is a pre-existing, narrower issue left for future investigation rather than something this fix attempts
+> to solve.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
