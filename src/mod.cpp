@@ -10,6 +10,7 @@
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
+#include "f_pc/f_pc_name.h"
 
 DEFINE_MOD();
 
@@ -111,6 +112,78 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
+// `daHoZelda_c::setMatrix()` positions Zelda by multiplying a local saddle offset through
+// `horse->getRootMtx()` (the horse model's actual, currently-rendered root joint matrix), but
+// orients her using the separate, logical `horse->shape_angle` field instead. During ordinary
+// gameplay those two always agree, since `shape_angle` is exactly what feeds the horse's own base
+// matrix. But during story cutscenes driven by `daHorse_c::procToolDemo()` (scripted demo data
+// moving/animating Epona directly), `shape_angle` is only overwritten when the demo track has its
+// rotation channel enabled (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it
+// (e.g. because vanilla never needed Epona's logical heading, only her rendered pose), leaving
+// `shape_angle` frozen at a stale value (often whatever it was initialized to, which reads as a
+// fixed, arbitrary "facing North") while `getRootMtx()` keeps reflecting Epona's true animated
+// pose, including rearing up. Since position already tracks `getRootMtx()` correctly, this hook
+// re-derives Zelda's rendered rotation from that same matrix right after the original runs, so she
+// always visually matches Epona's actual pose instead of a potentially-stale logical heading.
+//
+// Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
+// correctly as-is (it's the one case this engine code was originally written for), so it's left
+// untouched to avoid any risk of regressing it.
+DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
+
+static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        return;
+    }
+
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse == nullptr || zelda->model == nullptr) {
+        return;
+    }
+
+    // Keep the already-computed saddle position, but replace the rotation with the horse's real
+    // rendered orientation (translation column overwritten with Zelda's own position).
+    Mtx mtx;
+    MTXCopy(horse->getRootMtx(), mtx);
+    mtx[0][3] = zelda->current.pos.x;
+    mtx[1][3] = zelda->current.pos.y;
+    mtx[2][3] = zelda->current.pos.z;
+    zelda->model->setBaseTRMtx(mtx);
+}
+
+// The early "Ordon Bundle" story cutscene (`daObjToaruMaki_c`, stage name "T_Maki") shows Epona
+// carrying firewood as a separate decorative prop placed directly at the saddle position for that
+// one shot, not as part of Epona's own model. It's entirely unrelated to this mod and always
+// present regardless of HoZelda, so with this mod keeping Zelda spawned on Epona at all times, the
+// two end up occupying the same spot. Since the bundle is static set-dressing (it never tracks the
+// horse itself, just redraws at its own fixed placement every tick), the only way to resolve the
+// overlap is to remove it outright whenever it's actually coincident with the horse; a generous
+// radius still leaves unrelated decorative bundles placed elsewhere in the game untouched.
+static constexpr f32 kFirewoodOverlapRadius = 300.0f;
+
+static void* find_overlapping_firewood_bundle(fopAc_ac_c* i_actor, void* i_data) {
+    if (fopAcM_GetName(i_actor) != fpcNm_Obj_ToaruMaki_e) {
+        return nullptr;
+    }
+
+    daHorse_c* horse = static_cast<daHorse_c*>(i_data);
+    if (i_actor->current.pos.abs2(horse->current.pos) >
+        kFirewoodOverlapRadius * kFirewoodOverlapRadius) {
+        return nullptr;
+    }
+
+    return i_actor;
+}
+
+static void remove_overlapping_firewood_bundle(daHorse_c* horse) {
+    fopAc_ac_c* bundle = (fopAc_ac_c*)fopAcIt_Judge(
+        (fopAcIt_JudgeFunc)find_overlapping_firewood_bundle, horse);
+    if (bundle != nullptr) {
+        svc_actor->delete_actor(mod_ctx, (ActorId)fopAcM_GetID(bundle));
+    }
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     ModResult result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
@@ -118,6 +191,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
                          (int)result);
         // Not fatal: the mod still works, just without the horse-call fix.
+    }
+
+    result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda matrix, orientation may be wrong during some cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the cutscene-orientation fix.
     }
 
     mods::log::info("zelda_on_epona initialized");
@@ -186,6 +267,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (s_hasSpawnedZelda && currentZelda != nullptr &&
         (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
         daPy_getLinkPlayerActorClass()->offHorseZelda();
+
+        // See `remove_overlapping_firewood_bundle`'s comment: only relevant while our own Zelda
+        // is actually riding, so it never touches an unrelated decorative bundle elsewhere.
+        remove_overlapping_firewood_bundle(horse);
     }
 
     return MOD_OK;
@@ -194,6 +279,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<HorseCallSubstance>();
+    mods::hook::uninstall<HoZeldaSetMatrix>();
     return MOD_OK;
 }
 }

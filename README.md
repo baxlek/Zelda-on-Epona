@@ -43,6 +43,21 @@ archery duel, where she rides alone) is never touched or duplicated.
 > tracked actor is still being created (`fpcM_IsCreating`) before concluding it's gone, so it no longer spawns a
 > duplicate while the first is still in flight — this has been confirmed fixed via log analysis, but please report
 > back if it's still reproducible in-game.
+>
+> Zelda used to face the wrong way (often straight towards in-game North) and ignore Epona's own movement — e.g. not
+> leaning back when Epona reared up — during some story cutscenes. `daHoZelda_c::setMatrix()` positions her by
+> multiplying a saddle offset through Epona's actual, currently-rendered root matrix, but orients her using Epona's
+> separate logical heading field instead. Those two normally agree, but scripted cutscenes that move Epona via demo
+> data don't always keep her logical heading in sync with her rendered pose, since vanilla never needed it to be (only
+> the real duel ever has a horseback-Zelda riding along). The mod now hooks `setMatrix()` to re-derive Zelda's
+> rendered orientation from that same root matrix right after it runs, so she always visually matches Epona's actual
+> pose. This only affects the mod's own spawned Zelda; the duel's story-placed one is untouched.
+>
+> One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
+> placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
+> any horseback-Zelda. With this mod keeping Zelda riding at all times, she now ends up sharing the saddle with it.
+> The mod removes that prop whenever it's actually coincident with Epona and its own Zelda is riding, leaving any
+> other, unrelated decorative bundles placed elsewhere in the game untouched.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
