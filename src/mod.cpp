@@ -194,35 +194,37 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
 // `daHoZelda_c::setAnm()` only ever selects it via `ganondorf->checkZeldaEndDemoCut()`, gated
 // behind `mGndAcKeep` -- a reference to the `B_GND` actor that exists only on the horseback-duel
 // map, right before the final confrontation with Ganondorf (the scene where the arena barrier
-// closes in) -- so it never applies to other rearing cutscenes like the Kakariko reunion, which
-// have no such actor in the scene.
+// closes in).
 //
 // The fix hooks `daHoZelda_c::setAnm()` itself (rather than reusing the `setMatrix()` hook) so it
 // can run after the engine's own animation selection for this frame and correct it specifically
 // when the horse is rearing, without needing to touch `daHorse_c`'s own (private, unexposed)
 // internal animation state -- which stays completely untouched, so Epona's own rendered rearing
-// animation is unaffected. When riding solo with that same `B_GND` actor present (i.e. the
-// Ganondorf duel scene), it reuses her existing `EGND_WHB` lean-back pose instead of relying on
-// the engine's own unreliable gating; everywhere else, it falls back to `STANDH` -- the pose the
-// same mapping table already uses for the horse's own "stand" (upright) animation -- as the
-// closest generic match available for another upright state like rearing, since no dedicated
-// reaction pose exists for those cutscenes. Note that the engine's own per-frame logic in
-// `setAnm()` keeps recomputing Zelda's default seated pose every frame regardless of what we do
-// here (since the mapping table itself is never patched), so this hook also reapplies the
-// correction every frame for as long as the horse keeps rearing; outside of the dedicated
-// lean-back case, the practical effect is a held, static alert pose for Zelda rather than a fully
-// animated rearing reaction -- but that's a substantial improvement over her seated idle pose not
-// changing at all.
+// animation is unaffected. That Ganondorf-duel scene is left completely untouched by this hook --
+// `mGndAcKeep` being set means the `B_GND` actor is present, and its own vanilla logic (including
+// `checkZeldaEndDemoCut()`) is the authority on Zelda's animation there, so the hook simply
+// returns without changing anything whenever that actor is present. Everywhere else -- every
+// other rearing cutscene, such as the Kakariko reunion -- it reuses Zelda's existing `EGND_WHB`
+// lean-back pose rather than falling back to a generic "stand" pose, since that's the more
+// fitting, already-authored reaction for being startled on horseback. Note that the engine's own
+// per-frame logic in `setAnm()` keeps recomputing Zelda's default seated pose every frame
+// regardless of what we do here (since the mapping table itself is never patched), so this hook
+// also reapplies the correction every frame for as long as the horse keeps rearing.
 DEFINE_HOOK(&daHoZelda_c::setAnm, HoZeldaSetAnm);
 
 static constexpr u16 kHorseAnmIdxExcitement = 8;
 static constexpr u16 kHorseAnmIdxExcitement2 = 9;
-static constexpr u16 kZeldaAnmIdxStand = 0x16;
 static constexpr u16 kZeldaAnmIdxEgndWaitHorseB = 0x11;
 
 static void on_hozelda_set_anm_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        return;
+    }
+
+    // Leave the Ganondorf horseback-duel scene completely untouched -- vanilla's own logic
+    // (gated behind this same actor reference) is the authority on Zelda's animation there.
+    if (zelda->mGndAcKeep.getActor() != nullptr) {
         return;
     }
 
@@ -236,12 +238,7 @@ static void on_hozelda_set_anm_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    bool soloRide = !daPy_getLinkPlayerActorClass()->checkHorseRide();
-    bool isGanondorfDuelScene = zelda->mGndAcKeep.getActor() != nullptr;
-    u16 zeldaAnmIdx = (soloRide && isGanondorfDuelScene) ? kZeldaAnmIdxEgndWaitHorseB
-                                                          : kZeldaAnmIdxStand;
-
-    zelda->setSingleAnime(zeldaAnmIdx, 1.0f, 0.0f, -1, horse->getMorfFrame());
+    zelda->setSingleAnime(kZeldaAnmIdxEgndWaitHorseB, 1.0f, 0.0f, -1, horse->getMorfFrame());
 }
 
 // The early "Ordon Bundle" story cutscene (`daObjToaruMaki_c`, stage name "T_Maki") shows Epona

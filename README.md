@@ -83,13 +83,10 @@ archery duel, where she rides alone) is never touched or duplicated.
 > it fell through to Zelda's default seated "wait" pose regardless of how dramatically Epona reared. Zelda does
 > already have a dedicated solo "lean back" reaction pose, but the game only ever selects it during the horseback
 > duel with Ganondorf (the cutscene where the arena barrier closes in), gated behind an actor that only exists on
-> that map. The mod now hooks `setAnm()` to detect rearing and, when riding solo with that same actor present (i.e.
-> the Ganondorf duel scene), reapplies her existing lean-back pose; everywhere else — such as the Kakariko reunion —
-> it falls back to her "stand" pose, the same pose the existing table already uses for the horse's own upright
-> "stand" animation. Epona's own rearing animation is left completely untouched either way. Outside of the
-> dedicated lean-back case, this holds a static alert pose for the duration of the rear rather than fully animating
-> the reaction, since there's no other dedicated "startled on horseback" animation for Zelda to play, but it's a
-> substantial improvement over her seated idle pose not changing at all.
+> that map. The mod now hooks `setAnm()` to detect rearing and reapply that existing lean-back pose in every other
+> rearing cutscene — such as the Kakariko reunion — while leaving the Ganondorf duel scene completely untouched, so
+> vanilla's own logic remains the sole authority there. Epona's own rearing animation is left completely untouched
+> either way.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
 > placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
