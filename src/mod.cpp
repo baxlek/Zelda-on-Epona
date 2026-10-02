@@ -178,6 +178,56 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }
 
+// Separately from the orientation of her body (fixed above), Zelda's *animation* also doesn't
+// react to Epona rearing up, in both the solo and dual-ride seats. `daHoZelda_c::setAnm()` picks
+// which of Zelda's own animations to play by mapping `horse->getAnmIdx(0)` -- the horse's own
+// current animation index -- through a fixed table (stand, stop, jump start/mid/end, dash
+// start/loop). That table is deliberately exhaustive for ordinary gameplay, but it has no entry
+// for the horse's "excitement"/rearing-in-place animation (raw indices 8 and 9 in
+// `daHorse_c`'s internal animation enum); any unmapped index -- including these -- falls through
+// to Zelda's default seated "wait" pose (`WAITCH` solo / `WAITH` dual-ride), so she just keeps
+// sitting calmly no matter how dramatically Epona rears, in every cutscene that drives the horse
+// into that state (e.g. the Epona reunion scene in Kakariko), regardless of whether Link is also
+// riding.
+//
+// The fix hooks `daHoZelda_c::setAnm()` itself (rather than reusing the `setMatrix()` hook) so it
+// can run after the engine's own animation selection for this frame and correct it specifically
+// when the horse is rearing, without needing to touch `daHorse_c`'s own (private, unexposed)
+// internal animation state -- which stays completely untouched, so Epona's own rendered rearing
+// animation is unaffected. `STANDH` -- the pose the same mapping table already uses for the
+// horse's own "stand" (upright) animation -- is the closest match available for another upright
+// state like rearing. Note that the engine's own per-frame logic in `setAnm()` keeps recomputing
+// Zelda's default seated pose
+// every frame regardless of what we do here (since the mapping table itself is never patched),
+// so this hook also reapplies the correction every frame for as long as the horse keeps rearing;
+// the practical effect is a held, static alert pose for Zelda rather than a fully animated
+// rearing reaction, since there's no dedicated "startled on horseback" animation for her to play
+// -- but that's a substantial improvement over her current seated idle pose not changing at all.
+DEFINE_HOOK(&daHoZelda_c::setAnm, HoZeldaSetAnm);
+
+static constexpr u16 kHorseAnmIdxExcitement = 8;
+static constexpr u16 kHorseAnmIdxExcitement2 = 9;
+static constexpr u16 kZeldaAnmIdxStand = 0x16;
+
+static void on_hozelda_set_anm_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        return;
+    }
+
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse == nullptr) {
+        return;
+    }
+
+    u16 horseAnmIdx = horse->getAnmIdx(0);
+    if (horseAnmIdx != kHorseAnmIdxExcitement && horseAnmIdx != kHorseAnmIdxExcitement2) {
+        return;
+    }
+
+    zelda->setSingleAnime(kZeldaAnmIdxStand, 1.0f, 0.0f, -1, horse->getMorfFrame());
+}
+
 // The early "Ordon Bundle" story cutscene (`daObjToaruMaki_c`, stage name "T_Maki") shows Epona
 // carrying firewood as a separate decorative prop placed directly at the saddle position for that
 // one shot, not as part of Epona's own model. It's entirely unrelated to this mod and always
@@ -225,6 +275,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook HoZelda matrix, orientation may be wrong during some cutscenes: {}",
             (int)result);
         // Not fatal: the mod still works, just without the cutscene-orientation fix.
+    }
+
+    result = mods::hook::add_post<HoZeldaSetAnm>(on_hozelda_set_anm_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda animation, she may not react to Epona rearing: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the rearing-reaction fix.
     }
 
     mods::log::info("zelda_on_epona initialized");
@@ -311,6 +369,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
+    mods::hook::uninstall<HoZeldaSetAnm>();
     return MOD_OK;
 }
 }
