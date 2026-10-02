@@ -76,25 +76,25 @@ archery duel, where she rides alone) is never touched or duplicated.
 > fix. This is a pre-existing, narrower issue left for future investigation rather than something this fix attempts
 > to solve.
 >
-> Separately from her orientation, Zelda's *animation* also didn't react to Epona rearing up, in both the solo and
-> dual-ride seats — most noticeably during the Epona reunion scene in Kakariko. `daHoZelda_c::setAnm()` picks which
-> of Zelda's own animations to play by mapping the horse's current animation index through a fixed table (stand,
-> stop, jump start/mid/end, dash start/loop); that table has no entry for the horse's rearing-in-place animation, so
-> it fell through to Zelda's default seated "wait" pose regardless of how dramatically Epona reared. Zelda does
-> already have a dedicated solo "lean back" reaction pose, but the game only ever selects it during the horseback
-> duel with Ganondorf (the cutscene where the arena barrier closes in), gated behind an actor that only exists on
-> that map. The mod now hooks `setAnm()` to detect rearing and reapply that existing lean-back pose in every other
-> rearing cutscene — such as the Kakariko reunion — while leaving the Ganondorf duel scene completely untouched, so
-> vanilla's own logic remains the sole authority there. Epona's own rearing animation is left completely untouched
-> either way.
+> Separately from her orientation, Zelda's *animation* also didn't react to Epona rearing up, and a few individual
+> story cutscenes had their own quirks — e.g. one of the earliest shows Epona carrying bundles of firewood that end
+> up sharing the saddle with Zelda once she's always present. Patching each of these up individually (as was tried)
+> kept surfacing new, similarly-themed issues with no end in sight, since every story cutscene that drives Epona
+> directly risks a new mismatch with a permanent extra rider that vanilla was never designed around.
 >
-> One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
-> placed at the saddle position for that one shot, unrelated to Epona's own model and always present regardless of
-> any horseback-Zelda. With this mod keeping Zelda riding at all times, she now ends up sharing the saddle with it.
-> The mod removes that prop whenever it's actually coincident with Epona, as long as this mod has a Zelda spawned at
-> all (rather than only once she's confirmed attached as the rider, since actor creation/attachment can straddle
-> frames and that check wasn't reliably true yet on the exact frame the prop loads in), leaving any other, unrelated
-> decorative bundles placed elsewhere in the game untouched.
+> Rather than continuing down that path, the mod now hides its own spawned Zelda for the duration of any *scripted*
+> story cutscene by default (detected via `daHorse_c::procToolDemo()`'s `PROC_TOOL_DEMO_e` state — the one Epona
+> enters only while being puppeted directly by cutscene data — rather than, say, ordinary player-driven riding),
+> and she reappears automatically once the cutscene ends. This is purely a visibility toggle: cutscenes that already
+> feature their own story-placed Zelda (such as the horseback archery duel against Ganondorf) are completely
+> unaffected either way, since the mod only ever manages the actor it spawned itself. The horse call/grass whistle
+> is also unaffected, even though it briefly reuses some of the same demo-mode plumbing for its own unrelated
+> "gallop back to the player" behavior — it's excluded from the cutscene check by its own distinct flag
+> (`FLG0_CALL_HORSE`).
+>
+> If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
+> seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
+> off by default.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

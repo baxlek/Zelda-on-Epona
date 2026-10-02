@@ -19,6 +19,18 @@
       "optional": false
     },
     {
+      "service_id": "dev.twilitrealm.dusklight.config",
+      "major": 1,
+      "min_minor": 0,
+      "optional": false
+    },
+    {
+      "service_id": "dev.twilitrealm.dusklight.ui",
+      "major": 2,
+      "min_minor": 3,
+      "optional": false
+    },
+    {
       "service_id": "dev.twilitrealm.dusklight.log",
       "major": 1,
       "min_minor": 0,
