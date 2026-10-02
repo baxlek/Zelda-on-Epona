@@ -10,8 +10,10 @@ endif ()
 project(zelda_on_epona VERSION 1.0.1 LANGUAGES CXX)
 
 # The Dusklight version to build against: a release tag (e.g. "v2.0.0") or a commit SHA.
-if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "v2.0.2")
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if (NOT DUSKLIGHT_VERSION)
+        set(DUSKLIGHT_VERSION "v2.0.2")
+    endif ()
 endif ()
 # Fetches the Dusklight sources into ./dusklight and provides DUSKLIGHT_DIR.
 # Use -DDUSKLIGHT_DIR= to point at an existing Dusklight checkout.
