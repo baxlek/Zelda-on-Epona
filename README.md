@@ -80,11 +80,15 @@ archery duel, where she rides alone) is never touched or duplicated.
 > dual-ride seats — most noticeably during the Epona reunion scene in Kakariko. `daHoZelda_c::setAnm()` picks which
 > of Zelda's own animations to play by mapping the horse's current animation index through a fixed table (stand,
 > stop, jump start/mid/end, dash start/loop); that table has no entry for the horse's rearing-in-place animation, so
-> it fell through to Zelda's default seated "wait" pose regardless of how dramatically Epona reared. The mod now
-> hooks `setAnm()` to detect that specific case and switch Zelda to her "stand" pose instead — the same pose the
-> existing table already uses for the horse's own upright "stand" animation — while leaving Epona's own rearing
-> animation completely untouched. Since there's no dedicated "startled on horseback" animation for Zelda to play,
-> this holds a static alert pose for the duration of the rear rather than fully animating the reaction, but it's a
+> it fell through to Zelda's default seated "wait" pose regardless of how dramatically Epona reared. Zelda does
+> already have a dedicated solo "lean back" reaction pose, but the game only ever selects it during the horseback
+> duel with Ganondorf (the cutscene where the arena barrier closes in), gated behind an actor that only exists on
+> that map. The mod now hooks `setAnm()` to detect rearing and, when riding solo with that same actor present (i.e.
+> the Ganondorf duel scene), reapplies her existing lean-back pose; everywhere else — such as the Kakariko reunion —
+> it falls back to her "stand" pose, the same pose the existing table already uses for the horse's own upright
+> "stand" animation. Epona's own rearing animation is left completely untouched either way. Outside of the
+> dedicated lean-back case, this holds a static alert pose for the duration of the rear rather than fully animating
+> the reaction, since there's no other dedicated "startled on horseback" animation for Zelda to play, but it's a
 > substantial improvement over her seated idle pose not changing at all.
 >
 > One of the game's earliest story cutscenes shows Epona carrying bundles of firewood — a separate decorative prop
