@@ -43,6 +43,61 @@ archery duel, where she rides alone) is never touched or duplicated.
 > tracked actor is still being created (`fpcM_IsCreating`) before concluding it's gone, so it no longer spawns a
 > duplicate while the first is still in flight — this has been confirmed fixed via log analysis, but please report
 > back if it's still reproducible in-game.
+>
+> Zelda used to face the wrong way (often straight towards in-game North) and ignore Epona's own movement — e.g. not
+> leaning back when Epona reared up — during some story cutscenes. `daHoZelda_c::setMatrix()` orients her by copying
+> Epona's separate, logical heading field (`shape_angle`) wholesale; that field is normally kept in lockstep with
+> Epona's own rendered pose, but scripted cutscenes that move Epona via demo data don't always keep it in sync, since
+> vanilla never needed it to be there (only the real duel ever has a horseback-Zelda riding along) — leaving
+> `shape_angle` stale while Epona's actual animated pose (including rearing up) keeps changing underneath it.
+>
+> Several earlier attempts at fixing this by *decomposing* a joint matrix into Euler angles and/or recomputing
+> position from it (with some fixed correction for that joint's own bind-pose twist, the same technique
+> `daAlink_c::setSyncHorsePos()` uses for Link's own rotation while riding) all regressed in one way or another — a
+> constant ~90 degree orientation error, sinking into Epona's model while rearing, floating next to her instead, or
+> ending up noticeably off her normal seat even outside of rearing. The key realization was that every one of those
+> regressions showed up specifically in the dual-ride seat (Zelda riding behind Link) — because that seat already
+> works correctly via vanilla's own `shape_angle` logic in the large majority of cutscenes, which is the one case
+> this engine code was actually written and tested for. It's only the *solo* seat (no Link riding, which only this
+> mod's standalone Zelda ever uses) where `shape_angle` goes stale and needs a fix at all.
+>
+> The mod now scopes its override to the solo seat only, leaving the dual-ride seat's vanilla computation completely
+> untouched. For the solo seat, Zelda's position is left exactly as the original, unmodified function already
+> computed it, and only the rotation used to draw her is replaced — derived from `horse->getSaddleMtx()` (a live,
+> animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the same
+> `mDoMtx_MtxToRot()` + bind-pose correction technique `daAlink_c::setSyncHorsePos()` uses for Link. Since the
+> dual-ride seat is never touched, it can never regress, and the solo seat's position is never recomputed, so it
+> can never sink, float, or shift off-center. This also matches what was independently observed in-game: Zelda's
+> position had only ever been reported wrong in the dual-ride (actual saddle) seat, never while riding solo, being
+> led by Link, or being ridden alongside a bulblin.
+>
+> One known remaining edge case: a few dual-ride cutscenes (e.g. right after the first King Bulblin duel on Eldin
+> Bridge) still don't react to Epona's movement correctly, since that seat's vanilla logic isn't touched by this
+> fix. This is a pre-existing, narrower issue left for future investigation rather than something this fix attempts
+> to solve.
+>
+> Separately from her orientation, Zelda's *animation* also didn't react to Epona rearing up, and a few individual
+> story cutscenes had their own quirks — e.g. one of the earliest shows Epona carrying bundles of firewood that end
+> up sharing the saddle with Zelda once she's always present. Patching each of these up individually (as was tried)
+> kept surfacing new, similarly-themed issues with no end in sight, since every story cutscene that drives Epona
+> directly risks a new mismatch with a permanent extra rider that vanilla was never designed around.
+>
+> Rather than continuing down that path, the mod now hides its own spawned Zelda for the duration of any *scripted*
+> story cutscene by default (detected via `daHorse_c::procToolDemo()`'s `PROC_TOOL_DEMO_e` state — the one Epona
+> enters only while being puppeted directly by cutscene data — rather than, say, ordinary player-driven riding),
+> and she reappears automatically once the cutscene ends. This is purely a visibility toggle: cutscenes that already
+> feature their own story-placed Zelda (such as the horseback archery duel against Ganondorf) are completely
+> unaffected either way, since the mod only ever manages the actor it spawned itself. The horse call/grass whistle
+> is also unaffected, even though it briefly reuses some of the same demo-mode plumbing for its own unrelated
+> "gallop back to the player" behavior — it's excluded from the cutscene check by its own distinct flag
+> (`FLG0_CALL_HORSE`).
+>
+> If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
+> seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
+> off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor
+> while `procToolDemo()` is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than
+> just appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into
+> that cutscene, it only applies going forward.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

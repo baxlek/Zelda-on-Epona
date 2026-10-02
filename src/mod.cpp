@@ -1,7 +1,9 @@
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/actor.h"
+#include "mods/svc/config.h"
 #include "mods/svc/log.hpp"
+#include "mods/svc/ui.h"
 
 // Game includes
 #include "d/actor/d_a_horse.h"
@@ -10,12 +12,33 @@
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
+#include "f_pc/f_pc_name.h"
+#include "m_Do/m_Do_mtx.h"
 
 DEFINE_MOD();
 
 IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ActorService, svc_actor);
+IMPORT_SERVICE(ConfigService, svc_config);
+IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(LogService, svc_log);
+
+// Whether this mod's own spawned Zelda should stay visible on Epona during scripted story
+// cutscenes. Off by default: by default she's hidden for the duration of any such cutscene (and
+// reappears once it ends) rather than potentially clashing with the scene's own staging (wrong
+// orientation/animation, overlapping props, etc.) the way earlier attempts at patching her up for
+// every individual cutscene kept doing. Exposed as a single toggle in the mod's panel in the host
+// Mods window.
+static ConfigVarHandle g_cvarShowInCutscenes = 0;
+
+static bool show_zelda_in_cutscenes() {
+    bool value = false;
+    if (g_cvarShowInCutscenes == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarShowInCutscenes, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
 
 // The stage name used by the game to load the horseback-Zelda actor (see `d_stage.cpp`'s
 // OBJNAME table: OBJNAME("HoZelda", fpcNm_HOZELDA_e, -1)).
@@ -111,6 +134,93 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
+// `daHoZelda_c::setMatrix()` orients Zelda by copying `horse->shape_angle` wholesale, a separate,
+// logical heading field that is normally kept in lockstep with the horse's own rendered pose
+// (`daHorse_c::setMatrix()` builds the horse's own base matrix from that exact same field). During
+// ordinary gameplay those always agree. But during story cutscenes driven by
+// `daHorse_c::procToolDemo()` (scripted demo data moving/animating Epona directly), `shape_angle`
+// is only overwritten when the demo track has its rotation channel enabled
+// (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it, leaving `shape_angle` frozen
+// at a stale value while Epona's actual animated pose (including rearing up) keeps changing
+// underneath it.
+//
+// Crucially, this only matters for cutscenes where *this mod's* Zelda rides solo (Link not also on
+// Epona): vanilla never had a reason to keep a solo rider's heading in sync in those cutscenes,
+// since no such rider existed before this mod. Dual-ride cutscenes (Link riding, Zelda on the rear
+// seat) are, per testing, already handled correctly by vanilla's own `shape_angle` logic in the
+// large majority of cases -- that's the one scenario this engine code was actually written for and
+// tested against. Overriding both seats indiscriminately was tried and regressed repeatedly
+// (constant ~90 degree error substituting the root joint wholesale; sinking into Epona while
+// rearing when deriving rotation from the saddle joint but leaving the rear seat's position as the
+// original computed it; floating next to Epona when re-anchoring position to the root joint
+// instead; an off-center seat entirely when deriving both position and rotation from the saddle
+// joint together). All of those regressions occurred in the rear (dual-ride) seat specifically,
+// which never needed fixing in the first place -- so the override below is scoped to the solo
+// (front saddle) seat only, leaving the dual-ride seat's already-working vanilla computation
+// completely untouched.
+//
+// For the solo seat, position is left exactly as the original, unmodified function already
+// computed it (this hook runs *after* the original, so `current.pos` is already correct); only the
+// drawn rotation is replaced, derived from `horse->getSaddleMtx()` (a live, fully up-to-date
+// animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the
+// same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
+// uses for Link's own rotation while riding.
+//
+// Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
+// correctly as-is, so it's left untouched to avoid any risk of regressing it.
+DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
+
+static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        return;
+    }
+
+    // Dual-ride (Link also on Epona) already works correctly via vanilla's own computation; only
+    // the solo seat (no Link riding) needs the rotation override.
+    if (daPy_getLinkPlayerActorClass()->checkHorseRide()) {
+        return;
+    }
+
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse == nullptr || zelda->model == nullptr) {
+        return;
+    }
+
+    csXyz rot;
+    mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
+    rot.z += -0x4000;
+
+    zelda->shape_angle = rot;
+    zelda->current.angle.y = rot.y;
+
+    mDoMtx_stack_c::transS(zelda->current.pos);
+    mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
+    zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
+// Rather than attempting to patch up Zelda's orientation, animation, and any overlapping props for
+// every individual story cutscene that drives Epona (a reaction/firewood/etc. fix was tried for
+// each as they were found, but kept surfacing new, similarly-themed regressions with no end in
+// sight), this mod instead hides its own spawned Zelda for the duration of any such cutscene by
+// default, controlled by `g_cvarShowInCutscenes` above (see `mod_update()`'s cutscene-detection
+// gate). The orientation fix above still applies whenever she *is* shown (including when the user
+// opts in via that toggle), since that's a simple, narrowly-scoped correction to her own seat, not
+// a per-cutscene patch.
+static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_TOGGLE;
+    control.label = "Show Zelda during cutscenes";
+    control.help_rml = "When off (default), Zelda is hidden for the duration of scripted story "
+                        "cutscenes and reappears once they end. Cutscenes that already feature "
+                        "their own story-placed Zelda, and the horse call/grass whistle, are "
+                        "unaffected either way.";
+    control.binding = UI_BINDING_CONFIG_VAR;
+    control.config_var = g_cvarShowInCutscenes;
+    svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
+    return MOD_OK;
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     ModResult result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
@@ -118,6 +228,37 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
                          (int)result);
         // Not fatal: the mod still works, just without the horse-call fix.
+    }
+
+    result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda matrix, orientation may be wrong during some cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the cutscene-orientation fix.
+    }
+
+    ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
+    cvarDesc.name = "showInCutscenes";
+    cvarDesc.type = CONFIG_VAR_BOOL;
+    cvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &cvarDesc, &g_cvarShowInCutscenes);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register showInCutscenes option, defaulting to hidden during cutscenes: {}",
+            (int)result);
+        // Not fatal: `show_zelda_in_cutscenes()` already falls back to "off" when the var isn't
+        // registered.
+    }
+
+    UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
+    panelDesc.build = build_mods_panel;
+    result = svc_ui->register_mods_panel(mod_ctx, &panelDesc);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to register mods panel, the cutscene toggle won't be visible: {}",
+                         (int)result);
+        // Not fatal: the config var still exists (and can be set via config.json/--cvar even
+        // without a UI control for it), it just won't be reachable from the Mods window.
     }
 
     mods::log::info("zelda_on_epona initialized");
@@ -155,14 +296,39 @@ MOD_EXPORT ModResult mod_update(ModError*) {
             (int)fopAcM_GetID(attachedZelda), (int)s_spawnedZeldaId);
     }
 
-    // Keep Zelda riding along on Epona at all times, even after Link dismounts: if nobody
-    // (neither the story nor this mod) currently has her attached to the horse, spawn her.
-    // `daHoZelda_c::execute()` attaches itself to the current horse every tick
-    // (`horse->setZeldaActor(this)`), and `daHoZelda_c::setMatrix()`/`setRideOffset()`/`setAnm()`
-    // already support her sitting alone at the front of the saddle whenever Link isn't riding
-    // (the `mIsSingleRide` case), so once created it takes care of the rest on its own: reins,
-    // dual-ride animation blending, and the solo idle animation.
-    if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
+    // Whether a real, scripted story cutscene -- as opposed to ordinary gameplay -- is currently
+    // driving Epona. `daHorse_c::procToolDemo()` (`m_procID == PROC_TOOL_DEMO_e`) is the state the
+    // horse enters only while being puppeted directly by JStudio demo data
+    // (`dDemo_c::getActor()`), which is exactly how every scripted story cutscene moves and
+    // animates her; ordinary player-driven riding, and the horse-call/grass-whistle gallop-back
+    // (which repurposes some of the same demo-mode plumbing for its own unrelated "run to player"
+    // behavior, flagged by `FLG0_CALL_HORSE` instead), never set it.
+    bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
+                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
+
+    if (inScriptedCutscene) {
+        // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
+        // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
+        // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the Ganondorf
+        // duel) never have `s_hasSpawnedZelda` set in the first place, so they're untouched either
+        // way.
+        if (!show_zelda_in_cutscenes()) {
+            remove_spawned_zelda();
+        }
+        // Note: we deliberately never spawn here, even if the toggle is (or just became, via the
+        // user flipping it mid-cutscene) true. `fopAcM_create` is not safe to call while
+        // `daHorse_c::procToolDemo()` is actively puppeting the horse from scripted JStudio demo
+        // data; doing so crashed (SIGABRT) rather than simply creating the actor a frame late. If
+        // she isn't already attached by the time a cutscene starts, she stays hidden for its
+        // duration and only (re)spawns, below, once the cutscene actually ends.
+    } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
+        // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
+        // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
+        // horse, spawn her. `daHoZelda_c::execute()` attaches itself to the current horse every
+        // tick (`horse->setZeldaActor(this)`), and `daHoZelda_c::setMatrix()`/`setRideOffset()`/
+        // `setAnm()` already support her sitting alone at the front of the saddle whenever Link
+        // isn't riding (the `mIsSingleRide` case), so once created it takes care of the rest on its
+        // own: reins, dual-ride animation blending, and the solo idle animation.
         spawn_zelda_on_horse(horse);
     }
 
@@ -194,6 +360,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<HorseCallSubstance>();
+    mods::hook::uninstall<HoZeldaSetMatrix>();
     return MOD_OK;
 }
 }
