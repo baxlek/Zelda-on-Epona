@@ -94,7 +94,10 @@ archery duel, where she rides alone) is never touched or duplicated.
 >
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
-> off by default.
+> off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor
+> while `procToolDemo()` is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than
+> just appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into
+> that cutscene, it only applies going forward.
 
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.

@@ -306,13 +306,21 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
                               !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
 
-    if (inScriptedCutscene && !show_zelda_in_cutscenes()) {
+    if (inScriptedCutscene) {
         // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
         // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
         // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the Ganondorf
         // duel) never have `s_hasSpawnedZelda` set in the first place, so they're untouched either
-        // way. She respawns automatically (below) once the cutscene ends.
-        remove_spawned_zelda();
+        // way.
+        if (!show_zelda_in_cutscenes()) {
+            remove_spawned_zelda();
+        }
+        // Note: we deliberately never spawn here, even if the toggle is (or just became, via the
+        // user flipping it mid-cutscene) true. `fopAcM_create` is not safe to call while
+        // `daHorse_c::procToolDemo()` is actively puppeting the horse from scripted JStudio demo
+        // data; doing so crashed (SIGABRT) rather than simply creating the actor a frame late. If
+        // she isn't already attached by the time a cutscene starts, she stays hidden for its
+        // duration and only (re)spawns, below, once the cutscene actually ends.
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
         // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
