@@ -99,6 +99,9 @@ archery duel, where she rides alone) is never touched or duplicated.
 > just appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into
 > that cutscene, it only applies going forward.
 
+> [!NOTE]
+> AI can get WORDY! 
+
 See the [Dusklight modding documentation](https://github.com/TwilitRealm/dusklight/blob/main/docs/modding.md)
 for the full mod API: services, hooking game functions, asset overlays, and more.
 
