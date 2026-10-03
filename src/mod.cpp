@@ -12,9 +12,14 @@
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_particle.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
+#include "JSystem/JKernel/JKRExpHeap.h"
+#include "JSystem/JParticle/JPAResourceManager.h"
+#include "m_Do/m_Do_dvd_thread.h"
+#include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
 #include "Z2AudioLib/Z2SeMgr.h"
@@ -672,6 +677,175 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     arrow->speed = dir * arrow->field_0x99c;
 }
 
+// Zelda's Light Arrow hit mark/charge effects (`daArrow_c::setLightArrowHitMark`/
+// `setLightChargeEffect`, particle IDs 0x896F-0x8978) only exist in the horseback-duel stage's
+// room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not in the
+// always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever this
+// mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since the
+// mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted game
+// assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*,
+// always-resident particle bank -- alongside `common.jpc` (bank 0) and whatever per-room
+// `Pscene###.jpc` is normally loaded (bank 1) -- and redirects just those ten particle IDs to it.
+//
+// `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager
+// slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to
+// be made to exist first:
+//   1. Bump `ridMax` from 2 to 3 by hooking `JPAEmitterManager`'s constructor (no pointer-to-member
+//      exists for a constructor, hence by symbol name) and rewriting its `i_ridMax` argument before
+//      the original runs, so its resource-manager slot array is allocated with room for bank 2.
+//   2. Once `createCommon()` finishes setting up bank 0, kick off loading `Pscene181.jpc`'s raw
+//      bytes the same way vanilla already loads every per-room scene archive (`readScene()`,
+//      below): asynchronously, into `dPa_control_c`'s own resident particle heap.
+//   3. That heap (`m_resHeap`) is itself a fixed-size `JKRExpHeap` sized once, as a hardcoded
+//      constant baked into `dPa_control_c`'s constructor -- there's no parameter to adjust, so the
+//      underlying heap-creation call is hooked directly and only *that* allocation (identified by
+//      its distinctive parent heap and exact requested size) is bumped by a safety margin, leaving
+//      every other `JKRExpHeap::create` call site in the engine untouched.
+//   4. Once the load completes, build a `JPAResourceManager` over it and register it as bank 2.
+//   5. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
+//      replaced so that, once bank 2 is ready, exactly those ten Light Arrow particle IDs resolve
+//      to it; everything else keeps using vanilla's existing bank 0/1 logic unchanged.
+static const u8 kLightArrowResMgrId = 2;
+
+static bool is_light_arrow_particle_id(u16 nameId) {
+    switch (nameId) {
+        case 0x896F:
+        case 0x8970:
+        case 0x8971:
+        case 0x8972:
+        case 0x8973:
+        case 0x8974:  // setLightArrowHitMark effects A-F
+        case 0x8975:
+        case 0x8976:
+        case 0x8977:
+        case 0x8978:  // setLightChargeEffect effects A-D
+            return true;
+        default:
+            return false;
+    }
+}
+
+static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
+static bool s_lightArrowJpcReady = false;
+
+// `dPa_control_c`'s resident particle-resource heap is created with a hardcoded, platform-fixed
+// size (`d_particle.cpp`: 0x1f0800 bytes in DEBUG builds, 0x96000 otherwise) that vanilla never
+// budgeted any headroom into for an extra always-resident archive. `JKRExpHeap::create` itself is
+// a shared low-level utility used by dozens of unrelated heap allocations across the whole engine,
+// so this only ever touches the one allocation matching both the particle system's distinctive
+// parent heap (`mDoExt_getArchiveHeap()`) and one of those exact known sizes.
+//
+// Note this heap doesn't just hold `common.jpc`'s raw bytes at rest: vanilla's own `readScene()`
+// already loads each room's `Pscene###.jpc` raw bytes into this same heap too (freed/replaced on
+// every room change, same as `common.jpc`'s own raw bytes stay resident for the whole heap's
+// lifetime), so even unmodified, this heap's tight (614 KB in release builds) budget is already
+// sized for "common.jpc + one room's scene archive" at once with very little slack. Permanently
+// adding a 3rd always-resident archive on top of that -- with no way to measure its exact size
+// up front -- needs a generous margin, not just a token bump: a first attempt at a small 128 KB
+// margin still produced a `JKRExpHeap` allocation-failure `SIGABRT` in practice (crash log in
+// `res/`), so this uses a much larger, safely-oversized margin instead. A couple of extra
+// megabytes of headroom is trivial on the hardware this mod targets.
+using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
+DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
+
+static const u32 kParticleResHeapExtraBytes = 0x400000;  // 4 MiB headroom for Pscene181.jpc, its
+                                                          // resource manager, and continued normal
+                                                          // per-room scene loading alongside it
+
+static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*, void*) {
+    JKRHeap* parent = mods::arg<JKRHeap*>(args, 1);
+    if (parent != mDoExt_getArchiveHeap()) {
+        return HOOK_CONTINUE;
+    }
+
+    u32& size = mods::arg_ref<u32>(args, 0);
+    if (size == 0x1f0800 || size == 0x96000) {
+        size += kParticleResHeapExtraBytes;
+    }
+    return HOOK_CONTINUE;
+}
+
+// `JPAEmitterManager`'s constructor has no pointer-to-member-function form in C++, so this hooks
+// it by symbol name instead; it has only one overload, so the unmangled display name resolves
+// unambiguously. Argument 5 is `i_ridMax`, which sizes the resource-manager slot array allocated
+// later in the same constructor call, so bumping it here (before the original body runs) is enough
+// to make room for bank 2.
+DEFINE_HOOK_SYMBOL("JPAEmitterManager::JPAEmitterManager",
+                   void(JPAEmitterManager*, u32, u32, JKRHeap*, u8, u8),
+                   ParticleEmitterManagerCtor);
+
+static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, void*, void*) {
+    u8& ridMax = mods::arg_ref<u8>(args, 5);
+    if (ridMax <= kLightArrowResMgrId) {
+        ridMax = kLightArrowResMgrId + 1;
+    }
+    return HOOK_CONTINUE;
+}
+
+// Kicks off loading `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the common
+// bank (and, critically, after `mEmitterMng` -- constructed earlier in this same function -- has
+// already had its slot count bumped by the hook above). This mirrors exactly how vanilla's own
+// `dPa_control_c::readScene()` loads every per-room scene archive: asynchronously, into the same
+// resident particle-resource heap that `common.jpc`'s own raw bytes live in forever.
+DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
+
+static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
+    if (s_lightArrowJpcLoad != nullptr || s_lightArrowJpcReady) {
+        return;
+    }
+
+    s_lightArrowJpcLoad = mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0,
+                                                         dComIfGp_particle_getResHeap());
+    if (s_lightArrowJpcLoad == nullptr) {
+        mods::log::warn("failed to start loading Pscene181.jpc for Light Arrow particles");
+    }
+}
+
+// Polls the in-flight `Pscene181.jpc` load (see `mod_update()`) and, once it completes, builds a
+// resource manager over it and registers it as bank 2 -- the same two steps vanilla's own
+// `createScene()` performs for whatever bank 1 archive it just finished loading.
+static void poll_light_arrow_particle_bank() {
+    if (s_lightArrowJpcLoad == nullptr || s_lightArrowJpcReady || s_lightArrowJpcLoad->sync() == 0) {
+        return;
+    }
+
+    void* jpcData = s_lightArrowJpcLoad->getMemAddress();
+    s_lightArrowJpcLoad->destroy();
+    s_lightArrowJpcLoad = nullptr;
+
+    if (jpcData == nullptr) {
+        mods::log::warn("Pscene181.jpc failed to load, Light Arrow particles outside the "
+                         "horseback duel will be unavailable");
+        return;
+    }
+
+    JKRHeap* heap = dComIfGp_particle_getResHeap();
+    JPAResourceManager* mgr = JKR_NEW_ARGS(heap, 0) JPAResourceManager(jpcData, heap);
+    if (mgr == nullptr) {
+        mods::log::warn("failed to build Pscene181.jpc resource manager, Light Arrow particles "
+                         "outside the horseback duel will be unavailable");
+        return;
+    }
+
+    dPa_control_c::getEmitterManager()->entryResourceManager(mgr, kLightArrowResMgrId);
+    s_lightArrowJpcReady = true;
+}
+
+// Once bank 2 is ready, redirects the ten Light Arrow hit mark/charge effect particle IDs to it;
+// everything else (and these same IDs, while bank 2 is still loading) keeps using vanilla's
+// existing top-bit common/scene selection unchanged.
+DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);
+
+static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval, void*) {
+    u16 nameId = mods::arg<u16>(args, 0);
+    u8 result = (s_lightArrowJpcReady && is_light_arrow_particle_id(nameId))
+                    ? kLightArrowResMgrId
+                    : ParticleGetRmId::g_orig(nameId);
+    if (retval != nullptr) {
+        *static_cast<u8*>(retval) = result;
+    }
+}
+
 // Rather than attempting to patch up Zelda's orientation, animation, and any overlapping props for
 // every individual story cutscene that drives Epona (a reaction/firewood/etc. fix was tried for
 // each as they were found, but kept surfacing new, similarly-themed regressions with no end in
@@ -747,6 +921,43 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
     }
 
+    result = mods::hook::add_pre<ParticleResHeapCreate>(on_particle_res_heap_create_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook particle resource heap creation, the Light Arrow particle bank may "
+            "fail to load if the heap runs out of room: {}",
+            (int)result);
+        // Not fatal: if there happens to be enough headroom already, the mod still works.
+    }
+
+    result = mods::hook::add_pre<ParticleEmitterManagerCtor>(on_particle_emitter_manager_ctor_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook particle emitter manager construction, Light Arrow particles outside "
+            "the horseback duel will be unavailable: {}",
+            (int)result);
+        // Not fatal: the mod still works, Light Arrows just won't show their hit mark/charge
+        // effects outside the one vanilla cutscene that already has them.
+    }
+
+    result = mods::hook::add_post<ParticleCreateCommon>(on_particle_create_common_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook particle common bank creation, Light Arrow particles outside the "
+            "horseback duel will be unavailable: {}",
+            (int)result);
+        // Not fatal: same as above.
+    }
+
+    result = mods::hook::replace<ParticleGetRmId>(on_particle_get_rm_id_replace);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook particle resource manager selection, Light Arrow particles outside "
+            "the horseback duel will be unavailable: {}",
+            (int)result);
+        // Not fatal: same as above.
+    }
+
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
     cvarDesc.name = "showInCutscenes";
     cvarDesc.type = CONFIG_VAR_BOOL;
@@ -788,6 +999,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    poll_light_arrow_particle_bank();
+
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
