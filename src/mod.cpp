@@ -166,6 +166,14 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
 // uses for Link's own rotation while riding.
 //
+// The saddle joint's pitch swings much further than a seated rider's own forward/back lean would
+// (it's tracking the saddle itself, not a human hip joint), so taking it unclamped makes Zelda tip
+// over noticeably too far backward whenever Epona rears up startled -- the right animation, just
+// visibly out of position relative to the pose it's meant to depict. Clamping that pitch keeps her
+// lean bounded to the same `shapeLimitAngle` (~40 degrees) the horse's own body pitch is limited to
+// elsewhere (`daHorse_c::footBgCheck()`), which matches how far back a seated rider's body would
+// plausibly tilt.
+//
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is, so it's left untouched to avoid any risk of regressing it.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
@@ -190,6 +198,14 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     csXyz rot;
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
+
+    // See `daHorse_c::footBgCheck()`'s identical `shapeLimitAngle` for the horse's own body pitch.
+    static const s16 shapeLimitAngle = 0x1C72;
+    if (rot.x > shapeLimitAngle) {
+        rot.x = shapeLimitAngle;
+    } else if (rot.x < -shapeLimitAngle) {
+        rot.x = -shapeLimitAngle;
+    }
 
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
