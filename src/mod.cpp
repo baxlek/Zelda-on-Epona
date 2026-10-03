@@ -386,14 +386,16 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     HoZeldaTargetSearch* search = static_cast<HoZeldaTargetSearch*>(i_data);
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
-        fopAcM_GetName(i_actor) == fpcNm_B_GND_e || fopAcM_GetName(i_actor) == fpcNm_E_WB_e ||
-        fopAcM_GetName(i_actor) == fpcNm_E_DB_e || fopAcM_GetName(i_actor) == fpcNm_E_YD_e ||
-        i_actor->health <= 0 || is_dormant_enemy(i_actor))
+        fopAcM_GetName(i_actor) == fpcNm_E_WB_e || fopAcM_GetName(i_actor) == fpcNm_E_DB_e ||
+        fopAcM_GetName(i_actor) == fpcNm_E_YD_e || i_actor->health <= 0 ||
+        is_dormant_enemy(i_actor))
     {
-        // Ganondorf is deliberately excluded: he already has his own, correctly-functioning
-        // targeting during the real duel (handled by vanilla's untouched Ganondorf search when
-        // this mod's hooks aren't in play for his own story-placed Zelda), and auto-targeting him
-        // outside of that scripted fight would conflict with it.
+        // No explicit Ganondorf (`fpcNm_B_GND_e`) exclusion is needed here: `B_gnd` is only ever
+        // placed directly by the stage itself, in the one room that hosts the real horseback
+        // archery duel -- and `mod_update()`'s `storyHoZeldaActive` check already tears down (and
+        // withholds respawning) this mod's own Zelda for as long as that duel's own story-placed
+        // HoZelda exists, so `judge_nearest_enemy()` never runs at all while a `B_gnd` actor could
+        // possibly be alive to be found here.
         //
         // E_WB (Bullbo, the wild boar Bulblins ride) is excluded too: it's its own `fopAc_ENEMY_e`
         // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
@@ -501,9 +503,9 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
     fopAc_ac_c* target_actor = zelda->mGndAcKeep.getActor();
 
     // Only non-NULL if the target this mod picked happens to actually be Ganondorf (never the
-    // case in practice: `judge_nearest_enemy()` above excludes him), kept so his own mount/
-    // vulnerability checks below still apply correctly rather than silently skipping them if it
-    // ever does happen.
+    // case in practice: this mod's own Zelda is never alive at the same time as a `B_gnd` actor,
+    // see `judge_nearest_enemy()`'s comment above), kept so his own mount/vulnerability checks
+    // below still apply correctly rather than silently skipping them if it ever does happen.
     b_gnd_class* ganondorf = (target_actor != NULL && fopAcM_GetName(target_actor) == fpcNm_B_GND_e)
                                  ? static_cast<b_gnd_class*>(target_actor)
                                  : NULL;
