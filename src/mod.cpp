@@ -809,6 +809,20 @@ static bool is_light_arrow_particle_id(u16 nameId) {
 
 static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
 static bool s_lightArrowJpcReady = false;
+static JPAResourceManager* s_lightArrowResMgr = nullptr;
+
+// TEMPORARY DIAGNOSTIC: the reported "missing Light Arrow trail" wasn't fixed by adding 0x896E to
+// the allowlist below, so it may not be a particle at all -- or it may be a particle ID this
+// hand-picked list simply hasn't identified yet (`Pscene181.jpc` likely bundles other resources
+// beyond the ones `daArrow_c` is known to reference by name). While this is `true`, `getRM_ID()`
+// ignores `is_light_arrow_particle_id()` entirely and instead redirects *any* particle ID that
+// `Pscene181.jpc`'s own resource manager actually contains (checked directly via
+// `JPAResourceManager::getResource()`) to bank 2. This can only ever affect particles that are
+// genuinely bundled in that one archive -- bank 0 (`common.jpc`) and bank 1 (the per-room scene)
+// are untouched -- so it's safe to ship temporarily to help narrow down which, if any, of
+// `Pscene181.jpc`'s particles correspond to the missing trail. Remove this flag (and the branch
+// it guards) once the investigation concludes.
+static const bool kDiagnosticEnableAllPscene181Particles = true;
 
 // `dPa_control_c`'s resident particle-resource heap is created with a hardcoded, platform-fixed
 // size (`d_particle.cpp`: 0x1f0800 bytes in DEBUG builds, 0x96000 otherwise) that vanilla never
@@ -891,6 +905,10 @@ static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
         s_lightArrowJpcLoad = nullptr;
     }
     s_lightArrowJpcReady = false;
+    // The previous resource manager (if any) belonged to the same now-defunct heap/emitter
+    // manager; it's gone along with them, so this pointer must not be dereferenced until a new
+    // one is built for the new `dPa_control_c` instance below.
+    s_lightArrowResMgr = nullptr;
 
     s_lightArrowJpcLoad = mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0,
                                                          dComIfGp_particle_getResHeap());
@@ -926,17 +944,23 @@ static void poll_light_arrow_particle_bank() {
     }
 
     dPa_control_c::getEmitterManager()->entryResourceManager(mgr, kLightArrowResMgrId);
+    s_lightArrowResMgr = mgr;
     s_lightArrowJpcReady = true;
 }
 
 // Once bank 2 is ready, redirects the eleven Light Arrow trail/hit mark/charge effect particle
-// IDs to it; everything else (and these same IDs, while bank 2 is still loading) keeps using
+// IDs to it (or, while the diagnostic above is active, every particle ID `Pscene181.jpc` actually
+// contains); everything else (and these same IDs, while bank 2 is still loading) keeps using
 // vanilla's existing top-bit common/scene selection unchanged.
 DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);
 
 static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval, void*) {
     u16 nameId = mods::arg<u16>(args, 0);
-    u8 result = (s_lightArrowJpcReady && is_light_arrow_particle_id(nameId))
+    bool isPscene181Particle = kDiagnosticEnableAllPscene181Particles
+                                    ? (s_lightArrowResMgr != nullptr &&
+                                       s_lightArrowResMgr->getResource(nameId) != nullptr)
+                                    : is_light_arrow_particle_id(nameId);
+    u8 result = (s_lightArrowJpcReady && isPscene181Particle)
                     ? kLightArrowResMgrId
                     : ParticleGetRmId::g_orig(nameId);
     if (retval != nullptr) {
