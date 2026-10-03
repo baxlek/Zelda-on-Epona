@@ -12,6 +12,7 @@
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_particle.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
@@ -670,6 +671,25 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 
     dir.normalizeZP();
     arrow->speed = dir * arrow->field_0x99c;
+}
+
+// TEMPORARY DIAGNOSTIC: logs which room-scene particle archive (`/res/Particle/Pscene###.jpc`) the
+// engine loads for the current room, so we can identify which one contains the Light Arrow hit
+// mark/charge effects (`daArrow_c::setLightArrowHitMark`/`setLightChargeEffect`, IDs 0x896F-0x8978
+// per `dPa_RM()`) that today only exist in that room-specific bank rather than the always-resident
+// common one (`/res/Particle/common.jpc`). Once that scene number is known, this hook (and the
+// logging it drives) should be removed. `param_0` is the scene number the game is about to load;
+// `dPa_control_c::readScene()` is called once per room on scene (re)load, skipping the call when
+// the requested scene is already the one currently loaded (`param_0 == field_0x18`) or `0xff`
+// (meaning "no scene-specific particle bank").
+DEFINE_HOOK(&dPa_control_c::readScene, ParticleReadScene);
+
+static HookAction on_particle_read_scene_pre(ModContext*, void* args, void*, void*) {
+    u8 sceneNo = mods::arg<u8>(args, 1);
+    if (sceneNo != 0xff) {
+        mods::log::info("[diagnostic] loading /res/Particle/Pscene{:03d}.jpc", sceneNo);
+    }
+    return HOOK_CONTINUE;
 }
 
 // Rather than attempting to patch up Zelda's orientation, animation, and any overlapping props for
