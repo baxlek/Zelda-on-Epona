@@ -14,6 +14,7 @@
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "m_Do/m_Do_mtx.h"
+#include "SSystem/SComponent/c_lib.h"
 
 DEFINE_MOD();
 
@@ -134,68 +135,107 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
-// `daHoZelda_c::setMatrix()` orients Zelda by copying `horse->shape_angle` wholesale, a separate,
-// logical heading field that is normally kept in lockstep with the horse's own rendered pose
-// (`daHorse_c::setMatrix()` builds the horse's own base matrix from that exact same field). During
-// ordinary gameplay those always agree. But during story cutscenes driven by
-// `daHorse_c::procToolDemo()` (scripted demo data moving/animating Epona directly), `shape_angle`
-// is only overwritten when the demo track has its rotation channel enabled
-// (`dDemo_actor_c::ENABLE_ROTATE_e`); many cutscenes never enable it, leaving `shape_angle` frozen
-// at a stale value while Epona's actual animated pose (including rearing up) keeps changing
-// underneath it.
+// `daHoZelda_c::setMatrix()`'s own, unmodified computation for the solo (front saddle) seat --
+// `current.pos` from a fixed local offset through `horse->getRootMtx()`, `shape_angle` copied
+// straight from `horse->shape_angle` -- is value-for-value the same technique
+// `daAlink_c::setSyncHorsePos()` uses for Link's own riding position outside of a few specific
+// movement animations (`mDoMtx_multVec(horse_p->getRootMtx(), &l_localHorseRidePos,
+// &current.pos); shape_angle = horse_p->shape_angle;`), just with a different local offset
+// constant. Since Link, using that exact computation, never clips into or floats off of Epona
+// while she's startled and rears up, the computation itself isn't the problem; every attempt at
+// improving on it instead (deriving rotation from the live saddle joint; re-projecting Zelda's
+// local offset through that joint; nudging only its vertical component) ended up regressing one
+// axis while fixing another (leaning too far back; clipping into Epona's risen body; floating
+// above the saddle), because Zelda's own local offset sits much further forward and higher than
+// Link's -- any deviation from the plain root-matrix computation gets amplified by that larger
+// lever arm in a way it never does for Link.
 //
-// Crucially, this only matters for cutscenes where *this mod's* Zelda rides solo (Link not also on
-// Epona): vanilla never had a reason to keep a solo rider's heading in sync in those cutscenes,
-// since no such rider existed before this mod. Dual-ride cutscenes (Link riding, Zelda on the rear
-// seat) are, per testing, already handled correctly by vanilla's own `shape_angle` logic in the
-// large majority of cases -- that's the one scenario this engine code was actually written for and
-// tested against. Overriding both seats indiscriminately was tried and regressed repeatedly
-// (constant ~90 degree error substituting the root joint wholesale; sinking into Epona while
-// rearing when deriving rotation from the saddle joint but leaving the rear seat's position as the
-// original computed it; floating next to Epona when re-anchoring position to the root joint
-// instead; an off-center seat entirely when deriving both position and rotation from the saddle
-// joint together). All of those regressions occurred in the rear (dual-ride) seat specifically,
-// which never needed fixing in the first place -- so the override below is scoped to the solo
-// (front saddle) seat only, leaving the dual-ride seat's already-working vanilla computation
-// completely untouched.
+// So rather than attempting to derive a better position/rotation for the rearing case, this just
+// borrows Link's own riding position outright for it: while Epona is mid-rear
+// (`horse->checkTurnStand()`), Zelda's seat is placed using Link's own local ride offset
+// (`daAlink_c`'s `l_localHorseRidePos`, duplicated below since the original is a file-local
+// constant in `d_a_alink.cpp`) through the exact same root-matrix-plus-direct-shape_angle-copy
+// computation already proven not to clip or float for Link in that same state. Outside of a rear,
+// this hook does nothing at all: vanilla's own computation (with Zelda's own local offset) was
+// never reported to look wrong there, so it's left completely untouched.
 //
-// For the solo seat, position is left exactly as the original, unmodified function already
-// computed it (this hook runs *after* the original, so `current.pos` is already correct); only the
-// drawn rotation is replaced, derived from `horse->getSaddleMtx()` (a live, fully up-to-date
-// animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the
-// same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
-// uses for Link's own rotation while riding.
+// `checkTurnStand()` only reports true for the held-rear portion in the *middle* of Epona's whole
+// startle/turn animation (see `daHorse_c::procTurn()`'s `field_0x1780`/`field_0x1774` frame-window
+// check), not its full duration. Swapping the local offset outright the instant that window opens
+// (and again the instant it closes) was an abrupt, one-frame jump between Zelda's own offset and
+// Link's -- small, but visible as a brief backward slide right as the rear kicks in. To smooth that
+// over, the two offsets are now blended across a few frames (via `cLib_chaseF`) instead of swapped
+// in one step, so Zelda's seat eases from one to the other alongside the rear starting/ending rather
+// than snapping.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
-// correctly as-is, so it's left untouched to avoid any risk of regressing it.
+// correctly as-is, so it's left untouched to avoid any risk of regressing it. Scoped to the solo
+// seat only (no Link riding): the dual-ride (rear) seat already works correctly via vanilla's own
+// computation and was never part of this bug.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
+    // How much of a rear's local-offset blend (0 = fully vanilla, 1 = fully Link's offset) has
+    // eased in so far; chased every frame toward 0 or 1 depending on `checkTurnStand()` so the
+    // transition is smooth in both directions instead of an instant swap.
+    static f32 s_turnStandBlend = 0.0f;
+
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        s_turnStandBlend = 0.0f;
         return;
     }
 
     // Dual-ride (Link also on Epona) already works correctly via vanilla's own computation; only
-    // the solo seat (no Link riding) needs the rotation override.
+    // the solo seat (no Link riding) is in scope for this fix.
     if (daPy_getLinkPlayerActorClass()->checkHorseRide()) {
+        s_turnStandBlend = 0.0f;
         return;
     }
 
     daHorse_c* horse = dComIfGp_getHorseActor();
     if (horse == nullptr || zelda->model == nullptr) {
+        s_turnStandBlend = 0.0f;
         return;
     }
 
-    csXyz rot;
-    mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
-    rot.z += -0x4000;
+    // Eases toward 1 while rearing, back toward 0 once the rear ends; 1/8th per frame fully blends
+    // in about 8 frames (roughly a tenth of a second at 60 FPS), fast enough to not be noticeable as
+    // its own separate motion, but slow enough to erase the one-frame snap.
+    cLib_chaseF(&s_turnStandBlend, horse->checkTurnStand() ? 1.0f : 0.0f, 1.0f / 8.0f);
 
-    zelda->shape_angle = rot;
-    zelda->current.angle.y = rot.y;
+    // Fully settled outside of a rear: vanilla's own computation (already run by the time this
+    // post-hook fires) is left completely untouched.
+    if (s_turnStandBlend <= 0.0f) {
+        return;
+    }
+
+    // Vanilla's own solo-seat local offset (`localFrontHorseRidePos` in `d_a_hozelda.cpp`), kept
+    // here only so it can be blended against -- outside of a rear this is exactly what vanilla
+    // already uses, so blending starts and ends at the same place vanilla would have placed her.
+    static const Vec kZeldaFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
+
+    // `daAlink_c`'s own local ride offset for Link's solo riding position (`l_localHorseRidePos` in
+    // `d_a_alink.cpp`, a file-local constant we can't reference directly). Blending toward it in
+    // place of Zelda's own, further-forward/higher offset is the whole point of the fix: it's the
+    // offset Link's own riding position already proves doesn't clip or float during a rear.
+    static const Vec kLinkHorseRidePos = {-68.208984f, 41.609924f, 0.883789f};
+
+    Vec blendedPos = {
+        kZeldaFrontHorseRidePos.x +
+            (kLinkHorseRidePos.x - kZeldaFrontHorseRidePos.x) * s_turnStandBlend,
+        kZeldaFrontHorseRidePos.y +
+            (kLinkHorseRidePos.y - kZeldaFrontHorseRidePos.y) * s_turnStandBlend,
+        kZeldaFrontHorseRidePos.z +
+            (kLinkHorseRidePos.z - kZeldaFrontHorseRidePos.z) * s_turnStandBlend,
+    };
+
+    mDoMtx_multVec(horse->getRootMtx(), &blendedPos, &zelda->current.pos);
+    zelda->shape_angle = horse->shape_angle;
+    zelda->current.angle.y = zelda->shape_angle.y;
 
     mDoMtx_stack_c::transS(zelda->current.pos);
-    mDoMtx_stack_c::ZXYrotM(rot.x, rot.y, rot.z);
+    mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
 }
 
