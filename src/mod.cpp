@@ -178,29 +178,34 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 //
 // `daAlink_c::setSyncHorsePos()` solves this same problem for Link's own riding position by
 // deriving it directly from `horse->getSaddleMtx()` (a live joint matrix that, unlike `shape_angle`,
-// reflects the saddle's real animated pose) via a fixed local offset specific to that joint, rather
-// than the root joint: `mDoMtx_multVec(horse_p->getSaddleMtx(), &localHorseRun, &current.pos)`. We
-// don't have Zelda's equivalent offset on hand as a constant (vanilla never needed a solo rider
-// tracked against the saddle), so instead of guessing one -- which was tried once already for the
-// rear seat by reusing its root-relative offset as if it were saddle-relative, and produced an
-// off-center seat -- it's derived at runtime: the very first time this hook runs while Epona isn't
-// mid-rear (`!horse->checkTurnStand()`), the local offset is recovered by inverting the saddle
-// matrix against `current.pos`, which the original unmodified call has already placed correctly at
-// that moment (root and saddle agree whenever the horse isn't rearing). That offset is cached and,
-// every frame afterwards, re-projected straight through the live saddle matrix -- including while
-// rearing, when the saddle's own translation and rotation both diverge from the root's. This keeps
-// Zelda's seat pinned to the saddle's actual silhouette (both position and rotation) instead of a
-// root pivot that the rearing animation never moves.
+// reflects the saddle's real animated pose), but only ever with a small, near-origin local offset
+// (`{15, 0, -45}` / `{30, 0, -10}`) -- nothing resembling the ~95-unit distance between Epona's root
+// joint and Zelda's actual seated position. Reusing that same "transform a local offset straight
+// through the live joint matrix" technique with Zelda's much larger root-relative offset was tried
+// first and overshot badly: rotating a point that far from the joint's own origin by the saddle's
+// full animated pitch swings its height far more than the saddle joint itself actually rises
+// (mesh/skin deformation near the seat is far gentler than a rigid single-joint transform of a
+// distant point implies), leaving Zelda floating well above the saddle instead of clipped into it.
+//
+// The fix below only ever borrows the saddle joint's *vertical rise*, not its full rotation+lever-
+// arm displacement: the saddle matrix's own Y translation is cached the first time this hook runs
+// while Epona isn't mid-rear (`!horse->checkTurnStand()`, i.e. a reliable "resting" reference), and
+// every frame afterwards the difference between the live saddle height and that cached rest height
+// is added straight onto the Y component of the position the original, unmodified call already
+// placed (via `horse->getRootMtx()` and Zelda's fixed local seat offset) -- leaving the X/Z position
+// that vanilla already gets right completely alone. This raises Zelda's seat in lockstep with how
+// far Epona's back has actually risen, without the lever-arm amplification a full local-offset
+// reprojection introduced.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is, so it's left untouched to avoid any risk of regressing it.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
-// Cached once (lazily, from the first non-rearing frame seen), since the offset between the seat
-// and the saddle joint is a fixed property of the shared rig, not something that changes per spawn
-// or needs recomputing every frame.
-static bool s_hasZeldaSaddleOffset = false;
-static Vec s_zeldaSaddleLocalOffset = {0.0f, 0.0f, 0.0f};
+// Cached once (lazily, from the first non-rearing frame seen), since the saddle joint's resting
+// height is a fixed property of the shared rig, not something that changes per spawn or needs
+// recomputing every frame.
+static bool s_hasZeldaSaddleRestY = false;
+static f32 s_zeldaSaddleRestY = 0.0f;
 
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
@@ -223,15 +228,15 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
 
-    if (!s_hasZeldaSaddleOffset && !horse->checkTurnStand()) {
-        Mtx invSaddle;
-        mDoMtx_inverse(horse->getSaddleMtx(), invSaddle);
-        mDoMtx_multVec(invSaddle, &zelda->current.pos, &s_zeldaSaddleLocalOffset);
-        s_hasZeldaSaddleOffset = true;
+    f32 saddleY = horse->getSaddleMtx()[1][3];
+
+    if (!s_hasZeldaSaddleRestY && !horse->checkTurnStand()) {
+        s_zeldaSaddleRestY = saddleY;
+        s_hasZeldaSaddleRestY = true;
     }
 
-    if (s_hasZeldaSaddleOffset) {
-        mDoMtx_multVec(horse->getSaddleMtx(), &s_zeldaSaddleLocalOffset, &zelda->current.pos);
+    if (s_hasZeldaSaddleRestY) {
+        zelda->current.pos.y += saddleY - s_zeldaSaddleRestY;
     }
 
     zelda->shape_angle = rot;
