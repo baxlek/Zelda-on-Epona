@@ -8,6 +8,9 @@
 // Game includes
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
+#include "d/actor/d_a_e_db.h"
+#include "d/actor/d_a_e_sh.h"
+#include "d/actor/d_a_e_yd.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
@@ -108,6 +111,34 @@ static fopAc_ac_c* find_spawned_zelda() {
 static bool is_spawned_zelda(const fopAc_ac_c* actor) {
     return s_hasSpawnedZelda && actor != nullptr &&
            (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId;
+}
+
+// `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
+// than our own spawned one.
+static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
+    if (fopAcM_GetName(i_actor) != fpcNm_HOZELDA_e || is_spawned_zelda(i_actor)) {
+        return NULL;
+    }
+    return i_actor;
+}
+
+// Finds a `HoZelda` actor somewhere in the world that this mod did *not* spawn itself -- i.e. one
+// placed by the story, such as the real horseback archery duel against Ganondorf (the only place
+// in the vanilla game a `HoZelda` actor is ever placed directly rather than through this mod).
+//
+// Used to detect that real duel and bow out of its way entirely: this mod otherwise has no way to
+// tell "the story is about to attach its own HoZelda to the horse" apart from the moment it
+// actually happens, which can be one or more frames after this mod's own spawn/keep-mounted logic
+// already ran for that same frame -- `d_a_horse.cpp`'s `execute()` only overwrites whichever
+// actor is currently attached once the story's own HoZelda starts ticking, so there's otherwise a
+// window where both our own spawned Zelda and the story's are simultaneously alive (the
+// "duplicate Zelda" bug), and -- since our own hooks are scoped to our own actor via
+// `is_spawned_zelda()` above -- our own Zelda would keep searching for and firing at nearby
+// enemies the whole time, overlapping the real duel's own Ganondorf-only targeting. Checking for
+// *any* other HoZelda in existence, rather than just whichever is currently attached to the horse,
+// catches that window regardless of exactly which frame the handoff happens on.
+static fopAc_ac_c* find_other_hozelda() {
+    return (fopAc_ac_c*)fopAcIt_Judge((fopAcIt_JudgeFunc)judge_other_hozelda, nullptr);
 }
 
 static void spawn_zelda_on_horse(daHorse_c* horse) {
@@ -319,6 +350,43 @@ struct HoZeldaTargetSearch {
     f32 bestDistSq;
 };
 
+// Whether `i_actor` is currently dormant/underground and therefore shouldn't be auto-targeted:
+// vanilla itself treats these enemies as not really "present" while in this state (either
+// collision-wise, status-wise, or both), so Light Arrows can't meaningfully hit them anyway.
+//
+//  - Stalhounds (`E_sh`/`e_sh_class`) spend most of the day buried underground, only surfacing for
+//    a few in-game hours at night (`e_sh_stop()`'s own `hourOfDay` check in
+//    `src/d/actor/d_a_e_sh.cpp`). Its outer state dispatcher (`action()`) only turns on normal
+//    attention/targeting (`fopAcM_OnStatus`/`fopAc_AttnFlag_BATTLE_e`) for the above-ground states
+//    (appear/move/attack/damage, `field_0x676` 1-3 and 10); the underground "stop" state
+//    (`field_0x676 == 0`) and the sink-back-down "disappear" state (`field_0x676 == 5`) both leave
+//    it off instead, exactly like a defeated one would be.
+//  - Deku Babas (`E_db`/`e_db_class`) and Baba Serpents (`E_yd`/`e_yd_class`) stay retracted
+//    underground/in their stalk until the player gets close (`e_db_stay()`/`e_yd_stay()`'s own
+//    proximity check). While retracted (`action == ACTION_STAY`, i.e. `0`, for Deku Baba;
+//    `field_0x66e == 0` for Baba Serpent) they're also made intangible on purpose: both
+//    `daE_DB_Execute()` and `daE_YD_Execute()` shove their hit/attack collision spheres tens of
+//    thousands of units away (`+= hide_offset`) specifically whenever that state is active, so
+//    Light Arrows could never actually land on them anyway.
+static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
+    switch (fopAcM_GetName(i_actor)) {
+    case fpcNm_E_SH_e: {
+        e_sh_class* stalhound = reinterpret_cast<e_sh_class*>(i_actor);
+        return stalhound->field_0x676 == 0 || stalhound->field_0x676 == 5;
+    }
+    case fpcNm_E_DB_e: {
+        e_db_class* deku_baba = reinterpret_cast<e_db_class*>(i_actor);
+        return deku_baba->action == 0;
+    }
+    case fpcNm_E_YD_e: {
+        e_yd_class* baba_serpent = reinterpret_cast<e_yd_class*>(i_actor);
+        return baba_serpent->field_0x66e == 0;
+    }
+    default:
+        return false;
+    }
+}
+
 // `fopAcIt_Judge()` stops and returns at the first non-NULL result, so to find the *nearest*
 // enemy (rather than just the first one in the actor list) this always returns NULL -- keeping
 // the iteration going over every actor -- and instead threads the closest candidate so far through
@@ -328,7 +396,7 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
         fopAcM_GetName(i_actor) == fpcNm_B_GND_e || fopAcM_GetName(i_actor) == fpcNm_E_WB_e ||
-        i_actor->health <= 0)
+        i_actor->health <= 0 || is_dormant_enemy(i_actor))
     {
         // Ganondorf is deliberately excluded: he already has his own, correctly-functioning
         // targeting during the real duel (handled by vanilla's untouched Ganondorf search when
@@ -338,6 +406,11 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
         // E_WB (Bullbo, the wild boar Bulblins ride) is excluded too: it's its own `fopAc_ENEMY_e`
         // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
         // does -- so for this mod's purposes it isn't a hostile target.
+        //
+        // Dormant/underground enemies (see `is_dormant_enemy()` above) are excluded too: Zelda
+        // would otherwise auto-target Stalhounds that haven't surfaced for the night yet, or Deku
+        // Babas/Baba Serpents that haven't emerged for the player yet, neither of which she can
+        // actually hit.
         return NULL;
     }
 
@@ -1041,12 +1114,23 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
                               !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
 
-    if (inScriptedCutscene) {
+    // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
+    // the real horseback archery duel against Ganondorf, where the game itself places and drives
+    // its own HoZelda riding solo. This mod's own spawned Zelda would otherwise duplicate her, and
+    // -- since this mod's auto-target/combat hooks are scoped to our own actor only -- our own
+    // Zelda would keep auto-targeting nearby enemies the entire time, overlapping the real duel's
+    // own Ganondorf-only targeting. So this mod's entire functionality simply steps aside for as
+    // long as the real duel's own HoZelda exists: our own spawned Zelda is torn down and not
+    // respawned until the story's HoZelda is gone again.
+    bool storyHoZeldaActive = find_other_hozelda() != nullptr;
+
+    if (storyHoZeldaActive) {
+        remove_spawned_zelda();
+    } else if (inScriptedCutscene) {
         // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
         // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
-        // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the Ganondorf
-        // duel) never have `s_hasSpawnedZelda` set in the first place, so they're untouched either
-        // way.
+        // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the real
+        // Ganondorf duel) are already handled above by the `storyHoZeldaActive` check.
         if (!show_zelda_in_cutscenes()) {
             remove_spawned_zelda();
         }
