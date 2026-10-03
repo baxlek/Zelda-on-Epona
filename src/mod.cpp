@@ -734,10 +734,23 @@ static bool s_lightArrowJpcReady = false;
 // a shared low-level utility used by dozens of unrelated heap allocations across the whole engine,
 // so this only ever touches the one allocation matching both the particle system's distinctive
 // parent heap (`mDoExt_getArchiveHeap()`) and one of those exact known sizes.
+//
+// Note this heap doesn't just hold `common.jpc`'s raw bytes at rest: vanilla's own `readScene()`
+// already loads each room's `Pscene###.jpc` raw bytes into this same heap too (freed/replaced on
+// every room change, same as `common.jpc`'s own raw bytes stay resident for the whole heap's
+// lifetime), so even unmodified, this heap's tight (614 KB in release builds) budget is already
+// sized for "common.jpc + one room's scene archive" at once with very little slack. Permanently
+// adding a 3rd always-resident archive on top of that -- with no way to measure its exact size
+// up front -- needs a generous margin, not just a token bump: a first attempt at a small 128 KB
+// margin still produced a `JKRExpHeap` allocation-failure `SIGABRT` in practice (crash log in
+// `res/`), so this uses a much larger, safely-oversized margin instead. A couple of extra
+// megabytes of headroom is trivial on the hardware this mod targets.
 using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
 DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
 
-static const u32 kParticleResHeapExtraBytes = 0x20000;  // headroom for Pscene181.jpc + its manager
+static const u32 kParticleResHeapExtraBytes = 0x400000;  // 4 MiB headroom for Pscene181.jpc, its
+                                                          // resource manager, and continued normal
+                                                          // per-room scene loading alongside it
 
 static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*, void*) {
     JKRHeap* parent = mods::arg<JKRHeap*>(args, 1);
