@@ -46,15 +46,15 @@ static bool show_zelda_in_cutscenes() {
 
 // Whether this mod's own spawned Zelda should auto-target and fire her Light Arrows at nearby
 // enemies, the same way she already does at Ganondorf during the real horseback duel, instead of
-// just riding passively. On by default. Exposed as a toggle in the mod's panel in the host Mods
-// window for anyone who'd rather she stay a passive passenger.
+// just riding passively. Off by default ("Zelda active in combat" toggle). Exposed as a toggle in
+// the mod's panel in the host Mods window for anyone who'd rather she actively fight.
 static ConfigVarHandle g_cvarAutoTargetEnemies = 0;
 
 static bool auto_target_enemies_enabled() {
-    bool value = true;
+    bool value = false;
     if (g_cvarAutoTargetEnemies == 0 ||
         svc_config->get_bool(mod_ctx, g_cvarAutoTargetEnemies, &value) != MOD_OK) {
-        return true;
+        return false;
     }
     return value;
 }
@@ -322,12 +322,17 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     HoZeldaTargetSearch* search = static_cast<HoZeldaTargetSearch*>(i_data);
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
-        fopAcM_GetName(i_actor) == fpcNm_B_GND_e || i_actor->health <= 0)
+        fopAcM_GetName(i_actor) == fpcNm_B_GND_e || fopAcM_GetName(i_actor) == fpcNm_E_WB_e ||
+        i_actor->health <= 0)
     {
         // Ganondorf is deliberately excluded: he already has his own, correctly-functioning
         // targeting during the real duel (handled by vanilla's untouched Ganondorf search when
         // this mod's hooks aren't in play for his own story-placed Zelda), and auto-targeting him
         // outside of that scripted fight would conflict with it.
+        //
+        // E_WB (Bullbo, the wild boar Bulblins ride) is excluded too: it's its own `fopAc_ENEMY_e`
+        // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
+        // does -- so for this mod's purposes it isn't a hostile target.
         return NULL;
     }
 
@@ -689,11 +694,11 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
 
     UiControlDesc autoTargetControl = UI_CONTROL_DESC_INIT;
     autoTargetControl.kind = UI_CONTROL_TOGGLE;
-    autoTargetControl.label = "Auto-target nearby enemies with Light Arrows";
-    autoTargetControl.help_rml = "When on (default), Zelda automatically draws her bow and fires "
-                                  "Light Arrows at nearby enemies, the same way she already does "
-                                  "at Ganondorf during the horseback duel. When off, she just rides "
-                                  "along passively.";
+    autoTargetControl.label = "Zelda active in combat";
+    autoTargetControl.help_rml = "When on, Zelda automatically draws her bow and fires Light "
+                                  "Arrows at nearby enemies, the same way she already does at "
+                                  "Ganondorf during the horseback duel. When off (default), she "
+                                  "just rides along passively.";
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
@@ -758,13 +763,13 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     ConfigVarDesc autoTargetCvarDesc = CONFIG_VAR_DESC_INIT;
     autoTargetCvarDesc.name = "autoTargetEnemies";
     autoTargetCvarDesc.type = CONFIG_VAR_BOOL;
-    autoTargetCvarDesc.default_bool = true;
+    autoTargetCvarDesc.default_bool = false;
     result = svc_config->register_var(mod_ctx, &autoTargetCvarDesc, &g_cvarAutoTargetEnemies);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to register autoTargetEnemies option, defaulting to auto-targeting on: {}",
+            "failed to register autoTargetEnemies option, defaulting to auto-targeting off: {}",
             (int)result);
-        // Not fatal: `auto_target_enemies_enabled()` already falls back to "on" when the var
+        // Not fatal: `auto_target_enemies_enabled()` already falls back to "off" when the var
         // isn't registered.
     }
 
