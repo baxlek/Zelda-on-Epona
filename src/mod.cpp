@@ -767,6 +767,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
     }
 
+    // TEMPORARY DIAGNOSTIC: see the comment above `on_particle_read_scene_pre` for why this exists.
+    result = mods::hook::add_pre<ParticleReadScene>(on_particle_read_scene_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook particle readScene, diagnostic Pscene logging unavailable: {}",
+                         (int)result);
+        // Not fatal: this hook is diagnostic-only and unrelated to the mod's actual functionality.
+    }
+
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
     cvarDesc.name = "showInCutscenes";
     cvarDesc.type = CONFIG_VAR_BOOL;
