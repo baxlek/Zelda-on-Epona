@@ -159,20 +159,27 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // (front saddle) seat only, leaving the dual-ride seat's already-working vanilla computation
 // completely untouched.
 //
-// For the solo seat, position is left exactly as the original, unmodified function already
-// computed it (this hook runs *after* the original, so `current.pos` is already correct); only the
-// drawn rotation is replaced, derived from `horse->getSaddleMtx()` (a live, fully up-to-date
+// The drawn rotation is replaced, derived from `horse->getSaddleMtx()` (a live, fully up-to-date
 // animated joint matrix that reacts to rearing, unlike the separate `shape_angle` field) via the
 // same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
 // uses for Link's own rotation while riding.
 //
-// The saddle joint's pitch swings much further than a seated rider's own forward/back lean would
-// (it's tracking the saddle itself, not a human hip joint), so taking it unclamped makes Zelda tip
-// over noticeably too far backward whenever Epona rears up startled -- the right animation, just
-// visibly out of position relative to the pose it's meant to depict. Clamping that pitch keeps her
-// lean bounded to the same `shapeLimitAngle` (~40 degrees) the horse's own body pitch is limited to
-// elsewhere (`daHorse_c::footBgCheck()`), which matches how far back a seated rider's body would
-// plausibly tilt.
+// Position additionally needs correcting, not just rotation: `shape_angle.x` is only a coarse
+// heuristic (derived from front/back foot height differences in `daHorse_c::footBgCheck()`) that's
+// clamped to a modest ~40 degrees, and the vanilla, unmodified function places the solo (front)
+// seat by applying its local offset through `horse->getRootMtx()`, whose rotation is built directly
+// from that same clamped `shape_angle`. But the saddle joint's *actual* animated pitch while Epona
+// rears up startled (`daHorse_c::procTurn()`'s `ANM_HS_STAND`) swings considerably further than
+// that heuristic limit. Leaving the seat anchored to the root-matrix position while only correcting
+// its rotation left Zelda's hips clipping straight into Epona's risen body: rotating her further
+// than `shape_angle.x` accounts for, but around a pivot point that hadn't risen to match. The fix
+// below re-derives the local seat offset the original call already placed (by inverting the root
+// matrix it used), then re-projects that same offset through the root matrix with one extra
+// rotation appended -- the *difference* between the live saddle pitch and `shape_angle.x` -- before
+// the root transform is applied. When that difference is zero (normal riding, not rearing) this is
+// value-for-value identical to the vanilla position; as the real pitch pulls ahead of the clamped
+// heuristic during a rear, the seat pivots up and back around the root joint right along with it,
+// keeping Zelda's seat attached to Epona's actual silhouette instead of the stale clamped one.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is, so it's left untouched to avoid any risk of regressing it.
@@ -199,13 +206,25 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
 
-    // See `daHorse_c::footBgCheck()`'s identical `shapeLimitAngle` for the horse's own body pitch.
-    static const s16 shapeLimitAngle = 0x1C72;
-    if (rot.x > shapeLimitAngle) {
-        rot.x = shapeLimitAngle;
-    } else if (rot.x < -shapeLimitAngle) {
-        rot.x = -shapeLimitAngle;
-    }
+    // Recover the local seat offset the original, unmodified call already placed, by inverting
+    // the very root matrix it used to place it (`current.pos` is already set to that result by
+    // the time this post-hook runs).
+    Mtx invRoot;
+    mDoMtx_inverse(horse->getRootMtx(), invRoot);
+    Vec localPos;
+    mDoMtx_multVec(invRoot, &zelda->current.pos, &localPos);
+
+    // The extra pitch the live saddle joint has beyond what the clamped `shape_angle.x` heuristic
+    // (already baked into the root matrix's own rotation) accounts for. Re-pivoting the local seat
+    // offset by exactly this much before re-applying the root transform raises/pulls back the seat
+    // in lockstep with Epona's real animated pose; it's a no-op (identical to vanilla) whenever the
+    // two already agree, which is the common case outside of a startled rear-up.
+    s16 extraPitch = rot.x - horse->shape_angle.x;
+
+    Mtx seatMtx;
+    mDoMtx_copy(horse->getRootMtx(), seatMtx);
+    mDoMtx_XrotM(seatMtx, extraPitch);
+    mDoMtx_multVec(seatMtx, &localPos, &zelda->current.pos);
 
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
