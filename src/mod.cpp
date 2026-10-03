@@ -8,9 +8,7 @@
 // Game includes
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
-#include "d/actor/d_a_e_db.h"
 #include "d/actor/d_a_e_sh.h"
-#include "d/actor/d_a_e_yd.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
@@ -361,26 +359,19 @@ struct HoZeldaTargetSearch {
 //    (appear/move/attack/damage, `field_0x676` 1-3 and 10); the underground "stop" state
 //    (`field_0x676 == 0`) and the sink-back-down "disappear" state (`field_0x676 == 5`) both leave
 //    it off instead, exactly like a defeated one would be.
-//  - Deku Babas (`E_db`/`e_db_class`) and Baba Serpents (`E_yd`/`e_yd_class`) stay retracted
-//    underground/in their stalk until the player gets close (`e_db_stay()`/`e_yd_stay()`'s own
-//    proximity check). While retracted (`action == ACTION_STAY`, i.e. `0`, for Deku Baba;
-//    `field_0x66e == 0` for Baba Serpent) they're also made intangible on purpose: both
-//    `daE_DB_Execute()` and `daE_YD_Execute()` shove their hit/attack collision spheres tens of
-//    thousands of units away (`+= hide_offset`) specifically whenever that state is active, so
-//    Light Arrows could never actually land on them anyway.
+//
+// Deku Babas and Baba Serpents are *not* handled here: unlike Stalhounds, their true
+// intangibility window doesn't line up cleanly with a single state field (it actually extends a
+// short while past the state transition that leaves "dormant", e.g. Deku Baba's
+// `invulnerabilityTimer` and Baba Serpent's `field_0x69c[3]` both keep their hit/attack collision
+// spheres shoved away for several frames after `action`/`field_0x66e` already reports them as no
+// longer stay/dormant). Rather than keep chasing that exact window, they're excluded from
+// auto-targeting outright in `judge_nearest_enemy()` below, dormant or not.
 static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
     switch (fopAcM_GetName(i_actor)) {
     case fpcNm_E_SH_e: {
         e_sh_class* stalhound = reinterpret_cast<e_sh_class*>(i_actor);
         return stalhound->field_0x676 == 0 || stalhound->field_0x676 == 5;
-    }
-    case fpcNm_E_DB_e: {
-        e_db_class* deku_baba = reinterpret_cast<e_db_class*>(i_actor);
-        return deku_baba->action == 0;
-    }
-    case fpcNm_E_YD_e: {
-        e_yd_class* baba_serpent = reinterpret_cast<e_yd_class*>(i_actor);
-        return baba_serpent->field_0x66e == 0;
     }
     default:
         return false;
@@ -396,6 +387,7 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
         fopAcM_GetName(i_actor) == fpcNm_B_GND_e || fopAcM_GetName(i_actor) == fpcNm_E_WB_e ||
+        fopAcM_GetName(i_actor) == fpcNm_E_DB_e || fopAcM_GetName(i_actor) == fpcNm_E_YD_e ||
         i_actor->health <= 0 || is_dormant_enemy(i_actor))
     {
         // Ganondorf is deliberately excluded: he already has his own, correctly-functioning
@@ -407,10 +399,14 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
         // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
         // does -- so for this mod's purposes it isn't a hostile target.
         //
+        // E_DB (Deku Baba) and E_YD (Baba Serpent) are excluded outright, dormant or not: their
+        // true intangibility window (see `is_dormant_enemy()`'s comment above) doesn't line up
+        // with a single, easily-checked state value, so rather than keep chasing it, Zelda simply
+        // never auto-targets either of these -- she can still hit them incidentally if the player
+        // leads her into melee range, same as before this mod existed.
+        //
         // Dormant/underground enemies (see `is_dormant_enemy()` above) are excluded too: Zelda
-        // would otherwise auto-target Stalhounds that haven't surfaced for the night yet, or Deku
-        // Babas/Baba Serpents that haven't emerged for the player yet, neither of which she can
-        // actually hit.
+        // would otherwise auto-target Stalhounds that haven't surfaced for the night yet.
         return NULL;
     }
 
