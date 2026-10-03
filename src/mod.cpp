@@ -164,26 +164,43 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // same `mDoMtx_MtxToRot()` + `-0x4000` bind-pose correction technique `daAlink_c::setSyncHorsePos()`
 // uses for Link's own rotation while riding.
 //
-// Position additionally needs correcting, not just rotation: `shape_angle.x` is only a coarse
-// heuristic (derived from front/back foot height differences in `daHorse_c::footBgCheck()`) that's
-// clamped to a modest ~40 degrees, and the vanilla, unmodified function places the solo (front)
-// seat by applying its local offset through `horse->getRootMtx()`, whose rotation is built directly
-// from that same clamped `shape_angle`. But the saddle joint's *actual* animated pitch while Epona
-// rears up startled (`daHorse_c::procTurn()`'s `ANM_HS_STAND`) swings considerably further than
-// that heuristic limit. Leaving the seat anchored to the root-matrix position while only correcting
-// its rotation left Zelda's hips clipping straight into Epona's risen body: rotating her further
-// than `shape_angle.x` accounts for, but around a pivot point that hadn't risen to match. The fix
-// below re-derives the local seat offset the original call already placed (by inverting the root
-// matrix it used), then re-projects that same offset through the root matrix with one extra
-// rotation appended -- the *difference* between the live saddle pitch and `shape_angle.x` -- before
-// the root transform is applied. When that difference is zero (normal riding, not rearing) this is
-// value-for-value identical to the vanilla position; as the real pitch pulls ahead of the clamped
-// heuristic during a rear, the seat pivots up and back around the root joint right along with it,
-// keeping Zelda's seat attached to Epona's actual silhouette instead of the stale clamped one.
+// Position additionally needs correcting, not just rotation: the vanilla, unmodified function
+// places the solo (front) seat by applying a fixed local offset through `horse->getRootMtx()`,
+// whose own rotation is built from `shape_angle.x` -- a coarse heuristic (derived from front/back
+// foot height differences in `daHorse_c::footBgCheck()`) that's actually forced to *zero* for the
+// entire duration of a startled rear-up (`daHorse_c::footBgCheck()` special-cases
+// `checkTurnStand()`/`RFLG0_TURN_STAND` by commanding the body pitch back towards level, since the
+// rearing look comes entirely from the saddle joint's own animated pose, not from tilting the root
+// bone). So during a rear, the root matrix the vanilla seat is anchored to never rises or tilts at
+// all -- it stays exactly where it would be standing flat on the ground -- while the saddle visibly
+// rises and pitches back underneath it, leaving Zelda's seat clipped down into Epona's risen body
+// regardless of how much the *rotation* alone is corrected.
+//
+// `daAlink_c::setSyncHorsePos()` solves this same problem for Link's own riding position by
+// deriving it directly from `horse->getSaddleMtx()` (a live joint matrix that, unlike `shape_angle`,
+// reflects the saddle's real animated pose) via a fixed local offset specific to that joint, rather
+// than the root joint: `mDoMtx_multVec(horse_p->getSaddleMtx(), &localHorseRun, &current.pos)`. We
+// don't have Zelda's equivalent offset on hand as a constant (vanilla never needed a solo rider
+// tracked against the saddle), so instead of guessing one -- which was tried once already for the
+// rear seat by reusing its root-relative offset as if it were saddle-relative, and produced an
+// off-center seat -- it's derived at runtime: the very first time this hook runs while Epona isn't
+// mid-rear (`!horse->checkTurnStand()`), the local offset is recovered by inverting the saddle
+// matrix against `current.pos`, which the original unmodified call has already placed correctly at
+// that moment (root and saddle agree whenever the horse isn't rearing). That offset is cached and,
+// every frame afterwards, re-projected straight through the live saddle matrix -- including while
+// rearing, when the saddle's own translation and rotation both diverge from the root's. This keeps
+// Zelda's seat pinned to the saddle's actual silhouette (both position and rotation) instead of a
+// root pivot that the rearing animation never moves.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
 // correctly as-is, so it's left untouched to avoid any risk of regressing it.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
+
+// Cached once (lazily, from the first non-rearing frame seen), since the offset between the seat
+// and the saddle joint is a fixed property of the shared rig, not something that changes per spawn
+// or needs recomputing every frame.
+static bool s_hasZeldaSaddleOffset = false;
+static Vec s_zeldaSaddleLocalOffset = {0.0f, 0.0f, 0.0f};
 
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
@@ -206,25 +223,16 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     mDoMtx_MtxToRot(horse->getSaddleMtx(), &rot);
     rot.z += -0x4000;
 
-    // Recover the local seat offset the original, unmodified call already placed, by inverting
-    // the very root matrix it used to place it (`current.pos` is already set to that result by
-    // the time this post-hook runs).
-    Mtx invRoot;
-    mDoMtx_inverse(horse->getRootMtx(), invRoot);
-    Vec localPos;
-    mDoMtx_multVec(invRoot, &zelda->current.pos, &localPos);
+    if (!s_hasZeldaSaddleOffset && !horse->checkTurnStand()) {
+        Mtx invSaddle;
+        mDoMtx_inverse(horse->getSaddleMtx(), invSaddle);
+        mDoMtx_multVec(invSaddle, &zelda->current.pos, &s_zeldaSaddleLocalOffset);
+        s_hasZeldaSaddleOffset = true;
+    }
 
-    // The extra pitch the live saddle joint has beyond what the clamped `shape_angle.x` heuristic
-    // (already baked into the root matrix's own rotation) accounts for. Re-pivoting the local seat
-    // offset by exactly this much before re-applying the root transform raises/pulls back the seat
-    // in lockstep with Epona's real animated pose; it's a no-op (identical to vanilla) whenever the
-    // two already agree, which is the common case outside of a startled rear-up.
-    s16 extraPitch = rot.x - horse->shape_angle.x;
-
-    Mtx seatMtx;
-    mDoMtx_copy(horse->getRootMtx(), seatMtx);
-    mDoMtx_XrotM(seatMtx, extraPitch);
-    mDoMtx_multVec(seatMtx, &localPos, &zelda->current.pos);
+    if (s_hasZeldaSaddleOffset) {
+        mDoMtx_multVec(horse->getSaddleMtx(), &s_zeldaSaddleLocalOffset, &zelda->current.pos);
+    }
 
     zelda->shape_angle = rot;
     zelda->current.angle.y = rot.y;
