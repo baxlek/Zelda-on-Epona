@@ -867,12 +867,28 @@ static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, 
 // already had its slot count bumped by the hook above). This mirrors exactly how vanilla's own
 // `dPa_control_c::readScene()` loads every per-room scene archive: asynchronously, into the same
 // resident particle-resource heap that `common.jpc`'s own raw bytes live in forever.
+//
+// `createCommon()` is NOT a true one-shot, console-boot-only call: it's only ever invoked from one
+// call site (`dScnLogo_c`'s boot-time phase), but Twilight Princess implements several "big" scene
+// transitions (dying and choosing to continue, certain major stage-to-stage crossings) as a full
+// software reset (`mDoRst`) that tears down and rebuilds the entire particle system from scratch --
+// a brand new `dPa_control_c`, a brand new resident heap, and a brand new `JPAEmitterManager` with
+// an empty bank 2 slot -- which re-enters this very function. The mod's own static state below
+// lives outside that reset, so it must be unconditionally re-armed here every time this runs,
+// rather than treated as a permanent latch; otherwise, after the first such reset, `s_lightArrowJpcReady`
+// stays stuck `true` forever even though the new `JPAEmitterManager` never actually got bank 2
+// registered, silently breaking every Light Arrow hit mark/charge effect from that point on.
 DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
 
 static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    if (s_lightArrowJpcLoad != nullptr || s_lightArrowJpcReady) {
-        return;
+    if (s_lightArrowJpcLoad != nullptr) {
+        // An in-flight load kicked off by a now-defunct `dPa_control_c` instance: its destination
+        // heap no longer exists (it belonged to the particle system that just got torn down), so
+        // there's nothing valid left to wait for.
+        s_lightArrowJpcLoad->destroy();
+        s_lightArrowJpcLoad = nullptr;
     }
+    s_lightArrowJpcReady = false;
 
     s_lightArrowJpcLoad = mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0,
                                                          dComIfGp_particle_getResHeap());
