@@ -365,8 +365,9 @@ struct HoZeldaTargetSearch {
 // short while past the state transition that leaves "dormant", e.g. Deku Baba's
 // `invulnerabilityTimer` and Baba Serpent's `field_0x69c[3]` both keep their hit/attack collision
 // spheres shoved away for several frames after `action`/`field_0x66e` already reports them as no
-// longer stay/dormant). Rather than keep chasing that exact window, they're excluded from
-// auto-targeting outright in `judge_nearest_enemy()` below, dormant or not.
+// longer stay/dormant). Rather than keep chasing that exact window, the whole "Baba" family of
+// enemies is instead excluded from auto-targeting outright in `judge_nearest_enemy()` below,
+// dormant or not -- see the comment there for which actors that covers and why.
 static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
     switch (fopAcM_GetName(i_actor)) {
     case fpcNm_E_SH_e: {
@@ -387,8 +388,9 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
         fopAcM_GetName(i_actor) == fpcNm_E_WB_e || fopAcM_GetName(i_actor) == fpcNm_E_DB_e ||
-        fopAcM_GetName(i_actor) == fpcNm_E_YD_e || i_actor->health <= 0 ||
-        is_dormant_enemy(i_actor))
+        fopAcM_GetName(i_actor) == fpcNm_E_YD_e || fopAcM_GetName(i_actor) == fpcNm_E_HB_e ||
+        fopAcM_GetName(i_actor) == fpcNm_E_YH_e || fopAcM_GetName(i_actor) == fpcNm_E_GB_e ||
+        i_actor->health <= 0 || is_dormant_enemy(i_actor))
     {
         // No explicit Ganondorf (`fpcNm_B_GND_e`) exclusion is needed here: `B_gnd` is only ever
         // placed directly by the stage itself, in the one room that hosts the real horseback
@@ -401,11 +403,18 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
         // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
         // does -- so for this mod's purposes it isn't a hostile target.
         //
-        // E_DB (Deku Baba) and E_YD (Baba Serpent) are excluded outright, dormant or not: their
-        // true intangibility window (see `is_dormant_enemy()`'s comment above) doesn't line up
-        // with a single, easily-checked state value, so rather than keep chasing it, Zelda simply
-        // never auto-targets either of these -- she can still hit them incidentally if the player
-        // leads her into melee range, same as before this mod existed.
+        // The entire "Baba" family is excluded outright, dormant or not: E_DB (Deku Baba), E_YD
+        // (Twilight Deku Baba), E_HB (Hebi Baba, i.e. Baba Serpent), E_YH (Twilight Hebi Baba) and
+        // E_GB (Giant Baba). An earlier version of this exclusion list used `fpcNm_E_YD_e` under
+        // the mistaken belief it was Baba Serpent -- per `d_stage.cpp`'s own stage object name
+        // table and these actors' class doc comments, `E_yd`/`e_yd_class` is actually "Twilight
+        // Deku Baba", while the real Baba Serpent is `E_hb`/`e_hb_class` (with `E_yh`/`e_yh_class`
+        // as its own Twilight counterpart) -- so the real Baba Serpent was never actually excluded
+        // until now. All five share the same Deku-Baba-like retract/intangible-while-dormant
+        // design (see `is_dormant_enemy()`'s comment above), so none of them are worth chasing
+        // precise per-state timing for: Zelda simply never auto-targets any of them, dormant or
+        // not -- she can still hit them incidentally if the player leads her into melee range,
+        // same as before this mod existed.
         //
         // Dormant/underground enemies (see `is_dormant_enemy()` above) are excluded too: Zelda
         // would otherwise auto-target Stalhounds that haven't surfaced for the night yet.
