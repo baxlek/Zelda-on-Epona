@@ -604,6 +604,60 @@ static void on_hozelda_set_anm_replace(ModContext*, void* args, void*, void*) {
     set_anm_auto_target(zelda);
 }
 
+// The Light Arrow actor (`daArrow_c`) never actually aims itself at Ganondorf, or at anything:
+// `arrowShooting()` only overrides its flight angle/position when the *player* is actively using
+// their own bow-camera aim (`checkBowCameraArrowPosP()`), which is never the case for either the
+// real duel (the player presses the action button while locked on; Link never equips/aims his own
+// bow there) or for the mod's auto-firing Zelda. With that check never satisfied, the arrow simply
+// keeps flying in whatever direction Zelda's hand was last facing per-frame via `setKeepMatrix()`
+// right up until release -- which itself only ever turns a few degrees off of her forward-facing
+// body thanks to `searchBodyAngle()`'s very narrow `bow_search_y_angle` clamp (a handful of
+// degrees). None of this was ever a problem for the real duel, since Ganondorf is always choreographed
+// to stay almost directly ahead of her the whole time; it just never had to aim any wider than that.
+// Once real, potentially off-to-the-side enemies are in play, that narrow a correction isn't enough,
+// and arrows end up flying essentially straight ahead regardless of where the target actually is.
+//
+// Rather than trying to widen that narrow vanilla clamp (which also drives her visible body/neck
+// twist, and isn't under this mod's control without its own replace hook on `searchBodyAngle()`),
+// this re-aims the arrow directly at the moment it's released: for arrows fired by our own Zelda,
+// the flight direction/speed vanilla would have left untouched is instead pointed straight at
+// whatever enemy she's currently tracking, using the same generic hit-resolution/visuals every
+// other arrow already uses -- only the direction changes.
+DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
+
+static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
+    daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
+    if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
+        return;
+    }
+
+    daHoZelda_c* zelda = (daHoZelda_c*)arrow->field_0xa08.getActor();
+    if (zelda == nullptr || fopAcM_GetName(zelda) != fpcNm_HOZELDA_e || !is_spawned_zelda(zelda)) {
+        return;
+    }
+
+    fopAc_ac_c* target = zelda->mGndAcKeep.getActor();
+    if (target == nullptr) {
+        return;
+    }
+
+    cXyz dir = target->eyePos - arrow->current.pos;
+    if (dir.abs() < 1.0f) {
+        return;
+    }
+
+    // Matches the sign/axis conventions vanilla's own `arrowShooting()` and `searchBodyAngle()`
+    // already use elsewhere in this file for converting a world-space direction into the engine's
+    // pitch/yaw angle pair, so the arrow's visible orientation while flying stays consistent with
+    // every other arrow.
+    arrow->current.angle.x = -dir.atan2sY_XZ();
+    arrow->current.angle.y = dir.atan2sX_Z();
+    arrow->shape_angle.y = arrow->current.angle.y;
+
+    dir.normalizeZP();
+    arrow->speed = dir * arrow->field_0x99c;
+}
+
 // Rather than attempting to patch up Zelda's orientation, animation, and any overlapping props for
 // every individual story cutscene that drives Epona (a reaction/firewood/etc. fix was tried for
 // each as they were found, but kept surfacing new, similarly-themed regressions with no end in
@@ -668,6 +722,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook HoZelda setAnm, auto-targeting enemies will be unavailable: {}",
             (int)result);
         // Not fatal: the mod still works, Zelda just won't auto-target enemies.
+    }
+
+    result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook arrow shooting, auto-targeted Light Arrows may fly straight instead "
+            "of toward their target: {}",
+            (int)result);
+        // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
     }
 
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
@@ -808,6 +871,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
+    mods::hook::uninstall<ArrowShooting>();
     return MOD_OK;
 }
 }
