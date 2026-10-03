@@ -404,9 +404,12 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
             *anm_p = 0x12;
         } else if (horse_anm_idx == 0xA) {
             *anm_p = 0x13;
-        } else if (horse_anm_idx == 0x11) {
-            *anm_p = 0xF;
-        } else if (horse_anm_idx == 0x12 || horse_anm_idx == 0x13) {
+        } else if (horse_anm_idx == 0x11 || horse_anm_idx == 0x12 || horse_anm_idx == 0x13) {
+            // EXPERIMENTAL (for testing only): vanilla keeps RUN_DASH (0x11) mapped to its own
+            // Zelda anim (0xF), which is never paired with the bow pose, so Zelda could only ever
+            // draw her bow at a full gallop (RUN_FAST/RUN_SLOW). Folding dash into the same bucket
+            // as gallop (0xE) makes the bow-draw gate below reachable while dashing too, so the
+            // user can play-test how it looks/feels at more than one gait.
             *anm_p = 0xE;
         } else if (horse_anm_idx == 0xFFFF) {
             *anm_p = 0xFFFF;
@@ -442,7 +445,13 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         target_vulnerable = target_actor->health > 0;
     }
 
-    if (anm_idx[0] == 0xE && zelda->field_0x6da == 0 && !zelda->mDamageInit &&
+    // EXPERIMENTAL (for testing only): vanilla only ever reaches this point with anm_idx[0] == 0xE
+    // (full gallop) or 0x1C (the catch-all bucket for every other gait the mapping above doesn't
+    // special-case: walk, trot/turn, idle/wait, excitement, etc. -- see the mapping loop above).
+    // Both values are safe to allow here since the overlay-blend branch further below (the
+    // `anm_idx[0] != 0x1C && anm_idx[0] != 0xE` check) already treats them identically to gallop,
+    // so this just widens which gaits can trigger the bow-draw state machine for play-testing.
+    if ((anm_idx[0] == 0xE || anm_idx[0] == 0x1C) && zelda->field_0x6da == 0 && !zelda->mDamageInit &&
         zelda->field_0x6dd == 0 && target_actor != NULL && target_vulnerable &&
         (target_seen_angleY < zelda->mpHIO->m.bow_start_angle ||
             (zelda->mBowMode != 0 && target_seen_angleY < zelda->mpHIO->m.bow_end_angle)))
