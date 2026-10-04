@@ -21,9 +21,9 @@
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
+#include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
-#include "m_Do/m_Do_dvd_thread.h"
 #include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
@@ -862,17 +862,18 @@ static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
 //      name (constructors have no pointer-to-member-function form in C++); that only ever worked
 //      by accident; see the comment above `ParticleEntryResourceManager` below for why it was
 //      replaced.
-//   2. Once `createCommon()` finishes setting up bank 0, kick off loading `Pscene181.jpc`'s raw
+//   2. Once `createCommon()` finishes setting up bank 0, synchronously load `Pscene181.jpc`'s raw
 //      bytes into a small dedicated heap of this mod's own (see `s_lightArrowHeap` below) --
 //      *not* `dPa_control_c`'s own resident particle heap; see that variable's comment for why.
-//   3. Once the load completes, build a `JPAResourceManager` over it and register it as bank 2.
+//   3. Build a `JPAResourceManager` over it and register it as bank 2, right there in the same
+//      function -- see the comment above `on_particle_create_common_post` for why this load isn't
+//      kicked off asynchronously the way vanilla's own per-room scene loads are.
 //   4. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
 //      replaced so that, once bank 2 is ready, any particle ID that `Pscene181.jpc`'s own resource
 //      manager actually contains resolves to it; everything else keeps using vanilla's existing
 //      bank 0/1 logic unchanged.
 static const u8 kLightArrowResMgrId = 2;
 
-static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
 static bool s_lightArrowJpcReady = false;
 static JPAResourceManager* s_lightArrowResMgr = nullptr;
 
@@ -935,7 +936,7 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // (`s_lightArrowHeapBacking` below) has to be freed with a matching `std::free()` call, by hand,
 // after every `s_lightArrowHeap->destroy()`.
 //
-// The diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured the archive +
+// The diagnostic free-size log below (`on_particle_create_common_post`) measured the archive +
 // its resource manager using about 103 KB in earlier testing, so `kLightArrowHeapSize` below keeps
 // the same previously-vetted 256 KiB (leaving roughly 153 KB of slack).
 static const u32 kLightArrowHeapSize = 0x40000;  // 256 KiB for Pscene181.jpc and its resource
@@ -943,6 +944,34 @@ static const u32 kLightArrowHeapSize = 0x40000;  // 256 KiB for Pscene181.jpc an
 
 static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
+
+// With `s_lightArrowHeap` itself no longer dependent on any shared heap having room, the crash
+// still recurred a third time, in the same spot, right after this heap's creation stopped being
+// able to fail that way -- pointing at the *next* thing this code did: kicking off the archive
+// load via `mDoDvdThd_toMainRam_c::create()`, mirroring how vanilla's own `readScene()` loads every
+// per-room scene archive. That call allocates its own small command object from
+// `mDoExt_getCommandHeap()` (`m_Do_dvd_thread.cpp`) -- a single, tiny (a few KiB), engine-wide
+// `JKRExpHeap` shared by *every* in-flight DVD read the whole game and every active mod issues,
+// nowhere near as generously sized as the multi-megabyte heaps above. Vanilla itself relies on this
+// same heap to load `common.jpc` at this exact boot moment (`d_s_logo.cpp`), so it isn't normally a
+// bottleneck in a vanilla, single-mod-free boot -- but it's still a *shared* `JKRExpHeap`, subject
+// to the exact same TARGET_PC unconditional-abort-on-failure behavior described above, and this
+// mod's own additional load is one more simultaneous claim against it during the single busiest,
+// most contested moment of the entire game session, where other active mods are independently
+// loading their own boot-time resources too.
+//
+// Rather than adding a fourth heap-sizing workaround to a heap this mod doesn't own and can't
+// resize, this load bypasses the asynchronous command-queue system entirely: `JKRDvdToMainRam()`
+// (`JKRDvdRipper.h`) is the same low-level, synchronous DVD-read routine `mDoDvdThd_toMainRam_c`
+// itself calls on the DVD thread, and it's already used directly, synchronously, by plenty of other
+// vanilla code (`JKRDvdArchive`, `JKRCompArchive`, `JKRAramArchive` constructors) with no command
+// object and no command heap involved at all -- it reads the file into a buffer it allocates
+// directly from whatever heap is passed to it (`JKRAllocFromHeap(heap, ...)`), which here is
+// `s_lightArrowHeap`: this mod's own private, `std::malloc`-backed heap, fully isolated from every
+// other heap in the game and every other mod. Calling it directly, synchronously, right here in
+// `on_particle_create_common_post` (rather than polling an async command every frame, the way
+// `poll_light_arrow_particle_bank()` used to) means this entire feature's load path now has zero
+// remaining dependency on any heap this mod doesn't fully own and control itself.
 
 // Named hooks on `JPAEmitterManager`'s constructor turned out to be fragile across platforms:
 // constructors have no pointer-to-member-function form in C++, so the only way to target one
@@ -988,11 +1017,12 @@ static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args
     return HOOK_CONTINUE;
 }
 
-// Kicks off loading `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the common
-// bank (and, critically, after `mEmitterMng` -- constructed earlier in this same function -- has
-// already had its slot count bumped by the hook above). This mirrors exactly how vanilla's own
-// `dPa_control_c::readScene()` loads every per-room scene archive: asynchronously, into the same
-// resident particle-resource heap that `common.jpc`'s own raw bytes live in forever.
+// Loads `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the common bank (and,
+// critically, after `mEmitterMng` -- constructed earlier in this same function -- has already had
+// its slot count bumped by the hook above), then immediately builds a `JPAResourceManager` over it
+// and registers it as bank 2, all synchronously, right here, rather than kicking off an
+// asynchronous load and polling for it to finish on a later frame (see the comment above this load
+// for why).
 //
 // `createCommon()` is NOT a true one-shot, console-boot-only call: it's only ever invoked from one
 // call site (`dScnLogo_c`'s boot-time phase), but Twilight Princess implements several "big" scene
@@ -1007,12 +1037,6 @@ static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args
 DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
 
 static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    if (s_lightArrowJpcLoad != nullptr) {
-        // An in-flight load kicked off before a software reset tore down the particle system
-        // this was destined for: there's nothing valid left to wait for.
-        s_lightArrowJpcLoad->destroy();
-        s_lightArrowJpcLoad = nullptr;
-    }
     s_lightArrowJpcReady = false;
     // The previous resource manager (if any) belonged to the heap being destroyed/recreated
     // below, so this pointer must not be dereferenced until a new one is built.
@@ -1054,25 +1078,16 @@ static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
         return;
     }
 
-    s_lightArrowJpcLoad =
-        mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0, s_lightArrowHeap);
-    if (s_lightArrowJpcLoad == nullptr) {
-        mods::log::warn("failed to start loading Pscene181.jpc for Light Arrow particles");
-    }
-}
-
-// Polls the in-flight `Pscene181.jpc` load (see `mod_update()`) and, once it completes, builds a
-// resource manager over it and registers it as bank 2 -- the same two steps vanilla's own
-// `createScene()` performs for whatever bank 1 archive it just finished loading.
-static void poll_light_arrow_particle_bank() {
-    if (s_lightArrowJpcLoad == nullptr || s_lightArrowJpcReady || s_lightArrowJpcLoad->sync() == 0) {
-        return;
-    }
-
-    void* jpcData = s_lightArrowJpcLoad->getMemAddress();
-    s_lightArrowJpcLoad->destroy();
-    s_lightArrowJpcLoad = nullptr;
-
+    // Synchronous, direct DVD read: the same low-level routine `mDoDvdThd_toMainRam_c` itself
+    // calls on the DVD thread, but invoked here directly, with no command object and no command
+    // heap involved at all (see the comment above `s_lightArrowHeap` for why this replaced the
+    // async `mDoDvdThd_toMainRam_c::create()` approach used previously). The destination buffer is
+    // allocated straight out of `s_lightArrowHeap` -- this mod's own private heap -- with no other
+    // heap touched anywhere in this call.
+    u32 jpcSize = 0;
+    void* jpcData = JKRDvdToMainRam("/res/Particle/Pscene181.jpc", nullptr, EXPAND_SWITCH_UNKNOWN1,
+                                     0, s_lightArrowHeap, JKRDvdRipper::ALLOC_DIRECTION_FORWARD, 0,
+                                     nullptr, &jpcSize);
     if (jpcData == nullptr) {
         mods::log::warn("Pscene181.jpc failed to load, Light Arrow particles outside the "
                          "horseback duel will be unavailable");
@@ -1269,8 +1284,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    poll_light_arrow_particle_bank();
-
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
