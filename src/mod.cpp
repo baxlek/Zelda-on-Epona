@@ -465,11 +465,19 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
+// Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
+// draw/ready/shoot/recover state machine below: one between nocking the arrow and it becoming
+// ready to fire, and one between a shot landing and the next draw starting. Halving both roughly
+// doubles our spawned Zelda's rate of fire, per the mod's design goal, without touching the
+// draw/shoot animation clips themselves.
+static constexpr u8 kArrowWaitFrames = 15;
+
 // Replace hook for change (2) above: a copy of vanilla's `daHoZelda_c::setAnm()` (dusklight's
 // `src/d/actor/d_a_hozelda.cpp`) for our own spawned Zelda only, with just the Ganondorf-specific
-// targeting checks replaced (search the body for "deviates from vanilla" below); every other
-// branch is unmodified. Operates on `zelda->member` throughout, rather than `this->member`, since
-// it isn't itself a member function.
+// targeting checks replaced (search the body for "deviates from vanilla" below), plus the
+// faster-rate-of-fire change documented above (search for "kArrowWaitFrames"); every other branch
+// is unmodified. Operates on `zelda->member` throughout, rather than `this->member`, since it
+// isn't itself a member function.
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
     daHorse_c* horse = (daHorse_c*)dComIfGp_getHorseActor();
@@ -604,7 +612,7 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         if (zelda->mUpperAnmID == 9) {
             if (anm_end) {
                 anm_idx[2] = 0x1A;
-                zelda->mAnmTimer = 30;
+                zelda->mAnmTimer = kArrowWaitFrames;
             }
         } else if (zelda->mUpperAnmID == 0xA) {
             if (zelda->mAnmTimer == 0) {
@@ -619,7 +627,7 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
             zelda->mSound.startCreatureSoundLevel(Z2SE_ZELDA_ARROW_READY, 0, zelda->mReverb);
             if (anm_end) {
                 anm_idx[2] = 0xA;
-                zelda->mAnmTimer = 30;
+                zelda->mAnmTimer = kArrowWaitFrames;
             }
         } else if (zelda->mUpperAnmID == 0x1A) {
             if (zelda->mAnmTimer == 0) {
