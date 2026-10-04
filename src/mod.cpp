@@ -898,6 +898,22 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // resource manager using about 103 KB in earlier testing, so `kLightArrowHeapSize` below keeps
 // the same previously-vetted 256 KiB (leaving roughly 153 KB of slack) -- just sourced from a
 // heap that doesn't compete with ordinary scene loading.
+//
+// On every build target this SDK supports other than the original consoles (`#if TARGET_PC`,
+// i.e. every platform this mod actually ships for), `JKRExpHeap::do_alloc()` treats *any*
+// allocation failure on *any* `JKRExpHeap` as unconditionally fatal and aborts the whole process
+// -- regardless of the `errorFlag` passed to that heap's own constructor (that flag only matters
+// on the non-PC path). That includes the implicit allocation `JKRExpHeap::create()` itself makes
+// from its *parent* heap to back the new heap's own memory: if `mDoExt_getZeldaHeap()` doesn't
+// happen to have `kLightArrowHeapSize` free at this exact moment (observed in practice: still
+// during `dScnLogo_c`'s very first few frames, before even the title screen, while other active
+// mods are concurrently loading their own boot-time resources into shared heaps too -- crash log
+// in `res/`), `create()` doesn't return `nullptr` the way its signature suggests; it crashes
+// immediately, inside the parent heap's own `do_alloc()`, before `create()` ever gets a chance to
+// return. So the only way to safely attempt this allocation at all is to never make it in the
+// first place unless it's already known to fit: `getMaxAllocatableSize()` below reports the
+// largest single block the heap could actually hand out (accounting for alignment), with no risk
+// of failure itself, and gates the one call that could otherwise crash.
 static const u32 kLightArrowHeapSize = 0x40000;  // 256 KiB for Pscene181.jpc and its resource
                                                   // manager, carved from the Zelda heap's slack
 
@@ -986,7 +1002,18 @@ static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
         s_lightArrowHeap->destroy();
         s_lightArrowHeap = nullptr;
     }
-    s_lightArrowHeap = JKRExpHeap::create(kLightArrowHeapSize, mDoExt_getZeldaHeap(), false);
+
+    // Checked *before* attempting the allocation, not after: see the comment above this function
+    // for why `JKRExpHeap::create()` failing here isn't a safe, recoverable `nullptr` the way its
+    // signature implies, and must be avoided rather than handled.
+    JKRHeap* zeldaHeap = mDoExt_getZeldaHeap();
+    if (zeldaHeap->getMaxAllocatableSize(0x10) < kLightArrowHeapSize) {
+        mods::log::warn("not enough room in the Zelda heap for Pscene181.jpc right now, Light "
+                         "Arrow particles outside the horseback duel will be unavailable");
+        return;
+    }
+
+    s_lightArrowHeap = JKRExpHeap::create(kLightArrowHeapSize, zeldaHeap, false);
     if (s_lightArrowHeap == nullptr) {
         mods::log::warn("failed to create heap for Pscene181.jpc, Light Arrow particles outside "
                          "the horseback duel will be unavailable");
