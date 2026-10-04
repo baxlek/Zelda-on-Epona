@@ -467,10 +467,11 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
 
 // Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
 // draw/ready/shoot/recover state machine below: one between nocking the arrow and it becoming
-// ready to fire, and one between a shot landing and the next draw starting. Halving both roughly
-// doubles our spawned Zelda's rate of fire, per the mod's design goal, without touching the
-// draw/shoot animation clips themselves.
-static constexpr u8 kArrowWaitFrames = 15;
+// ready to fire, and one between a shot landing and the next draw starting. Shortening both
+// speeds up our spawned Zelda's rate of fire, per the mod's design goal, without touching the
+// draw/shoot animation clips themselves. Set much lower than half (30 -> 5) for testing whether a
+// more aggressive cut is actually noticeable in-game.
+static constexpr u8 kArrowWaitFrames = 5;
 
 // Replace hook for change (2) above: a copy of vanilla's `daHoZelda_c::setAnm()` (dusklight's
 // `src/d/actor/d_a_hozelda.cpp`) for our own spawned Zelda only, with just the Ganondorf-specific
