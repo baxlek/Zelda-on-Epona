@@ -937,10 +937,34 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // after every `s_lightArrowHeap->destroy()`.
 //
 // The diagnostic free-size log below (`on_particle_create_common_post`) measured the archive +
-// its resource manager using about 103 KB in earlier testing, so `kLightArrowHeapSize` below keeps
-// the same previously-vetted 256 KiB (leaving roughly 153 KB of slack).
-static const u32 kLightArrowHeapSize = 0x40000;  // 256 KiB for Pscene181.jpc and its resource
-                                                  // manager, allocated from outside any JKR heap
+// its resource manager using about 103 KB on the platforms this was tested on -- but the crash
+// chain documented above `s_lightArrowHeap` kept recurring, in the same spot, even after every
+// other heap this feature used to depend on (the shared archive heap, the Zelda heap, the DVD
+// command heap) was removed from its load path one by one, on Windows specifically, while Android
+// and Linux builds of the exact same code never showed any problem. Taken together with the fact
+// that none of this function's own `mods::log::warn()` failure messages below have *ever* appeared
+// in a single crash log across this entire saga, the likely explanation is that this 256 KiB budget
+// itself was simply too tight on Windows (where identical source can still produce different struct
+// layouts/alignment and therefore different real memory usage for the same archive, under a
+// different compiler/ABI than the Linux and Android builds) -- and a too-tight `JKRExpHeap` doesn't
+// *fail gracefully* the way this function's own `nullptr` checks assume: every allocation out of it
+// (including the one inside `JKRDvdToMainRam()` and the one building the `JPAResourceManager`
+// itself) still goes through the same unconditionally-fatal `JKRExpHeap::do_alloc()` described
+// above, which aborts the whole process *before* ever returning `nullptr` to this code. In other
+// words, this heap being our own and fully private only fixed *where* an allocation failure could
+// no longer come from (every other heap in the game); it never made a failure *survivable* in the
+// first place -- there's no such thing as "Light Arrow particles unavailable" if this heap itself
+// runs out of room, only a hard crash.
+//
+// Since this heap's backing memory is ordinary host-process `std::malloc()`, entirely outside of
+// and invisible to every one of the game's own fixed memory budgets, there is no longer any reason
+// to keep it small the way the two heaps before it had to be (every byte here costs nothing to any
+// other system, mod, or platform) -- so instead of continuing to guess at an exact byte count that
+// happens to survive on every compiler/ABI this mod ships for, it's sized with a large, deliberately
+// wasteful safety margin well beyond anything a ~200 KB archive plus its resource manager should
+// plausibly need on any platform.
+static const u32 kLightArrowHeapSize = 0x200000;  // 2 MiB for Pscene181.jpc and its resource
+                                                   // manager, allocated from outside any JKR heap
 
 static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
