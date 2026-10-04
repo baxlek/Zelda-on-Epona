@@ -12,6 +12,8 @@
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
+#include "d/d_cc_d.h"
+#include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_particle.h"
 #include "f_op/f_op_actor_mng.h"
@@ -784,6 +786,49 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     arrow->speed = dir * arrow->field_0x99c;
 }
 
+// --- One-hit-kill Light Arrows ---------------------------------------------------------------
+//
+// Vanilla's own `cc_at_check()` (`d_cc_uty.cpp`) already forces a flat 100 attack power for any
+// hit whose collider material is `dCcD_MTRL_LIGHT` (i.e. any Light Arrow) against any ordinary
+// enemy -- it only leaves Ganondorf (whose real duel damage/stagger is handled entirely
+// separately) and Zant (deliberately left on normal, lower arrow damage) on their own un-boosted
+// power. But a flat 100 power on its own still isn't a guaranteed kill: plenty of enemies simply
+// start with more than 100 health, so they still take several Light Arrow hits in a row even
+// though every single one of those hits already gets that same forced 100-power override. King
+// Bulblin (`e_rdb_class`, `src/d/actor/d_a_e_rdb.cpp`'s `daE_RDB_Create()`) is the clearest
+// example, sitting at 600-900 health -- a visibly "tankier than it looks" case for exactly the
+// enemy family (reddish Bulblin/"Bokoblin"-type riders) this was reported against, but the same
+// gap applies to any other enemy with more than 100 max health.
+//
+// Rather than trying to special-case (or guess at) every individual enemy's own health-handling
+// quirks -- several reuse their `health` field for non-damage bookkeeping elsewhere in their own
+// state machines, so blindly zeroing it unconditionally would risk stepping on that -- this
+// leaves vanilla's own forced-100-power subtraction completely unmodified and only clamps the
+// *target's current health* down to within that guaranteed-lethal range immediately before the
+// original runs. It's scoped with the exact same Light Arrow material check (and Ganondorf/Zant
+// exemption) the original function itself applies a few lines later, so this never fires for a
+// hit that wouldn't already be getting vanilla's own 100-power override anyway, and never touches
+// health on any frame that isn't a Light Arrow hit at all.
+DEFINE_HOOK(&cc_at_check, CcAtCheck);
+
+static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* enemy = mods::arg<fopAc_ac_c*>(args, 0);
+    dCcU_AtInfo* atInfo = mods::arg<dCcU_AtInfo*>(args, 1);
+
+    if (enemy == nullptr || atInfo == nullptr || atInfo->mpCollider == nullptr) {
+        return HOOK_CONTINUE;
+    }
+
+    if (static_cast<dCcD_GObjInf*>(atInfo->mpCollider)->GetAtMtrl() == dCcD_MTRL_LIGHT) {
+        s16 name = fopAcM_GetName(enemy);
+        if (name != fpcNm_B_GND_e && name != fpcNm_B_ZANT_e && enemy->health > 100) {
+            enemy->health = 100;
+        }
+    }
+
+    return HOOK_CONTINUE;
+}
+
 // Zelda's Light Arrow trail/hit mark/charge effects (`daArrow_c::setBlur`/`setLightArrowHitMark`/
 // `setLightChargeEffect`, particle IDs 0x896E-0x8978) -- plus a number of other effects that turned
 // out to live in the very same archive once this was tested in-game (e.g. whatever produces the
@@ -1049,6 +1094,16 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "of toward their target: {}",
             (int)result);
         // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
+    }
+
+    result = mods::hook::add_pre<CcAtCheck>(on_cc_at_check_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook attack-power check, Light Arrows won't one-hit-kill high-health "
+            "enemies like King Bulblin: {}",
+            (int)result);
+        // Not fatal: the mod still works, Light Arrows just keep vanilla's own flat-100-power
+        // behavior (still enough to one-shot most ordinary enemies, just not high-health ones).
     }
 
     result = mods::hook::add_pre<ParticleResHeapCreate>(on_particle_res_heap_create_pre);
