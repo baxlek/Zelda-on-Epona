@@ -814,12 +814,15 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // adding a 3rd always-resident archive on top of that -- with no way to measure its exact size
 // up front -- needs a generous margin, not just a token bump: a first attempt at a small 128 KB
 // margin still produced a `JKRExpHeap` allocation-failure `SIGABRT` in practice (crash log in
-// `res/`), so this uses a much larger, safely-oversized margin instead. A couple of extra
-// megabytes of headroom is trivial on the hardware this mod targets.
+// `res/`), so this uses a much larger, safely-oversized margin instead. The diagnostic free-size
+// log below (`poll_light_arrow_particle_bank()`) measured ~3.9 MiB (4089024 bytes) still free with
+// a 4 MiB margin once the whole archive was being loaded (not just the original eleven-ID subset),
+// so the margin was trimmed down to 3 MiB -- still a safe ~2.9 MiB of slack -- rather than keeping
+// the original, now-unnecessarily-generous headroom.
 using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
 DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
 
-static const u32 kParticleResHeapExtraBytes = 0x400000;  // 4 MiB headroom for Pscene181.jpc, its
+static const u32 kParticleResHeapExtraBytes = 0x300000;  // 3 MiB headroom for Pscene181.jpc, its
                                                           // resource manager, and continued normal
                                                           // per-room scene loading alongside it
 
