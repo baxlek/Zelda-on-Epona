@@ -852,9 +852,14 @@ static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
 // `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager
 // slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to
 // be made to exist first:
-//   1. Bump `ridMax` from 2 to 3 by hooking `JPAEmitterManager`'s constructor (no pointer-to-member
-//      exists for a constructor, hence by symbol name) and rewriting its `i_ridMax` argument before
-//      the original runs, so its resource-manager slot array is allocated with room for bank 2.
+//   1. Grow `ridMax` from 2 to 3 right after `mEmitterMng` is constructed, by hooking
+//      `JPAEmitterManager::entryResourceManager()` (a normal, addressable member function) and
+//      reallocating `pResMgrAry` with room for bank 2 the moment that method is first called
+//      (always with `resMgrID == 0`, registering bank 0, immediately after construction in
+//      `createCommon()`). An earlier attempt hooked the constructor itself instead, by symbol
+//      name (constructors have no pointer-to-member-function form in C++); that only ever worked
+//      by accident; see the comment above `ParticleEntryResourceManager` below for why it was
+//      replaced.
 //   2. Once `createCommon()` finishes setting up bank 0, kick off loading `Pscene181.jpc`'s raw
 //      bytes the same way vanilla already loads every per-room scene archive (`readScene()`,
 //      below): asynchronously, into `dPa_control_c`'s own resident particle heap.
@@ -916,25 +921,47 @@ static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*
     return HOOK_CONTINUE;
 }
 
-// `JPAEmitterManager`'s constructor has no pointer-to-member-function form in C++, so this hooks
-// it by symbol name instead; it has only one overload, so the qualified display name resolves
-// unambiguously. This must be the unmangled "Class::Class" display name, not a hardcoded mangled
-// symbol (e.g. the Itanium `_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh`): a prior attempt hardcoded
-// that mangled form, which only exists in the symbol manifest for build targets using the Itanium
-// ABI, and failed to resolve on Windows x86_64 builds ("symbol ... not found") since their
-// manifest doesn't carry that exact mangled name. The display name resolves platform-independently
-// through the symbol manifest instead. Argument 5 is `i_ridMax`, which sizes the resource-manager
-// slot array allocated later in the same constructor call, so bumping it here (before the original
-// body runs) is enough to make room for bank 2.
-DEFINE_HOOK_SYMBOL("JPAEmitterManager::JPAEmitterManager",
-                   void(JPAEmitterManager*, u32, u32, JKRHeap*, u8, u8),
-                   ParticleEmitterManagerCtor);
+// Named hooks on `JPAEmitterManager`'s constructor turned out to be fragile across platforms:
+// constructors have no pointer-to-member-function form in C++, so the only way to target one
+// via `DEFINE_HOOK_SYMBOL` is by name. A first attempt hardcoded the Itanium-mangled symbol
+// (`_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh`), which only exists in the symbol manifest for build
+// targets using the Itanium ABI and failed to resolve on Windows x86_64 ("symbol ... not found").
+// Switching to the unmangled qualified display name (`"JPAEmitterManager::JPAEmitterManager"`)
+// fixed that, but traded it for two worse problems: it failed to *build* on AppleClang arm64
+// (macOS and iOS), and crashed on *initial load* on Windows x86_64 -- a named hook on a
+// constructor is simply not a portable, well-supported pattern across the SDK's compilers.
+//
+// Instead, this hooks `JPAEmitterManager::entryResourceManager()` -- an ordinary non-virtual
+// member function, addressable the normal way with `&Class::method`, no name resolution involved
+// at all. `dPa_control_c::createCommon()` always calls it immediately after constructing
+// `mEmitterMng`, registering bank 0 with `resMgrID == 0` -- the first and only call made with
+// that ID. At that exact moment `pResMgrAry` already exists (built by the constructor with its
+// original, too-small `ridMax`) but hasn't been touched yet, and -- critically -- the solid heap
+// it was allocated from (`dPa_control_c::mHeap`) hasn't been trimmed to size yet either: that
+// only happens via `mDoExt_adjustSolidHeap()` at the very end of `createCommon()`, well after
+// every `entryResourceManager()` call it makes. So there's still room to grow `pResMgrAry` here,
+// exactly as if the constructor itself had been asked to allocate a bigger one.
+DEFINE_HOOK(&JPAEmitterManager::entryResourceManager, ParticleEntryResourceManager);
 
-static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, void*, void*) {
-    u8& ridMax = mods::arg_ref<u8>(args, 5);
-    if (ridMax <= kLightArrowResMgrId) {
-        ridMax = kLightArrowResMgrId + 1;
+static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args, void*, void*) {
+    auto* mgr = mods::arg<JPAEmitterManager*>(args, 0);
+    u8 resMgrId = mods::arg<u8>(args, 2);
+    if (resMgrId != 0 || mgr->ridMax > kLightArrowResMgrId) {
+        return HOOK_CONTINUE;
     }
+
+    u8 newRidMax = kLightArrowResMgrId + 1;
+    JKRHeap* heap = g_dComIfG_gameInfo.play.getParticle()->getHeap();
+    auto* newAry = JKR_NEW_ARRAY_ARGS(JPAResourceManager*, newRidMax, heap, 0);
+    if (newAry == nullptr) {
+        return HOOK_CONTINUE;
+    }
+
+    for (u8 i = 0; i < newRidMax; i++) {
+        newAry[i] = (i < mgr->ridMax) ? mgr->pResMgrAry[i] : nullptr;
+    }
+    mgr->pResMgrAry = newAry;
+    mgr->ridMax = newRidMax;
     return HOOK_CONTINUE;
 }
 
@@ -1125,11 +1152,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: if there happens to be enough headroom already, the mod still works.
     }
 
-    result = mods::hook::add_pre<ParticleEmitterManagerCtor>(on_particle_emitter_manager_ctor_pre);
+    result = mods::hook::add_pre<ParticleEntryResourceManager>(on_particle_entry_resource_manager_pre);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook particle emitter manager construction, Light Arrow particles outside "
-            "the horseback duel will be unavailable: {}",
+            "failed to hook particle emitter manager resource registration, Light Arrow particles "
+            "outside the horseback duel will be unavailable: {}",
             (int)result);
         // Not fatal: the mod still works, Light Arrows just won't show their hit mark/charge
         // effects outside the one vanilla cutscene that already has them.
