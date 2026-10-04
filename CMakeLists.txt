@@ -10,13 +10,15 @@ endif ()
 project(zelda_on_epona VERSION 1.2.2 LANGUAGES CXX)
 
 # The Dusklight version to build against: a release tag (e.g. "v2.0.0") or a commit SHA.
-if (NOT DUSKLIGHT_VERSION)
-    set(DUSKLIGHT_VERSION "v2.0.2")
-endif ()
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if (NOT DUSKLIGHT_VERSION)
+        set(DUSKLIGHT_VERSION "v2.0.2")
+    endif ()
 # Fetches the Dusklight sources into ./dusklight and provides DUSKLIGHT_DIR.
 # Use -DDUSKLIGHT_DIR= to point at an existing Dusklight checkout.
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
-add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
+    add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)
+endif ()
 
 configure_file(mod.json.in "${CMAKE_CURRENT_BINARY_DIR}/mod.json" @ONLY NEWLINE_STYLE LF)
 
@@ -27,4 +29,5 @@ add_mod(zelda_on_epona
         RES_DIR res            # mod resources, including icon.png and banner.png
         OVERLAY_DIR overlay    # game file overlays; remove if unused
         TEXTURES_DIR textures  # texture replacements; remove if unused
+        BUNDLE
 )
