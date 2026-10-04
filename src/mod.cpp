@@ -758,15 +758,21 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 }
 
 // Zelda's Light Arrow trail/hit mark/charge effects (`daArrow_c::setBlur`/`setLightArrowHitMark`/
-// `setLightChargeEffect`, particle IDs 0x896E-0x8978) only exist in the horseback-duel stage's
-// room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not in the
-// always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever this
-// mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since the
-// mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted game
-// assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*,
+// `setLightChargeEffect`, particle IDs 0x896E-0x8978) -- plus a number of other effects that turned
+// out to live in the very same archive once this was tested in-game (e.g. whatever produces the
+// arrow's actual visible light trail, which isn't any of those eleven IDs) -- only exist in the
+// horseback-duel stage's room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not
+// in the always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever
+// this mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since
+// the mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted
+// game assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*,
 // always-resident particle bank -- alongside `common.jpc` (bank 0) and whatever per-room
-// `Pscene###.jpc` is normally loaded (bank 1) -- and redirects just those eleven particle IDs to
-// it.
+// `Pscene###.jpc` is normally loaded (bank 1) -- and redirects every particle ID that archive
+// actually contains to it. Rather than maintaining a hand-picked allowlist of IDs (which turned out
+// to be incomplete and a maintenance burden -- Zelda's effects aren't the only things in that
+// archive, but anything else in it is simply never requested outside the real duel, so redirecting
+// unconditionally is harmless), `getRM_ID()` below queries bank 2's own `JPAResourceManager`
+// directly via `JPAResourceManager::getResource()`.
 //
 // `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager
 // slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to
@@ -784,45 +790,14 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 //      every other `JKRExpHeap::create` call site in the engine untouched.
 //   4. Once the load completes, build a `JPAResourceManager` over it and register it as bank 2.
 //   5. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
-//      replaced so that, once bank 2 is ready, exactly those eleven Light Arrow particle IDs
-//      resolve to it; everything else keeps using vanilla's existing bank 0/1 logic unchanged.
+//      replaced so that, once bank 2 is ready, any particle ID that `Pscene181.jpc`'s own resource
+//      manager actually contains resolves to it; everything else keeps using vanilla's existing
+//      bank 0/1 logic unchanged.
 static const u8 kLightArrowResMgrId = 2;
-
-static bool is_light_arrow_particle_id(u16 nameId) {
-    switch (nameId) {
-        case 0x896E:  // setBlur/decAlphaBlur motion-blur trail effect
-        case 0x896F:
-        case 0x8970:
-        case 0x8971:
-        case 0x8972:
-        case 0x8973:
-        case 0x8974:  // setLightArrowHitMark effects A-F
-        case 0x8975:
-        case 0x8976:
-        case 0x8977:
-        case 0x8978:  // setLightChargeEffect effects A-D
-            return true;
-        default:
-            return false;
-    }
-}
 
 static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
 static bool s_lightArrowJpcReady = false;
 static JPAResourceManager* s_lightArrowResMgr = nullptr;
-
-// TEMPORARY DIAGNOSTIC: the reported "missing Light Arrow trail" wasn't fixed by adding 0x896E to
-// the allowlist below, so it may not be a particle at all -- or it may be a particle ID this
-// hand-picked list simply hasn't identified yet (`Pscene181.jpc` likely bundles other resources
-// beyond the ones `daArrow_c` is known to reference by name). While this is `true`, `getRM_ID()`
-// ignores `is_light_arrow_particle_id()` entirely and instead redirects *any* particle ID that
-// `Pscene181.jpc`'s own resource manager actually contains (checked directly via
-// `JPAResourceManager::getResource()`) to bank 2. This can only ever affect particles that are
-// genuinely bundled in that one archive -- bank 0 (`common.jpc`) and bank 1 (the per-room scene)
-// are untouched -- so it's safe to ship temporarily to help narrow down which, if any, of
-// `Pscene181.jpc`'s particles correspond to the missing trail. Remove this flag (and the branch
-// it guards) once the investigation concludes.
-static const bool kDiagnosticEnableAllPscene181Particles = true;
 
 // `dPa_control_c`'s resident particle-resource heap is created with a hardcoded, platform-fixed
 // size (`d_particle.cpp`: 0x1f0800 bytes in DEBUG builds, 0x96000 otherwise) that vanilla never
@@ -946,20 +921,23 @@ static void poll_light_arrow_particle_bank() {
     dPa_control_c::getEmitterManager()->entryResourceManager(mgr, kLightArrowResMgrId);
     s_lightArrowResMgr = mgr;
     s_lightArrowJpcReady = true;
+
+    // Logged once per load (including after every soft-reset reload) so this can be checked
+    // against `kParticleResHeapExtraBytes` below without needing a debugger: if this ever trends
+    // towards 0, the margin needs to grow again, the same way it did when it was first sized.
+    mods::log::info("Pscene181.jpc loaded as particle bank {}, resource heap has {} bytes free",
+                     kLightArrowResMgrId, heap->getFreeSize());
 }
 
-// Once bank 2 is ready, redirects the eleven Light Arrow trail/hit mark/charge effect particle
-// IDs to it (or, while the diagnostic above is active, every particle ID `Pscene181.jpc` actually
-// contains); everything else (and these same IDs, while bank 2 is still loading) keeps using
-// vanilla's existing top-bit common/scene selection unchanged.
+// Once bank 2 is ready, redirects any particle ID that `Pscene181.jpc`'s own resource manager
+// actually contains to it; everything else (and these same IDs, while bank 2 is still loading)
+// keeps using vanilla's existing top-bit common/scene selection unchanged.
 DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);
 
 static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval, void*) {
     u16 nameId = mods::arg<u16>(args, 0);
-    bool isPscene181Particle = kDiagnosticEnableAllPscene181Particles
-                                    ? (s_lightArrowResMgr != nullptr &&
-                                       s_lightArrowResMgr->getResource(nameId) != nullptr)
-                                    : is_light_arrow_particle_id(nameId);
+    bool isPscene181Particle =
+        s_lightArrowResMgr != nullptr && s_lightArrowResMgr->getResource(nameId) != nullptr;
     u8 result = (s_lightArrowJpcReady && isPscene181Particle)
                     ? kLightArrowResMgrId
                     : ParticleGetRmId::g_orig(nameId);
