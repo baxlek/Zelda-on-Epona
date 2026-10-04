@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/actor.h"
@@ -888,35 +890,58 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // `JKRExpHeap` allocation-failure `SIGABRT` while loading an unrelated new scene (crash log in
 // `res/`), since that scene's stage resources no longer fit in the now-smaller remaining budget.
 //
-// Instead, this archive gets its own small, completely separate heap (`s_lightArrowHeap`),
-// carved out of `mDoExt_getZeldaHeap()` instead of the archive heap. The Zelda heap is the
-// engine's own established "has the most slack" heap: at boot it's sized to whatever memory is
-// left over after every other heap (archive, game, J2D, command) has already claimed its fixed
-// budget (`m_Do_machine.cpp`), and it's the heap vanilla's own `mDoDvdThd_mountArchive_c::execute`
-// retries into as a last resort on every platform when every other heap fails to allocate. The
-// diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured the archive + its
-// resource manager using about 103 KB in earlier testing, so `kLightArrowHeapSize` below keeps
-// the same previously-vetted 256 KiB (leaving roughly 153 KB of slack) -- just sourced from a
-// heap that doesn't compete with ordinary scene loading.
+// Instead, this archive gets its own small, completely separate heap (`s_lightArrowHeap`). A
+// second attempt carved that heap's backing memory out of `mDoExt_getZeldaHeap()` via the normal
+// `JKRExpHeap::create(size, parent, errorFlag)` overload (the Zelda heap being the engine's own
+// established "has the most slack" heap -- at boot it's sized to whatever memory is left over
+// after every other heap has already claimed its fixed budget, and it's the heap vanilla's own
+// `mDoDvdThd_mountArchive_c::execute` retries into as a last resort on every platform when every
+// other heap fails to allocate). That still crashed, twice, for two different reasons:
 //
-// On every build target this SDK supports other than the original consoles (`#if TARGET_PC`,
-// i.e. every platform this mod actually ships for), `JKRExpHeap::do_alloc()` treats *any*
-// allocation failure on *any* `JKRExpHeap` as unconditionally fatal and aborts the whole process
-// -- regardless of the `errorFlag` passed to that heap's own constructor (that flag only matters
-// on the non-PC path). That includes the implicit allocation `JKRExpHeap::create()` itself makes
-// from its *parent* heap to back the new heap's own memory: if `mDoExt_getZeldaHeap()` doesn't
-// happen to have `kLightArrowHeapSize` free at this exact moment (observed in practice: still
-// during `dScnLogo_c`'s very first few frames, before even the title screen, while other active
-// mods are concurrently loading their own boot-time resources into shared heaps too -- crash log
-// in `res/`), `create()` doesn't return `nullptr` the way its signature suggests; it crashes
-// immediately, inside the parent heap's own `do_alloc()`, before `create()` ever gets a chance to
-// return. So the only way to safely attempt this allocation at all is to never make it in the
-// first place unless it's already known to fit: `getMaxAllocatableSize()` below reports the
-// largest single block the heap could actually hand out (accounting for alignment), with no risk
-// of failure itself, and gates the one call that could otherwise crash.
+//   1. On every build target this SDK supports other than the original consoles (`#if TARGET_PC`,
+//      i.e. every platform this mod actually ships for), `JKRExpHeap::do_alloc()` treats *any*
+//      allocation failure on *any* `JKRExpHeap` as unconditionally fatal and aborts the whole
+//      process -- regardless of the `errorFlag` passed to that heap's own constructor (that flag
+//      only matters on the non-PC path). That includes the implicit allocation
+//      `JKRExpHeap::create(size, parent, errorFlag)` itself makes from its *parent* heap to back
+//      the new heap's own memory: if the parent doesn't happen to have `kLightArrowHeapSize` free
+//      at that exact moment, `create()` doesn't return `nullptr` the way its signature suggests;
+//      it crashes immediately, inside the parent's own `do_alloc()`, before `create()` ever gets a
+//      chance to return.
+//   2. A `getMaxAllocatableSize()` pre-check (which cannot itself fail) was added to gate that
+//      call and avoid attempting an allocation already known not to fit -- but the crash recurred
+//      anyway, still during `dScnLogo_c`'s very first few frames before even the title screen,
+//      with no trace of this mod's own diagnostic log lines (crash logs in `res/`). Whatever room
+//      the pre-check measured evidently didn't hold by the time `create()` actually ran: other
+//      mods load their own boot-time resources into shared heaps during this same narrow window,
+//      and nothing stops something else from claiming that same space in between the check and
+//      the allocation it was guarding.
+//
+// Chasing a *third* boot-time memory-pressure failure mode in the same shared heap wasn't worth
+// it: this heap's backing memory now comes from `std::malloc()` instead, bypassing the JKR
+// allocation system -- and every heap it manages -- entirely. `JKRExpHeap` has a second `create()`
+// overload, `create(void* ptr, u32 size, JKRHeap* parent, bool errorFlag)`, that wraps
+// caller-provided memory as a heap's storage directly, with no call to `JKRAllocFromHeap()` on
+// `parent` at all (that parameter is used only to register this heap as a child in the engine's
+// heap tree for bookkeeping/diagnostics, e.g. heap-dump tooling -- it's never range-checked against
+// `ptr`, so `mDoExt_getZeldaHeap()` is passed here purely as a plausible place to be listed, not as
+// a source of memory). `std::malloc()` is ordinary host-side allocation, entirely independent of
+// every one of the game's own fixed-budget heaps (archive, game, Zelda, J2D, command): if the
+// process is so low on memory that it fails, it simply returns `nullptr`, exactly like any other
+// `std::malloc()` call elsewhere in this codebase, with no risk of the `CRASH()` this whole saga
+// was trying to avoid. The one caveat: `JKRExpHeap::do_destroy()` only frees backing memory it
+// allocated itself (the `size`-only `create()` overload); for this pointer-based overload, it just
+// destructs in place and leaves the memory alone, so the raw backing pointer
+// (`s_lightArrowHeapBacking` below) has to be freed with a matching `std::free()` call, by hand,
+// after every `s_lightArrowHeap->destroy()`.
+//
+// The diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured the archive +
+// its resource manager using about 103 KB in earlier testing, so `kLightArrowHeapSize` below keeps
+// the same previously-vetted 256 KiB (leaving roughly 153 KB of slack).
 static const u32 kLightArrowHeapSize = 0x40000;  // 256 KiB for Pscene181.jpc and its resource
-                                                  // manager, carved from the Zelda heap's slack
+                                                  // manager, allocated from outside any JKR heap
 
+static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
 
 // Named hooks on `JPAEmitterManager`'s constructor turned out to be fragile across platforms:
@@ -1002,19 +1027,28 @@ static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
         s_lightArrowHeap->destroy();
         s_lightArrowHeap = nullptr;
     }
+    // The pointer-based `JKRExpHeap::create()` overload used below doesn't free this itself (see
+    // the comment above this function) -- it has to be freed by hand, every time, before the next
+    // `std::malloc()` call replaces it.
+    if (s_lightArrowHeapBacking != nullptr) {
+        std::free(s_lightArrowHeapBacking);
+        s_lightArrowHeapBacking = nullptr;
+    }
 
-    // Checked *before* attempting the allocation, not after: see the comment above this function
-    // for why `JKRExpHeap::create()` failing here isn't a safe, recoverable `nullptr` the way its
-    // signature implies, and must be avoided rather than handled.
-    JKRHeap* zeldaHeap = mDoExt_getZeldaHeap();
-    if (zeldaHeap->getMaxAllocatableSize(0x10) < kLightArrowHeapSize) {
-        mods::log::warn("not enough room in the Zelda heap for Pscene181.jpc right now, Light "
-                         "Arrow particles outside the horseback duel will be unavailable");
+    // Ordinary host-side allocation, entirely outside the JKR heap system: on failure this simply
+    // returns `nullptr`, with none of the abort-on-failure behavior described above this function.
+    s_lightArrowHeapBacking = std::malloc(kLightArrowHeapSize);
+    if (s_lightArrowHeapBacking == nullptr) {
+        mods::log::warn("failed to allocate memory for Pscene181.jpc, Light Arrow particles "
+                         "outside the horseback duel will be unavailable");
         return;
     }
 
-    s_lightArrowHeap = JKRExpHeap::create(kLightArrowHeapSize, zeldaHeap, false);
+    s_lightArrowHeap = JKRExpHeap::create(s_lightArrowHeapBacking, kLightArrowHeapSize,
+                                           mDoExt_getZeldaHeap(), false);
     if (s_lightArrowHeap == nullptr) {
+        std::free(s_lightArrowHeapBacking);
+        s_lightArrowHeapBacking = nullptr;
         mods::log::warn("failed to create heap for Pscene181.jpc, Light Arrow particles outside "
                          "the horseback duel will be unavailable");
         return;
