@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/actor.h"
@@ -19,9 +21,9 @@
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
+#include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
-#include "m_Do/m_Do_dvd_thread.h"
 #include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
@@ -852,90 +854,199 @@ static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
 // `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager
 // slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to
 // be made to exist first:
-//   1. Bump `ridMax` from 2 to 3 by hooking `JPAEmitterManager`'s constructor (no pointer-to-member
-//      exists for a constructor, hence by symbol name) and rewriting its `i_ridMax` argument before
-//      the original runs, so its resource-manager slot array is allocated with room for bank 2.
-//   2. Once `createCommon()` finishes setting up bank 0, kick off loading `Pscene181.jpc`'s raw
-//      bytes the same way vanilla already loads every per-room scene archive (`readScene()`,
-//      below): asynchronously, into `dPa_control_c`'s own resident particle heap.
-//   3. That heap (`m_resHeap`) is itself a fixed-size `JKRExpHeap` sized once, as a hardcoded
-//      constant baked into `dPa_control_c`'s constructor -- there's no parameter to adjust, so the
-//      underlying heap-creation call is hooked directly and only *that* allocation (identified by
-//      its distinctive parent heap and exact requested size) is bumped by a safety margin, leaving
-//      every other `JKRExpHeap::create` call site in the engine untouched.
-//   4. Once the load completes, build a `JPAResourceManager` over it and register it as bank 2.
-//   5. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
+//   1. Grow `ridMax` from 2 to 3 right after `mEmitterMng` is constructed, by hooking
+//      `JPAEmitterManager::entryResourceManager()` (a normal, addressable member function) and
+//      reallocating `pResMgrAry` with room for bank 2 the moment that method is first called
+//      (always with `resMgrID == 0`, registering bank 0, immediately after construction in
+//      `createCommon()`). An earlier attempt hooked the constructor itself instead, by symbol
+//      name (constructors have no pointer-to-member-function form in C++); that only ever worked
+//      by accident; see the comment above `ParticleEntryResourceManager` below for why it was
+//      replaced.
+//   2. Once `createCommon()` finishes setting up bank 0, synchronously load `Pscene181.jpc`'s raw
+//      bytes into a small dedicated heap of this mod's own (see `s_lightArrowHeap` below) --
+//      *not* `dPa_control_c`'s own resident particle heap; see that variable's comment for why.
+//   3. Build a `JPAResourceManager` over it and register it as bank 2, right there in the same
+//      function -- see the comment above `on_particle_create_common_post` for why this load isn't
+//      kicked off asynchronously the way vanilla's own per-room scene loads are.
+//   4. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
 //      replaced so that, once bank 2 is ready, any particle ID that `Pscene181.jpc`'s own resource
 //      manager actually contains resolves to it; everything else keeps using vanilla's existing
 //      bank 0/1 logic unchanged.
 static const u8 kLightArrowResMgrId = 2;
 
-static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
 static bool s_lightArrowJpcReady = false;
 static JPAResourceManager* s_lightArrowResMgr = nullptr;
 
-// `dPa_control_c`'s resident particle-resource heap is created with a hardcoded, platform-fixed
-// size (`d_particle.cpp`: 0x1f0800 bytes in DEBUG builds, 0x96000 otherwise) that vanilla never
-// budgeted any headroom into for an extra always-resident archive. `JKRExpHeap::create` itself is
-// a shared low-level utility used by dozens of unrelated heap allocations across the whole engine,
-// so this only ever touches the one allocation matching both the particle system's distinctive
-// parent heap (`mDoExt_getArchiveHeap()`) and one of those exact known sizes.
+// `Pscene181.jpc`'s raw archive bytes and its `JPAResourceManager` need to live *somewhere* for the
+// entire game session, but NOT in `dPa_control_c`'s own resident particle heap (`m_resHeap`):
+// that heap is itself a fixed-size `JKRExpHeap` carved out of `mDoExt_getArchiveHeap()`
+// (`d_particle.cpp`: `JKRCreateExpHeap(heapSize, mDoExt_getArchiveHeap(), false)`), and
+// `mDoExt_getArchiveHeap()` is a tightly budgeted heap shared with ordinary per-scene stage
+// resource loading (room archives, camera data, event lists, and so on -- see
+// `mDoExt_getSafeArchiveHeapSize()` and its users in `d_s_play.cpp`). A first attempt grew
+// `m_resHeap` directly (by hooking `JKRExpHeap::create` and bumping the size of just that one
+// allocation by a safety margin), which did make room for `Pscene181.jpc` itself, but permanently
+// shrank `mDoExt_getArchiveHeap()`'s own remaining budget for everything else by that same
+// margin -- every byte added here came out of stage loading's budget. That regressed into a
+// `JKRExpHeap` allocation-failure `SIGABRT` while loading an unrelated new scene (crash log in
+// `res/`), since that scene's stage resources no longer fit in the now-smaller remaining budget.
 //
-// Note this heap doesn't just hold `common.jpc`'s raw bytes at rest: vanilla's own `readScene()`
-// already loads each room's `Pscene###.jpc` raw bytes into this same heap too (freed/replaced on
-// every room change, same as `common.jpc`'s own raw bytes stay resident for the whole heap's
-// lifetime), so even unmodified, this heap's tight (614 KB in release builds) budget is already
-// sized for "common.jpc + one room's scene archive" at once with very little slack. Permanently
-// adding a 3rd always-resident archive on top of that -- with no way to measure its exact size
-// up front -- needs a generous margin, not just a token bump: a first attempt at a small 128 KB
-// margin still produced a `JKRExpHeap` allocation-failure `SIGABRT` in practice (crash log in
-// `res/`), so this started out using a much larger, safely-oversized margin instead. The
-// diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured ~3.9 MiB (4089024
-// bytes) still free with a 4 MiB margin once the whole archive was being loaded (not just the
-// original eleven-ID subset) -- i.e. the archive + its resource manager only actually use about
-// 103 KB of that margin -- so it was trimmed down to 1 MiB, still leaving roughly 921 KB of slack.
-using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
-DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
+// Instead, this archive gets its own small, completely separate heap (`s_lightArrowHeap`). A
+// second attempt carved that heap's backing memory out of `mDoExt_getZeldaHeap()` via the normal
+// `JKRExpHeap::create(size, parent, errorFlag)` overload (the Zelda heap being the engine's own
+// established "has the most slack" heap -- at boot it's sized to whatever memory is left over
+// after every other heap has already claimed its fixed budget, and it's the heap vanilla's own
+// `mDoDvdThd_mountArchive_c::execute` retries into as a last resort on every platform when every
+// other heap fails to allocate). That still crashed, twice, for two different reasons:
+//
+//   1. On every build target this SDK supports other than the original consoles (`#if TARGET_PC`,
+//      i.e. every platform this mod actually ships for), `JKRExpHeap::do_alloc()` treats *any*
+//      allocation failure on *any* `JKRExpHeap` as unconditionally fatal and aborts the whole
+//      process -- regardless of the `errorFlag` passed to that heap's own constructor (that flag
+//      only matters on the non-PC path). That includes the implicit allocation
+//      `JKRExpHeap::create(size, parent, errorFlag)` itself makes from its *parent* heap to back
+//      the new heap's own memory: if the parent doesn't happen to have `kLightArrowHeapSize` free
+//      at that exact moment, `create()` doesn't return `nullptr` the way its signature suggests;
+//      it crashes immediately, inside the parent's own `do_alloc()`, before `create()` ever gets a
+//      chance to return.
+//   2. A `getMaxAllocatableSize()` pre-check (which cannot itself fail) was added to gate that
+//      call and avoid attempting an allocation already known not to fit -- but the crash recurred
+//      anyway, still during `dScnLogo_c`'s very first few frames before even the title screen,
+//      with no trace of this mod's own diagnostic log lines (crash logs in `res/`). Whatever room
+//      the pre-check measured evidently didn't hold by the time `create()` actually ran: other
+//      mods load their own boot-time resources into shared heaps during this same narrow window,
+//      and nothing stops something else from claiming that same space in between the check and
+//      the allocation it was guarding.
+//
+// Chasing a *third* boot-time memory-pressure failure mode in the same shared heap wasn't worth
+// it: this heap's backing memory now comes from `std::malloc()` instead, bypassing the JKR
+// allocation system -- and every heap it manages -- entirely. `JKRExpHeap` has a second `create()`
+// overload, `create(void* ptr, u32 size, JKRHeap* parent, bool errorFlag)`, that wraps
+// caller-provided memory as a heap's storage directly, with no call to `JKRAllocFromHeap()` on
+// `parent` at all (that parameter is used only to register this heap as a child in the engine's
+// heap tree for bookkeeping/diagnostics, e.g. heap-dump tooling -- it's never range-checked against
+// `ptr`, so `mDoExt_getZeldaHeap()` is passed here purely as a plausible place to be listed, not as
+// a source of memory). `std::malloc()` is ordinary host-side allocation, entirely independent of
+// every one of the game's own fixed-budget heaps (archive, game, Zelda, J2D, command): if the
+// process is so low on memory that it fails, it simply returns `nullptr`, exactly like any other
+// `std::malloc()` call elsewhere in this codebase, with no risk of the `CRASH()` this whole saga
+// was trying to avoid. The one caveat: `JKRExpHeap::do_destroy()` only frees backing memory it
+// allocated itself (the `size`-only `create()` overload); for this pointer-based overload, it just
+// destructs in place and leaves the memory alone, so the raw backing pointer
+// (`s_lightArrowHeapBacking` below) has to be freed with a matching `std::free()` call, by hand,
+// after every `s_lightArrowHeap->destroy()`.
+//
+// The diagnostic free-size log below (`on_particle_create_common_post`) measured the archive +
+// its resource manager using about 103 KB on the platforms this was tested on -- but the crash
+// chain documented above `s_lightArrowHeap` kept recurring, in the same spot, even after every
+// other heap this feature used to depend on (the shared archive heap, the Zelda heap, the DVD
+// command heap) was removed from its load path one by one, on Windows specifically, while Android
+// and Linux builds of the exact same code never showed any problem. Taken together with the fact
+// that none of this function's own `mods::log::warn()` failure messages below have *ever* appeared
+// in a single crash log across this entire saga, the likely explanation is that this 256 KiB budget
+// itself was simply too tight on Windows (where identical source can still produce different struct
+// layouts/alignment and therefore different real memory usage for the same archive, under a
+// different compiler/ABI than the Linux and Android builds) -- and a too-tight `JKRExpHeap` doesn't
+// *fail gracefully* the way this function's own `nullptr` checks assume: every allocation out of it
+// (including the one inside `JKRDvdToMainRam()` and the one building the `JPAResourceManager`
+// itself) still goes through the same unconditionally-fatal `JKRExpHeap::do_alloc()` described
+// above, which aborts the whole process *before* ever returning `nullptr` to this code. In other
+// words, this heap being our own and fully private only fixed *where* an allocation failure could
+// no longer come from (every other heap in the game); it never made a failure *survivable* in the
+// first place -- there's no such thing as "Light Arrow particles unavailable" if this heap itself
+// runs out of room, only a hard crash.
+//
+// Since this heap's backing memory is ordinary host-process `std::malloc()`, entirely outside of
+// and invisible to every one of the game's own fixed memory budgets, there is no longer any reason
+// to keep it small the way the two heaps before it had to be (every byte here costs nothing to any
+// other system, mod, or platform) -- so instead of continuing to guess at an exact byte count that
+// happens to survive on every compiler/ABI this mod ships for, it's sized with a large, deliberately
+// wasteful safety margin well beyond anything a ~200 KB archive plus its resource manager should
+// plausibly need on any platform.
+static const u32 kLightArrowHeapSize = 0x200000;  // 2 MiB for Pscene181.jpc and its resource
+                                                   // manager, allocated from outside any JKR heap
 
-static const u32 kParticleResHeapExtraBytes = 0x100000;  // 1 MiB headroom for Pscene181.jpc, its
-                                                          // resource manager, and continued normal
-                                                          // per-room scene loading alongside it
+static void* s_lightArrowHeapBacking = nullptr;
+static JKRExpHeap* s_lightArrowHeap = nullptr;
 
-static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*, void*) {
-    JKRHeap* parent = mods::arg<JKRHeap*>(args, 1);
-    if (parent != mDoExt_getArchiveHeap()) {
+// With `s_lightArrowHeap` itself no longer dependent on any shared heap having room, the crash
+// still recurred a third time, in the same spot, right after this heap's creation stopped being
+// able to fail that way -- pointing at the *next* thing this code did: kicking off the archive
+// load via `mDoDvdThd_toMainRam_c::create()`, mirroring how vanilla's own `readScene()` loads every
+// per-room scene archive. That call allocates its own small command object from
+// `mDoExt_getCommandHeap()` (`m_Do_dvd_thread.cpp`) -- a single, tiny (a few KiB), engine-wide
+// `JKRExpHeap` shared by *every* in-flight DVD read the whole game and every active mod issues,
+// nowhere near as generously sized as the multi-megabyte heaps above. Vanilla itself relies on this
+// same heap to load `common.jpc` at this exact boot moment (`d_s_logo.cpp`), so it isn't normally a
+// bottleneck in a vanilla, single-mod-free boot -- but it's still a *shared* `JKRExpHeap`, subject
+// to the exact same TARGET_PC unconditional-abort-on-failure behavior described above, and this
+// mod's own additional load is one more simultaneous claim against it during the single busiest,
+// most contested moment of the entire game session, where other active mods are independently
+// loading their own boot-time resources too.
+//
+// Rather than adding a fourth heap-sizing workaround to a heap this mod doesn't own and can't
+// resize, this load bypasses the asynchronous command-queue system entirely: `JKRDvdToMainRam()`
+// (`JKRDvdRipper.h`) is the same low-level, synchronous DVD-read routine `mDoDvdThd_toMainRam_c`
+// itself calls on the DVD thread, and it's already used directly, synchronously, by plenty of other
+// vanilla code (`JKRDvdArchive`, `JKRCompArchive`, `JKRAramArchive` constructors) with no command
+// object and no command heap involved at all -- it reads the file into a buffer it allocates
+// directly from whatever heap is passed to it (`JKRAllocFromHeap(heap, ...)`), which here is
+// `s_lightArrowHeap`: this mod's own private, `std::malloc`-backed heap, fully isolated from every
+// other heap in the game and every other mod. Calling it directly, synchronously, right here in
+// `on_particle_create_common_post` (rather than polling an async command every frame, the way
+// `poll_light_arrow_particle_bank()` used to) means this entire feature's load path now has zero
+// remaining dependency on any heap this mod doesn't fully own and control itself.
+
+// Named hooks on `JPAEmitterManager`'s constructor turned out to be fragile across platforms:
+// constructors have no pointer-to-member-function form in C++, so the only way to target one
+// via `DEFINE_HOOK_SYMBOL` is by name. A first attempt hardcoded the Itanium-mangled symbol
+// (`_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh`), which only exists in the symbol manifest for build
+// targets using the Itanium ABI and failed to resolve on Windows x86_64 ("symbol ... not found").
+// Switching to the unmangled qualified display name (`"JPAEmitterManager::JPAEmitterManager"`)
+// fixed that, but traded it for two worse problems: it failed to *build* on AppleClang arm64
+// (macOS and iOS), and crashed on *initial load* on Windows x86_64 -- a named hook on a
+// constructor is simply not a portable, well-supported pattern across the SDK's compilers.
+//
+// Instead, this hooks `JPAEmitterManager::entryResourceManager()` -- an ordinary non-virtual
+// member function, addressable the normal way with `&Class::method`, no name resolution involved
+// at all. `dPa_control_c::createCommon()` always calls it immediately after constructing
+// `mEmitterMng`, registering bank 0 with `resMgrID == 0` -- the first and only call made with
+// that ID. At that exact moment `pResMgrAry` already exists (built by the constructor with its
+// original, too-small `ridMax`) but hasn't been touched yet, and -- critically -- the solid heap
+// it was allocated from (`dPa_control_c::mHeap`) hasn't been trimmed to size yet either: that
+// only happens via `mDoExt_adjustSolidHeap()` at the very end of `createCommon()`, well after
+// every `entryResourceManager()` call it makes. So there's still room to grow `pResMgrAry` here,
+// exactly as if the constructor itself had been asked to allocate a bigger one.
+DEFINE_HOOK(&JPAEmitterManager::entryResourceManager, ParticleEntryResourceManager);
+
+static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args, void*, void*) {
+    auto* mgr = mods::arg<JPAEmitterManager*>(args, 0);
+    u8 resMgrId = mods::arg<u8>(args, 2);
+    if (resMgrId != 0 || mgr->ridMax > kLightArrowResMgrId) {
         return HOOK_CONTINUE;
     }
 
-    u32& size = mods::arg_ref<u32>(args, 0);
-    if (size == 0x1f0800 || size == 0x96000) {
-        size += kParticleResHeapExtraBytes;
+    u8 newRidMax = kLightArrowResMgrId + 1;
+    JKRHeap* heap = g_dComIfG_gameInfo.play.getParticle()->getHeap();
+    auto* newAry = JKR_NEW_ARRAY_ARGS(JPAResourceManager*, newRidMax, heap, 0);
+    if (newAry == nullptr) {
+        return HOOK_CONTINUE;
     }
+
+    for (u8 i = 0; i < newRidMax; i++) {
+        newAry[i] = (i < mgr->ridMax) ? mgr->pResMgrAry[i] : nullptr;
+    }
+    mgr->pResMgrAry = newAry;
+    mgr->ridMax = newRidMax;
     return HOOK_CONTINUE;
 }
 
-// `JPAEmitterManager`'s constructor has no pointer-to-member-function form in C++, so this hooks
-// it by symbol name instead; it has only one overload, so the unmangled display name resolves
-// unambiguously. Argument 5 is `i_ridMax`, which sizes the resource-manager slot array allocated
-// later in the same constructor call, so bumping it here (before the original body runs) is enough
-// to make room for bank 2.
-DEFINE_HOOK_SYMBOL("_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh",
-                   void(JPAEmitterManager*, u32, u32, JKRHeap*, u8, u8),
-                   ParticleEmitterManagerCtor);
-
-static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, void*, void*) {
-    u8& ridMax = mods::arg_ref<u8>(args, 5);
-    if (ridMax <= kLightArrowResMgrId) {
-        ridMax = kLightArrowResMgrId + 1;
-    }
-    return HOOK_CONTINUE;
-}
-
-// Kicks off loading `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the common
-// bank (and, critically, after `mEmitterMng` -- constructed earlier in this same function -- has
-// already had its slot count bumped by the hook above). This mirrors exactly how vanilla's own
-// `dPa_control_c::readScene()` loads every per-room scene archive: asynchronously, into the same
-// resident particle-resource heap that `common.jpc`'s own raw bytes live in forever.
+// Loads `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the common bank (and,
+// critically, after `mEmitterMng` -- constructed earlier in this same function -- has already had
+// its slot count bumped by the hook above), then immediately builds a `JPAResourceManager` over it
+// and registers it as bank 2, all synchronously, right here, rather than kicking off an
+// asynchronous load and polling for it to finish on a later frame (see the comment above this load
+// for why).
 //
 // `createCommon()` is NOT a true one-shot, console-boot-only call: it's only ever invoked from one
 // call site (`dScnLogo_c`'s boot-time phase), but Twilight Princess implements several "big" scene
@@ -950,45 +1061,64 @@ static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, 
 DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
 
 static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    if (s_lightArrowJpcLoad != nullptr) {
-        // An in-flight load kicked off by a now-defunct `dPa_control_c` instance: its destination
-        // heap no longer exists (it belonged to the particle system that just got torn down), so
-        // there's nothing valid left to wait for.
-        s_lightArrowJpcLoad->destroy();
-        s_lightArrowJpcLoad = nullptr;
-    }
     s_lightArrowJpcReady = false;
-    // The previous resource manager (if any) belonged to the same now-defunct heap/emitter
-    // manager; it's gone along with them, so this pointer must not be dereferenced until a new
-    // one is built for the new `dPa_control_c` instance below.
+    // The previous resource manager (if any) belonged to the heap being destroyed/recreated
+    // below, so this pointer must not be dereferenced until a new one is built.
     s_lightArrowResMgr = nullptr;
 
-    s_lightArrowJpcLoad = mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0,
-                                                         dComIfGp_particle_getResHeap());
-    if (s_lightArrowJpcLoad == nullptr) {
-        mods::log::warn("failed to start loading Pscene181.jpc for Light Arrow particles");
+    // `s_lightArrowHeap` is this mod's own heap (see its declaration above), independent of
+    // `dPa_control_c`'s lifecycle, but its *contents* (the previous load's archive bytes and
+    // resource manager, if any) belong to a bank mapping that's no longer valid once this runs
+    // again -- so it's destroyed and recreated fresh here, exactly like vanilla's own resident
+    // particle heap is, rather than reused in place.
+    if (s_lightArrowHeap != nullptr) {
+        s_lightArrowHeap->destroy();
+        s_lightArrowHeap = nullptr;
     }
-}
+    // The pointer-based `JKRExpHeap::create()` overload used below doesn't free this itself (see
+    // the comment above this function) -- it has to be freed by hand, every time, before the next
+    // `std::malloc()` call replaces it.
+    if (s_lightArrowHeapBacking != nullptr) {
+        std::free(s_lightArrowHeapBacking);
+        s_lightArrowHeapBacking = nullptr;
+    }
 
-// Polls the in-flight `Pscene181.jpc` load (see `mod_update()`) and, once it completes, builds a
-// resource manager over it and registers it as bank 2 -- the same two steps vanilla's own
-// `createScene()` performs for whatever bank 1 archive it just finished loading.
-static void poll_light_arrow_particle_bank() {
-    if (s_lightArrowJpcLoad == nullptr || s_lightArrowJpcReady || s_lightArrowJpcLoad->sync() == 0) {
+    // Ordinary host-side allocation, entirely outside the JKR heap system: on failure this simply
+    // returns `nullptr`, with none of the abort-on-failure behavior described above this function.
+    s_lightArrowHeapBacking = std::malloc(kLightArrowHeapSize);
+    if (s_lightArrowHeapBacking == nullptr) {
+        mods::log::warn("failed to allocate memory for Pscene181.jpc, Light Arrow particles "
+                         "outside the horseback duel will be unavailable");
         return;
     }
 
-    void* jpcData = s_lightArrowJpcLoad->getMemAddress();
-    s_lightArrowJpcLoad->destroy();
-    s_lightArrowJpcLoad = nullptr;
+    s_lightArrowHeap = JKRExpHeap::create(s_lightArrowHeapBacking, kLightArrowHeapSize,
+                                           mDoExt_getZeldaHeap(), false);
+    if (s_lightArrowHeap == nullptr) {
+        std::free(s_lightArrowHeapBacking);
+        s_lightArrowHeapBacking = nullptr;
+        mods::log::warn("failed to create heap for Pscene181.jpc, Light Arrow particles outside "
+                         "the horseback duel will be unavailable");
+        return;
+    }
 
+    // Synchronous, direct DVD read: the same low-level routine `mDoDvdThd_toMainRam_c` itself
+    // calls on the DVD thread, but invoked here directly, with no command object and no command
+    // heap involved at all (see the comment above `s_lightArrowHeap` for why this replaced the
+    // async `mDoDvdThd_toMainRam_c::create()` approach used previously). The destination buffer is
+    // allocated straight out of `s_lightArrowHeap` -- this mod's own private heap -- with no other
+    // heap touched anywhere in this call.
+    u32 jpcSize = 0;
+    void* jpcData = JKRDvdToMainRam("/res/Particle/Pscene181.jpc", nullptr, EXPAND_SWITCH_UNKNOWN1,
+                                     0, s_lightArrowHeap, JKRDvdRipper::ALLOC_DIRECTION_FORWARD, 0,
+                                     nullptr, &jpcSize);
     if (jpcData == nullptr) {
         mods::log::warn("Pscene181.jpc failed to load, Light Arrow particles outside the "
                          "horseback duel will be unavailable");
         return;
     }
 
-    JKRHeap* heap = dComIfGp_particle_getResHeap();
+    JKRHeap* heap = s_lightArrowHeap;
     JPAResourceManager* mgr = JKR_NEW_ARGS(heap, 0) JPAResourceManager(jpcData, heap);
     if (mgr == nullptr) {
         mods::log::warn("failed to build Pscene181.jpc resource manager, Light Arrow particles "
@@ -1001,8 +1131,8 @@ static void poll_light_arrow_particle_bank() {
     s_lightArrowJpcReady = true;
 
     // Logged once per load (including after every soft-reset reload) so this can be checked
-    // against `kParticleResHeapExtraBytes` below without needing a debugger: if this ever trends
-    // towards 0, the margin needs to grow again, the same way it did when it was first sized.
+    // against `kLightArrowHeapSize` above without needing a debugger: if this ever trends
+    // towards 0, the heap needs to grow again, the same way it did when it was first sized.
     mods::log::info("Pscene181.jpc loaded as particle bank {}, resource heap has {} bytes free",
                      kLightArrowResMgrId, heap->getFreeSize());
 }
@@ -1109,20 +1239,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // behavior (still enough to one-shot most ordinary enemies, just not high-health ones).
     }
 
-    result = mods::hook::add_pre<ParticleResHeapCreate>(on_particle_res_heap_create_pre);
+    result = mods::hook::add_pre<ParticleEntryResourceManager>(on_particle_entry_resource_manager_pre);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook particle resource heap creation, the Light Arrow particle bank may "
-            "fail to load if the heap runs out of room: {}",
-            (int)result);
-        // Not fatal: if there happens to be enough headroom already, the mod still works.
-    }
-
-    result = mods::hook::add_pre<ParticleEmitterManagerCtor>(on_particle_emitter_manager_ctor_pre);
-    if (result != MOD_OK) {
-        mods::log::warn(
-            "failed to hook particle emitter manager construction, Light Arrow particles outside "
-            "the horseback duel will be unavailable: {}",
+            "failed to hook particle emitter manager resource registration, Light Arrow particles "
+            "outside the horseback duel will be unavailable: {}",
             (int)result);
         // Not fatal: the mod still works, Light Arrows just won't show their hit mark/charge
         // effects outside the one vanilla cutscene that already has them.
@@ -1187,8 +1308,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    poll_light_arrow_particle_bank();
-
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
