@@ -794,11 +794,7 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 // separately) and Zant (deliberately left on normal, lower arrow damage) on their own un-boosted
 // power. But a flat 100 power on its own still isn't a guaranteed kill: plenty of enemies simply
 // start with more than 100 health, so they still take several Light Arrow hits in a row even
-// though every single one of those hits already gets that same forced 100-power override. King
-// Bulblin (`e_rdb_class`, `src/d/actor/d_a_e_rdb.cpp`'s `daE_RDB_Create()`) is the clearest
-// example, sitting at 600-900 health -- a visibly "tankier than it looks" case for exactly the
-// enemy family (reddish Bulblin/"Bokoblin"-type riders) this was reported against, but the same
-// gap applies to any other enemy with more than 100 max health.
+// though every single one of those hits already gets that same forced 100-power override.
 //
 // Rather than trying to special-case (or guess at) every individual enemy's own health-handling
 // quirks -- several reuse their `health` field for non-damage bookkeeping elsewhere in their own
@@ -809,6 +805,12 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 // exemption) the original function itself applies a few lines later, so this never fires for a
 // hit that wouldn't already be getting vanilla's own 100-power override anyway, and never touches
 // health on any frame that isn't a Light Arrow hit at all.
+//
+// King Bulblin (`e_rdb_class`, `src/d/actor/d_a_e_rdb.cpp`'s `daE_RDB_Create()`, 600-900 health)
+// is additionally exempted here, alongside Ganondorf and Zant: he's a dedicated sub-boss fight
+// (the joust/one-on-one battles), and one-shotting him with a single Light Arrow would trivialize
+// that encounter. Every other enemy -- including ordinary Bulblin riders (`e_rd_class`, 40
+// health, already a one-shot even without this hook) -- still gets the full one-hit kill.
 DEFINE_HOOK(&cc_at_check, CcAtCheck);
 
 static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
@@ -821,7 +823,8 @@ static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
 
     if (static_cast<dCcD_GObjInf*>(atInfo->mpCollider)->GetAtMtrl() == dCcD_MTRL_LIGHT) {
         s16 name = fopAcM_GetName(enemy);
-        if (name != fpcNm_B_GND_e && name != fpcNm_B_ZANT_e && enemy->health > 100) {
+        if (name != fpcNm_B_GND_e && name != fpcNm_B_ZANT_e && name != fpcNm_E_RDB_e &&
+            enemy->health > 100) {
             enemy->health = 100;
         }
     }
@@ -1100,7 +1103,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook attack-power check, Light Arrows won't one-hit-kill high-health "
-            "enemies like King Bulblin: {}",
+            "enemies: {}",
             (int)result);
         // Not fatal: the mod still works, Light Arrows just keep vanilla's own flat-100-power
         // behavior (still enough to one-shot most ordinary enemies, just not high-health ones).
