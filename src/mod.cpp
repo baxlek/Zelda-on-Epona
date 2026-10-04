@@ -77,6 +77,14 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// Whether a story-placed `HoZelda` (never one this mod spawned) currently exists anywhere, e.g.
+// the real horseback archery duel against Ganondorf. Refreshed once per frame in `mod_update()`
+// from `find_other_hozelda()`, and consulted by hooks (like `on_cc_at_check_pre()` below) that
+// aren't themselves scoped to our own spawned actor via `is_spawned_zelda()`, so that this mod's
+// entire functionality -- not just spawning/auto-targeting -- steps aside for as long as the real
+// duel's own HoZelda is alive.
+static bool s_storyHoZeldaActive = false;
+
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -811,9 +819,24 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 // (the joust/one-on-one battles), and one-shotting him with a single Light Arrow would trivialize
 // that encounter. Every other enemy -- including ordinary Bulblin riders (`e_rd_class`, 40
 // health, already a one-shot even without this hook) -- still gets the full one-hit kill.
+//
+// Unlike this mod's other hooks, `cc_at_check()` fires for *every* Light Arrow hit in the game,
+// not just ones fired by our own spawned Zelda -- it has no actor of its own to scope itself to
+// via `is_spawned_zelda()`. The Ganondorf exemption above already happens to keep it a no-op
+// against him specifically, but that's incidental: per this mod's own documented design (see
+// `mod_update()`'s `storyHoZeldaActive` comment), its entire functionality -- not just spawning
+// and auto-targeting -- is supposed to step aside completely for as long as the real horseback
+// archery duel's own story-placed HoZelda exists, rather than quietly keep running and merely
+// happening to have no visible effect there. So this bails out immediately whenever
+// `s_storyHoZeldaActive` is set, leaving every bit of that duel's own hit-resolution entirely
+// untouched by this mod.
 DEFINE_HOOK(&cc_at_check, CcAtCheck);
 
 static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
+    if (s_storyHoZeldaActive) {
+        return HOOK_CONTINUE;
+    }
+
     fopAc_ac_c* enemy = mods::arg<fopAc_ac_c*>(args, 0);
     dCcU_AtInfo* atInfo = mods::arg<dCcU_AtInfo*>(args, 1);
 
@@ -1199,6 +1222,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn
         // a second HoZelda while the first, orphaned one is still alive and animating.
         remove_spawned_zelda();
+        // No horse actor exists at all, so no HoZelda (ours or the story's) can either.
+        s_storyHoZeldaActive = false;
         return MOD_OK;
     }
 
@@ -1238,6 +1263,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // long as the real duel's own HoZelda exists: our own spawned Zelda is torn down and not
     // respawned until the story's HoZelda is gone again.
     bool storyHoZeldaActive = find_other_hozelda() != nullptr;
+    s_storyHoZeldaActive = storyHoZeldaActive;
 
     if (storyHoZeldaActive) {
         remove_spawned_zelda();
