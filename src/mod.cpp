@@ -8,6 +8,7 @@
 // Game includes
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
+#include "d/actor/d_a_e_sh.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
@@ -108,6 +109,34 @@ static fopAc_ac_c* find_spawned_zelda() {
 static bool is_spawned_zelda(const fopAc_ac_c* actor) {
     return s_hasSpawnedZelda && actor != nullptr &&
            (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId;
+}
+
+// `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
+// than our own spawned one.
+static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
+    if (fopAcM_GetName(i_actor) != fpcNm_HOZELDA_e || is_spawned_zelda(i_actor)) {
+        return NULL;
+    }
+    return i_actor;
+}
+
+// Finds a `HoZelda` actor somewhere in the world that this mod did *not* spawn itself -- i.e. one
+// placed by the story, such as the real horseback archery duel against Ganondorf (the only place
+// in the vanilla game a `HoZelda` actor is ever placed directly rather than through this mod).
+//
+// Used to detect that real duel and bow out of its way entirely: this mod otherwise has no way to
+// tell "the story is about to attach its own HoZelda to the horse" apart from the moment it
+// actually happens, which can be one or more frames after this mod's own spawn/keep-mounted logic
+// already ran for that same frame -- `d_a_horse.cpp`'s `execute()` only overwrites whichever
+// actor is currently attached once the story's own HoZelda starts ticking, so there's otherwise a
+// window where both our own spawned Zelda and the story's are simultaneously alive (the
+// "duplicate Zelda" bug), and -- since our own hooks are scoped to our own actor via
+// `is_spawned_zelda()` above -- our own Zelda would keep searching for and firing at nearby
+// enemies the whole time, overlapping the real duel's own Ganondorf-only targeting. Checking for
+// *any* other HoZelda in existence, rather than just whichever is currently attached to the horse,
+// catches that window regardless of exactly which frame the handoff happens on.
+static fopAc_ac_c* find_other_hozelda() {
+    return (fopAc_ac_c*)fopAcIt_Judge((fopAcIt_JudgeFunc)judge_other_hozelda, nullptr);
 }
 
 static void spawn_zelda_on_horse(daHorse_c* horse) {
@@ -319,6 +348,37 @@ struct HoZeldaTargetSearch {
     f32 bestDistSq;
 };
 
+// Whether `i_actor` is currently dormant/underground and therefore shouldn't be auto-targeted:
+// vanilla itself treats these enemies as not really "present" while in this state (either
+// collision-wise, status-wise, or both), so Light Arrows can't meaningfully hit them anyway.
+//
+//  - Stalhounds (`E_sh`/`e_sh_class`) spend most of the day buried underground, only surfacing for
+//    a few in-game hours at night (`e_sh_stop()`'s own `hourOfDay` check in
+//    `src/d/actor/d_a_e_sh.cpp`). Its outer state dispatcher (`action()`) only turns on normal
+//    attention/targeting (`fopAcM_OnStatus`/`fopAc_AttnFlag_BATTLE_e`) for the above-ground states
+//    (appear/move/attack/damage, `field_0x676` 1-3 and 10); the underground "stop" state
+//    (`field_0x676 == 0`) and the sink-back-down "disappear" state (`field_0x676 == 5`) both leave
+//    it off instead, exactly like a defeated one would be.
+//
+// Deku Babas and Baba Serpents are *not* handled here: unlike Stalhounds, their true
+// intangibility window doesn't line up cleanly with a single state field (it actually extends a
+// short while past the state transition that leaves "dormant", e.g. Deku Baba's
+// `invulnerabilityTimer` and Baba Serpent's `field_0x69c[3]` both keep their hit/attack collision
+// spheres shoved away for several frames after `action`/`field_0x66e` already reports them as no
+// longer stay/dormant). Rather than keep chasing that exact window, the whole "Baba" family of
+// enemies is instead excluded from auto-targeting outright in `judge_nearest_enemy()` below,
+// dormant or not -- see the comment there for which actors that covers and why.
+static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
+    switch (fopAcM_GetName(i_actor)) {
+    case fpcNm_E_SH_e: {
+        e_sh_class* stalhound = reinterpret_cast<e_sh_class*>(i_actor);
+        return stalhound->field_0x676 == 0 || stalhound->field_0x676 == 5;
+    }
+    default:
+        return false;
+    }
+}
+
 // `fopAcIt_Judge()` stops and returns at the first non-NULL result, so to find the *nearest*
 // enemy (rather than just the first one in the actor list) this always returns NULL -- keeping
 // the iteration going over every actor -- and instead threads the closest candidate so far through
@@ -327,17 +387,37 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     HoZeldaTargetSearch* search = static_cast<HoZeldaTargetSearch*>(i_data);
 
     if (i_actor == search->self || fopAcM_GetGroup(i_actor) != fopAc_ENEMY_e ||
-        fopAcM_GetName(i_actor) == fpcNm_B_GND_e || fopAcM_GetName(i_actor) == fpcNm_E_WB_e ||
-        i_actor->health <= 0)
+        fopAcM_GetName(i_actor) == fpcNm_E_WB_e || fopAcM_GetName(i_actor) == fpcNm_E_DB_e ||
+        fopAcM_GetName(i_actor) == fpcNm_E_YD_e || fopAcM_GetName(i_actor) == fpcNm_E_HB_e ||
+        fopAcM_GetName(i_actor) == fpcNm_E_YH_e || fopAcM_GetName(i_actor) == fpcNm_E_GB_e ||
+        i_actor->health <= 0 || is_dormant_enemy(i_actor))
     {
-        // Ganondorf is deliberately excluded: he already has his own, correctly-functioning
-        // targeting during the real duel (handled by vanilla's untouched Ganondorf search when
-        // this mod's hooks aren't in play for his own story-placed Zelda), and auto-targeting him
-        // outside of that scripted fight would conflict with it.
+        // No explicit Ganondorf (`fpcNm_B_GND_e`) exclusion is needed here: `B_gnd` is only ever
+        // placed directly by the stage itself, in the one room that hosts the real horseback
+        // archery duel -- and `mod_update()`'s `storyHoZeldaActive` check already tears down (and
+        // withholds respawning) this mod's own Zelda for as long as that duel's own story-placed
+        // HoZelda exists, so `judge_nearest_enemy()` never runs at all while a `B_gnd` actor could
+        // possibly be alive to be found here.
         //
         // E_WB (Bullbo, the wild boar Bulblins ride) is excluded too: it's its own `fopAc_ENEMY_e`
         // actor separate from its Bulblin rider, but it never attacks on its own -- only the rider
         // does -- so for this mod's purposes it isn't a hostile target.
+        //
+        // The entire "Baba" family is excluded outright, dormant or not: E_DB (Deku Baba), E_YD
+        // (Twilight Deku Baba), E_HB (Hebi Baba, i.e. Baba Serpent), E_YH (Twilight Hebi Baba) and
+        // E_GB (Giant Baba). An earlier version of this exclusion list used `fpcNm_E_YD_e` under
+        // the mistaken belief it was Baba Serpent -- per `d_stage.cpp`'s own stage object name
+        // table and these actors' class doc comments, `E_yd`/`e_yd_class` is actually "Twilight
+        // Deku Baba", while the real Baba Serpent is `E_hb`/`e_hb_class` (with `E_yh`/`e_yh_class`
+        // as its own Twilight counterpart) -- so the real Baba Serpent was never actually excluded
+        // until now. All five share the same Deku-Baba-like retract/intangible-while-dormant
+        // design (see `is_dormant_enemy()`'s comment above), so none of them are worth chasing
+        // precise per-state timing for: Zelda simply never auto-targets any of them, dormant or
+        // not -- she can still hit them incidentally if the player leads her into melee range,
+        // same as before this mod existed.
+        //
+        // Dormant/underground enemies (see `is_dormant_enemy()` above) are excluded too: Zelda
+        // would otherwise auto-target Stalhounds that haven't surfaced for the night yet.
         return NULL;
     }
 
@@ -432,9 +512,9 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
     fopAc_ac_c* target_actor = zelda->mGndAcKeep.getActor();
 
     // Only non-NULL if the target this mod picked happens to actually be Ganondorf (never the
-    // case in practice: `judge_nearest_enemy()` above excludes him), kept so his own mount/
-    // vulnerability checks below still apply correctly rather than silently skipping them if it
-    // ever does happen.
+    // case in practice: this mod's own Zelda is never alive at the same time as a `B_gnd` actor,
+    // see `judge_nearest_enemy()`'s comment above), kept so his own mount/vulnerability checks
+    // below still apply correctly rather than silently skipping them if it ever does happen.
     b_gnd_class* ganondorf = (target_actor != NULL && fopAcM_GetName(target_actor) == fpcNm_B_GND_e)
                                  ? static_cast<b_gnd_class*>(target_actor)
                                  : NULL;
@@ -677,15 +757,22 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     arrow->speed = dir * arrow->field_0x99c;
 }
 
-// Zelda's Light Arrow hit mark/charge effects (`daArrow_c::setLightArrowHitMark`/
-// `setLightChargeEffect`, particle IDs 0x896F-0x8978) only exist in the horseback-duel stage's
-// room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not in the
-// always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever this
-// mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since the
-// mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted game
-// assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*,
+// Zelda's Light Arrow trail/hit mark/charge effects (`daArrow_c::setBlur`/`setLightArrowHitMark`/
+// `setLightChargeEffect`, particle IDs 0x896E-0x8978) -- plus a number of other effects that turned
+// out to live in the very same archive once this was tested in-game (e.g. whatever produces the
+// arrow's actual visible light trail, which isn't any of those eleven IDs) -- only exist in the
+// horseback-duel stage's room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not
+// in the always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever
+// this mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since
+// the mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted
+// game assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*,
 // always-resident particle bank -- alongside `common.jpc` (bank 0) and whatever per-room
-// `Pscene###.jpc` is normally loaded (bank 1) -- and redirects just those ten particle IDs to it.
+// `Pscene###.jpc` is normally loaded (bank 1) -- and redirects every particle ID that archive
+// actually contains to it. Rather than maintaining a hand-picked allowlist of IDs (which turned out
+// to be incomplete and a maintenance burden -- Zelda's effects aren't the only things in that
+// archive, but anything else in it is simply never requested outside the real duel, so redirecting
+// unconditionally is harmless), `getRM_ID()` below queries bank 2's own `JPAResourceManager`
+// directly via `JPAResourceManager::getResource()`.
 //
 // `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager
 // slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to
@@ -703,30 +790,14 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 //      every other `JKRExpHeap::create` call site in the engine untouched.
 //   4. Once the load completes, build a `JPAResourceManager` over it and register it as bank 2.
 //   5. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is
-//      replaced so that, once bank 2 is ready, exactly those ten Light Arrow particle IDs resolve
-//      to it; everything else keeps using vanilla's existing bank 0/1 logic unchanged.
+//      replaced so that, once bank 2 is ready, any particle ID that `Pscene181.jpc`'s own resource
+//      manager actually contains resolves to it; everything else keeps using vanilla's existing
+//      bank 0/1 logic unchanged.
 static const u8 kLightArrowResMgrId = 2;
-
-static bool is_light_arrow_particle_id(u16 nameId) {
-    switch (nameId) {
-        case 0x896F:
-        case 0x8970:
-        case 0x8971:
-        case 0x8972:
-        case 0x8973:
-        case 0x8974:  // setLightArrowHitMark effects A-F
-        case 0x8975:
-        case 0x8976:
-        case 0x8977:
-        case 0x8978:  // setLightChargeEffect effects A-D
-            return true;
-        default:
-            return false;
-    }
-}
 
 static mDoDvdThd_toMainRam_c* s_lightArrowJpcLoad = nullptr;
 static bool s_lightArrowJpcReady = false;
+static JPAResourceManager* s_lightArrowResMgr = nullptr;
 
 // `dPa_control_c`'s resident particle-resource heap is created with a hardcoded, platform-fixed
 // size (`d_particle.cpp`: 0x1f0800 bytes in DEBUG builds, 0x96000 otherwise) that vanilla never
@@ -743,12 +814,15 @@ static bool s_lightArrowJpcReady = false;
 // adding a 3rd always-resident archive on top of that -- with no way to measure its exact size
 // up front -- needs a generous margin, not just a token bump: a first attempt at a small 128 KB
 // margin still produced a `JKRExpHeap` allocation-failure `SIGABRT` in practice (crash log in
-// `res/`), so this uses a much larger, safely-oversized margin instead. A couple of extra
-// megabytes of headroom is trivial on the hardware this mod targets.
+// `res/`), so this started out using a much larger, safely-oversized margin instead. The
+// diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured ~3.9 MiB (4089024
+// bytes) still free with a 4 MiB margin once the whole archive was being loaded (not just the
+// original eleven-ID subset) -- i.e. the archive + its resource manager only actually use about
+// 103 KB of that margin -- so it was trimmed down to 1 MiB, still leaving roughly 921 KB of slack.
 using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
 DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
 
-static const u32 kParticleResHeapExtraBytes = 0x400000;  // 4 MiB headroom for Pscene181.jpc, its
+static const u32 kParticleResHeapExtraBytes = 0x100000;  // 1 MiB headroom for Pscene181.jpc, its
                                                           // resource manager, and continued normal
                                                           // per-room scene loading alongside it
 
@@ -787,12 +861,32 @@ static HookAction on_particle_emitter_manager_ctor_pre(ModContext*, void* args, 
 // already had its slot count bumped by the hook above). This mirrors exactly how vanilla's own
 // `dPa_control_c::readScene()` loads every per-room scene archive: asynchronously, into the same
 // resident particle-resource heap that `common.jpc`'s own raw bytes live in forever.
+//
+// `createCommon()` is NOT a true one-shot, console-boot-only call: it's only ever invoked from one
+// call site (`dScnLogo_c`'s boot-time phase), but Twilight Princess implements several "big" scene
+// transitions (dying and choosing to continue, certain major stage-to-stage crossings) as a full
+// software reset (`mDoRst`) that tears down and rebuilds the entire particle system from scratch --
+// a brand new `dPa_control_c`, a brand new resident heap, and a brand new `JPAEmitterManager` with
+// an empty bank 2 slot -- which re-enters this very function. The mod's own static state below
+// lives outside that reset, so it must be unconditionally re-armed here every time this runs,
+// rather than treated as a permanent latch; otherwise, after the first such reset, `s_lightArrowJpcReady`
+// stays stuck `true` forever even though the new `JPAEmitterManager` never actually got bank 2
+// registered, silently breaking every Light Arrow hit mark/charge effect from that point on.
 DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
 
 static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    if (s_lightArrowJpcLoad != nullptr || s_lightArrowJpcReady) {
-        return;
+    if (s_lightArrowJpcLoad != nullptr) {
+        // An in-flight load kicked off by a now-defunct `dPa_control_c` instance: its destination
+        // heap no longer exists (it belonged to the particle system that just got torn down), so
+        // there's nothing valid left to wait for.
+        s_lightArrowJpcLoad->destroy();
+        s_lightArrowJpcLoad = nullptr;
     }
+    s_lightArrowJpcReady = false;
+    // The previous resource manager (if any) belonged to the same now-defunct heap/emitter
+    // manager; it's gone along with them, so this pointer must not be dereferenced until a new
+    // one is built for the new `dPa_control_c` instance below.
+    s_lightArrowResMgr = nullptr;
 
     s_lightArrowJpcLoad = mDoDvdThd_toMainRam_c::create("/res/Particle/Pscene181.jpc", 0,
                                                          dComIfGp_particle_getResHeap());
@@ -828,17 +922,26 @@ static void poll_light_arrow_particle_bank() {
     }
 
     dPa_control_c::getEmitterManager()->entryResourceManager(mgr, kLightArrowResMgrId);
+    s_lightArrowResMgr = mgr;
     s_lightArrowJpcReady = true;
+
+    // Logged once per load (including after every soft-reset reload) so this can be checked
+    // against `kParticleResHeapExtraBytes` below without needing a debugger: if this ever trends
+    // towards 0, the margin needs to grow again, the same way it did when it was first sized.
+    mods::log::info("Pscene181.jpc loaded as particle bank {}, resource heap has {} bytes free",
+                     kLightArrowResMgrId, heap->getFreeSize());
 }
 
-// Once bank 2 is ready, redirects the ten Light Arrow hit mark/charge effect particle IDs to it;
-// everything else (and these same IDs, while bank 2 is still loading) keeps using vanilla's
-// existing top-bit common/scene selection unchanged.
+// Once bank 2 is ready, redirects any particle ID that `Pscene181.jpc`'s own resource manager
+// actually contains to it; everything else (and these same IDs, while bank 2 is still loading)
+// keeps using vanilla's existing top-bit common/scene selection unchanged.
 DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);
 
 static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval, void*) {
     u16 nameId = mods::arg<u16>(args, 0);
-    u8 result = (s_lightArrowJpcReady && is_light_arrow_particle_id(nameId))
+    bool isPscene181Particle =
+        s_lightArrowResMgr != nullptr && s_lightArrowResMgr->getResource(nameId) != nullptr;
+    u8 result = (s_lightArrowJpcReady && isPscene181Particle)
                     ? kLightArrowResMgrId
                     : ParticleGetRmId::g_orig(nameId);
     if (retval != nullptr) {
@@ -1041,12 +1144,23 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
                               !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
 
-    if (inScriptedCutscene) {
+    // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
+    // the real horseback archery duel against Ganondorf, where the game itself places and drives
+    // its own HoZelda riding solo. This mod's own spawned Zelda would otherwise duplicate her, and
+    // -- since this mod's auto-target/combat hooks are scoped to our own actor only -- our own
+    // Zelda would keep auto-targeting nearby enemies the entire time, overlapping the real duel's
+    // own Ganondorf-only targeting. So this mod's entire functionality simply steps aside for as
+    // long as the real duel's own HoZelda exists: our own spawned Zelda is torn down and not
+    // respawned until the story's HoZelda is gone again.
+    bool storyHoZeldaActive = find_other_hozelda() != nullptr;
+
+    if (storyHoZeldaActive) {
+        remove_spawned_zelda();
+    } else if (inScriptedCutscene) {
         // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
         // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
-        // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the Ganondorf
-        // duel) never have `s_hasSpawnedZelda` set in the first place, so they're untouched either
-        // way.
+        // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the real
+        // Ganondorf duel) are already handled above by the `storyHoZeldaActive` check.
         if (!show_zelda_in_cutscenes()) {
             remove_spawned_zelda();
         }
