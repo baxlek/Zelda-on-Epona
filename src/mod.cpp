@@ -893,13 +893,15 @@ static JPAResourceManager* s_lightArrowResMgr = nullptr;
 // diagnostic free-size log below (`poll_light_arrow_particle_bank()`) measured ~3.9 MiB (4089024
 // bytes) still free with a 4 MiB margin once the whole archive was being loaded (not just the
 // original eleven-ID subset) -- i.e. the archive + its resource manager only actually use about
-// 103 KB of that margin -- so it was trimmed down to 1 MiB, still leaving roughly 921 KB of slack.
+// 103 KB of that margin -- so it was trimmed down to 1 MiB, then further down to 256 KiB (still
+// leaving roughly 153 KB of slack) after reports of this hook failing to resolve on some Windows
+// x86_64 builds.
 using JKRExpHeapCreateFn = JKRExpHeap* (*)(u32, JKRHeap*, bool);
 DEFINE_HOOK(static_cast<JKRExpHeapCreateFn>(&JKRExpHeap::create), ParticleResHeapCreate);
 
-static const u32 kParticleResHeapExtraBytes = 0x100000;  // 1 MiB headroom for Pscene181.jpc, its
-                                                          // resource manager, and continued normal
-                                                          // per-room scene loading alongside it
+static const u32 kParticleResHeapExtraBytes = 0x40000;  // 256 KiB headroom for Pscene181.jpc, its
+                                                         // resource manager, and continued normal
+                                                         // per-room scene loading alongside it
 
 static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*, void*) {
     JKRHeap* parent = mods::arg<JKRHeap*>(args, 1);
