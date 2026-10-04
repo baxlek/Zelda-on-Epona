@@ -465,11 +465,29 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
+// Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
+// draw/ready/shoot/recover state machine below: one between nocking the arrow and it becoming
+// ready to fire, and one between a shot landing and the next draw starting. Shortening both
+// speeds up our spawned Zelda's rate of fire, per the mod's design goal, without touching the
+// draw/shoot animation clips themselves. Set much lower than half (30 -> 5) for testing whether a
+// more aggressive cut is actually noticeable in-game.
+static constexpr u8 kArrowWaitFrames = 5;
+
+// With the scripted wait above shortened, the body/bow "ARELORDH"/"BARELORDH" draw animation
+// (`mUpperAnmID == 8`, entered via `setUpperAnime(8)` + `setBowBck(0xB)` below) became the new
+// bottleneck: vanilla always plays it back at its authored speed (`J3DFrameCtrl` rate 1.0, hardcoded
+// inside `daHoZelda_c::setUpperAnime()`/`setBowBck()`) and only advances to the next state once it
+// finishes (`mFrameCtrl[2].checkAnmEnd()`). Doubling both the body clip's frame-controller rate and
+// the bow model's own matching draw clip rate halves the time that state takes, keeping the two in
+// sync with each other.
+static constexpr f32 kDrawAnimSpeedMultiplier = 2.0f;
+
 // Replace hook for change (2) above: a copy of vanilla's `daHoZelda_c::setAnm()` (dusklight's
 // `src/d/actor/d_a_hozelda.cpp`) for our own spawned Zelda only, with just the Ganondorf-specific
-// targeting checks replaced (search the body for "deviates from vanilla" below); every other
-// branch is unmodified. Operates on `zelda->member` throughout, rather than `this->member`, since
-// it isn't itself a member function.
+// targeting checks replaced (search the body for "deviates from vanilla" below), plus the
+// faster-rate-of-fire change documented above (search for "kArrowWaitFrames"); every other branch
+// is unmodified. Operates on `zelda->member` throughout, rather than `this->member`, since it
+// isn't itself a member function.
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
     daHorse_c* horse = (daHorse_c*)dComIfGp_getHorseActor();
@@ -604,7 +622,7 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         if (zelda->mUpperAnmID == 9) {
             if (anm_end) {
                 anm_idx[2] = 0x1A;
-                zelda->mAnmTimer = 30;
+                zelda->mAnmTimer = kArrowWaitFrames;
             }
         } else if (zelda->mUpperAnmID == 0xA) {
             if (zelda->mAnmTimer == 0) {
@@ -619,7 +637,7 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
             zelda->mSound.startCreatureSoundLevel(Z2SE_ZELDA_ARROW_READY, 0, zelda->mReverb);
             if (anm_end) {
                 anm_idx[2] = 0xA;
-                zelda->mAnmTimer = 30;
+                zelda->mAnmTimer = kArrowWaitFrames;
             }
         } else if (zelda->mUpperAnmID == 0x1A) {
             if (zelda->mAnmTimer == 0) {
@@ -638,6 +656,15 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         if (anm_idx[2] != 0xFFFF) {
             zelda->setUpperAnime(anm_idx[2]);
             zelda->setSingleAnime(anm_idx[0], 1.0f, 0.0f, -1, 4.0f);
+
+            // Speed up the draw animation itself (see `kDrawAnimSpeedMultiplier` above): both the
+            // body's upper-anim frame controller and the bow model's own draw clip need the same
+            // rate bump, or the bow's string-pull would keep playing at normal speed after the
+            // body's arms already finished drawing.
+            if (anm_idx[2] == 8) {
+                zelda->mFrameCtrl[2].setRate(kDrawAnimSpeedMultiplier);
+                zelda->mBowBck.setPlaySpeed(kDrawAnimSpeedMultiplier);
+            }
         }
     } else {
         if (zelda->field_0x6da == 0 && zelda->mDamageInit) {
