@@ -919,7 +919,7 @@ static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*
 // unambiguously. Argument 5 is `i_ridMax`, which sizes the resource-manager slot array allocated
 // later in the same constructor call, so bumping it here (before the original body runs) is enough
 // to make room for bank 2.
-DEFINE_HOOK_SYMBOL("JPAEmitterManager::JPAEmitterManager",
+DEFINE_HOOK_SYMBOL("_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh",
                    void(JPAEmitterManager*, u32, u32, JKRHeap*, u8, u8),
                    ParticleEmitterManagerCtor);
 
