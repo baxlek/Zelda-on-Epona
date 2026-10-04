@@ -917,11 +917,16 @@ static HookAction on_particle_res_heap_create_pre(ModContext*, void* args, void*
 }
 
 // `JPAEmitterManager`'s constructor has no pointer-to-member-function form in C++, so this hooks
-// it by symbol name instead; it has only one overload, so the unmangled display name resolves
-// unambiguously. Argument 5 is `i_ridMax`, which sizes the resource-manager slot array allocated
-// later in the same constructor call, so bumping it here (before the original body runs) is enough
-// to make room for bank 2.
-DEFINE_HOOK_SYMBOL("_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh",
+// it by symbol name instead; it has only one overload, so the qualified display name resolves
+// unambiguously. This must be the unmangled "Class::Class" display name, not a hardcoded mangled
+// symbol (e.g. the Itanium `_ZN17JPAEmitterManagerC1EjjP7JKRHeaphh`): a prior attempt hardcoded
+// that mangled form, which only exists in the symbol manifest for build targets using the Itanium
+// ABI, and failed to resolve on Windows x86_64 builds ("symbol ... not found") since their
+// manifest doesn't carry that exact mangled name. The display name resolves platform-independently
+// through the symbol manifest instead. Argument 5 is `i_ridMax`, which sizes the resource-manager
+// slot array allocated later in the same constructor call, so bumping it here (before the original
+// body runs) is enough to make room for bank 2.
+DEFINE_HOOK_SYMBOL("JPAEmitterManager::JPAEmitterManager",
                    void(JPAEmitterManager*, u32, u32, JKRHeap*, u8, u8),
                    ParticleEmitterManagerCtor);
 
