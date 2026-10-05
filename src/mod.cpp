@@ -1404,7 +1404,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // simply creating the actor a frame late. If she isn't already attached by the time a
         // cutscene starts, she stays hidden for its duration and only (re)spawns, below, once the
         // cutscene actually ends.
-    } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
+    } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda &&
+               !dComIfGp_event_runCheck()) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay (and on the
         // title screen, which reaches this branch too since it's excluded from
         // `inScriptedCutscene` above), even after Link dismounts: if nobody (neither the story nor
@@ -1414,6 +1415,22 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // at the front of the saddle whenever Link isn't riding (the `mIsSingleRide` case), so once
         // created it takes care of the rest on its own: reins, dual-ride animation blending, and
         // the solo idle animation.
+        //
+        // `!dComIfGp_event_runCheck()` guards specifically against the moment a cutscene ends,
+        // on top of `!inScriptedCutscene` above: `checkHorseDemoMode()` (what `inScriptedCutscene`
+        // is built from) clears the instant `dEvt_control_c`'s own internal status reaches
+        // `isOrderOK()` (status `0` *or* `2`), but status `2` is itself only a one-frame
+        // "order accepted" handoff -- the same `Step()` call that reaches it also tears down the
+        // event's staff/object archive (`evtMng->setObjectArchive(NULL)`), and the event isn't
+        // actually fully torn down (`cancelStaff("ALL")`, flags cleared, status dropped to `0`)
+        // until `Step()` runs again the *following* frame. `runCheck()` (status `!= 0`) stays true
+        // for that entire in-between frame, unlike `isOrderOK()`/`checkHorseDemoMode()`, so it's
+        // the signal that actually reflects whether the event system has finished unwinding.
+        // Spawning an actor (`fopAcM_create`) during that one extra frame hit the exact same
+        // "unsafe while a scripted event still owns things" SIGABRT as spawning mid-cutscene
+        // outright, just one frame later than `checkHorseDemoMode()` alone accounts for -- so
+        // respawning here waits for `dComIfGp_event_runCheck()` to clear too, which costs at most
+        // one extra frame of her staying hidden right as a cutscene ends.
         spawn_zelda_on_horse(horse);
     }
 
