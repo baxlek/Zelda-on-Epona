@@ -258,31 +258,30 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // computation and was never part of this bug.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
-// How far underground (in game units) and how small a scale to push this mod's own spawned
-// Zelda's rendered model to while she should be hidden during a scripted cutscene. Both her
-// position and scale are overridden by a wide margin so she's imperceptible to the player and the
-// camera regardless of where the cutscene happens to place the camera or how it's framed.
+// How small a scale to shrink this mod's own spawned Zelda's rendered model to while she should
+// be hidden during a scripted cutscene, small enough to be imperceptible to the player regardless
+// of how close the cutscene's camera gets.
 //
 // This replaces an earlier approach of simply deleting (`fopAcM_delete`) the actor for the
 // cutscene's duration and recreating it once the cutscene ended: `fopAcM_create` isn't safe to
 // call while `daHorse_c` is being puppeted by scripted demo data (see `spawn_zelda_on_horse()`'s
 // callers below), but more importantly, deleting *and recreating* her around every cutscene
 // boundary was found to crash (SIGABRT) outright, almost certainly for the same underlying
-// reason. Hiding her in place -- she's never deleted, just moved/shrunk somewhere the player can
-// never see or reach -- sidesteps that entirely: the actor is always alive and ticking normally,
-// so there's no unsafe create/delete anywhere near a cutscene boundary, and she reappears the
-// instant the cutscene ends with no recreation (and no multi-frame delay) needed at all.
-static const f32 kHiddenUndergroundOffset = -100000.0f;
+// reason. Hiding her in place -- she's never deleted, just shrunk down where the player can't
+// make her out -- sidesteps that entirely: the actor is always alive and ticking normally, so
+// there's no unsafe create/delete anywhere near a cutscene boundary, and she reappears the instant
+// the cutscene ends with no recreation (and no multi-frame delay) needed at all.
+//
+// An earlier version of this hiding also moved her model far underground, on top of shrinking it.
+// That caused its own glitch: Epona's reins are attached to Zelda's hand whenever she's loaded and
+// riding solo, so dragging her model's position itself down along with it dragged the reins
+// straight down with her, visibly stretching them to that underground position every time she was
+// hidden. Scale alone doesn't have that problem -- shrinking her model leaves her seated position
+// (and thus the reins' attachment point) exactly where it already was, just imperceptibly small.
 static const f32 kHiddenScale = 0.0001f;
 
 static void hide_zelda_visually(daHoZelda_c* zelda) {
-    Vec hiddenPos = {
-        zelda->current.pos.x,
-        zelda->current.pos.y + kHiddenUndergroundOffset,
-        zelda->current.pos.z,
-    };
-
-    mDoMtx_stack_c::transS(hiddenPos);
+    mDoMtx_stack_c::transS(zelda->current.pos);
     mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
     mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());

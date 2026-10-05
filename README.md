@@ -99,9 +99,15 @@ archery duel, where she rides alone) is never touched or duplicated.
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an
 > actor (`fopAcM_create`) isn't safe immediately around a cutscene boundary. Instead, she's now hidden in place: a
-> hook on `daHoZelda_c::setMatrix()` overrides the matrix used to draw her for the frame, pushing her model far
-> underground and shrinking it to an imperceptible size, while leaving the actor itself alive and ticking normally
-> the entire time. She's back to normal the instant hiding ends, with no recreation (and no extra delay) needed.
+> hook on `daHoZelda_c::setMatrix()` overrides the matrix used to draw her for the frame, shrinking her model down
+> to an imperceptible size while leaving the actor itself alive and ticking normally the entire time. She's back to
+> normal the instant hiding ends, with no recreation (and no extra delay) needed.
+>
+> An earlier version of this hiding also moved her model far underground on top of shrinking it, but that dragged
+> Epona's reins down with her — they're attached to Zelda's hand while she's riding solo, so moving her position
+> visibly stretched them downward every time she was hidden. Shrinking her scale alone, without touching her
+> position, avoids that: her seated position (and the reins' attachment point) never moves, she's just rendered too
+> small to make out.
 >
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
