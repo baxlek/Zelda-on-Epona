@@ -83,21 +83,32 @@ archery duel, where she rides alone) is never touched or duplicated.
 > directly risks a new mismatch with a permanent extra rider that vanilla was never designed around.
 >
 > Rather than continuing down that path, the mod now hides its own spawned Zelda for the duration of any *scripted*
-> story cutscene by default (detected via `daHorse_c::procToolDemo()`'s `PROC_TOOL_DEMO_e` state — the one Epona
-> enters only while being puppeted directly by cutscene data — rather than, say, ordinary player-driven riding),
-> and she reappears automatically once the cutscene ends. This is purely a visibility toggle: cutscenes that already
-> feature their own story-placed Zelda (such as the horseback archery duel against Ganondorf) are completely
-> unaffected either way, since the mod only ever manages the actor it spawned itself. The horse call/grass whistle
-> is also unaffected, even though it briefly reuses some of the same demo-mode plumbing for its own unrelated
-> "gallop back to the player" behavior — it's excluded from the cutscene check by its own distinct flag
-> (`FLG0_CALL_HORSE`).
+> story cutscene by default (detected via `daHorse_c::checkHorseDemoMode()` — true any time something other than the
+> player is driving Epona, which covers every cutscene proc she can be puppeted through, not just the single
+> "tool demo" state an earlier version of this check looked at), and she reappears automatically once the cutscene
+> ends. This is purely a visibility toggle: cutscenes that already feature their own story-placed Zelda (such as
+> the horseback archery duel against Ganondorf) are completely unaffected either way, since the mod only ever
+> manages the actor it spawned itself. Three further cases always show her regardless of the toggle: the horse
+> call/grass whistle, even though it briefly reuses some of the same demo-mode plumbing for its own unrelated
+> "gallop back to the player" behavior (excluded by its own distinct flag, `FLG0_CALL_HORSE`); the opening title
+> screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene does but should
+> always show her; and area/scene transitions (`dComIfGp_isEnableNextStage()`, true from the moment a stage/room
+> change is requested until the new scene finishes loading), so she doesn't flicker out every time the player
+> simply rides between areas.
+>
+> Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
+> "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an
+> actor (`fopAcM_create`) isn't safe immediately around a cutscene boundary. Instead, she's now hidden in place: a
+> hook on `daHoZelda_c::setMatrix()` overrides the matrix used to draw her for the frame, pushing her model far
+> underground and shrinking it to an imperceptible size, while leaving the actor itself alive and ticking normally
+> the entire time. She's back to normal the instant hiding ends, with no recreation (and no extra delay) needed.
 >
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
 > off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor
-> while `procToolDemo()` is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than
-> just appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into
-> that cutscene, it only applies going forward.
+> while a cutscene is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than just
+> appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into that
+> cutscene if she wasn't already present, it only applies going forward.
 
 > [!NOTE]
 > AI can get WORDY! 

@@ -18,7 +18,9 @@
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_particle.h"
+#include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
+#include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
@@ -113,6 +115,25 @@ static fopAc_ac_c* find_spawned_zelda() {
 static bool is_spawned_zelda(const fopAc_ac_c* actor) {
     return s_hasSpawnedZelda && actor != nullptr &&
            (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId;
+}
+
+// Whether the mod's own spawned Zelda should currently be visually hidden (moved far underground
+// and shrunk to an imperceptible size) rather than deleted, set once per tick by `mod_update()`
+// and read back by the `HoZeldaSetMatrix` hook below, which does the actual hiding. See that
+// hook's comment for why hiding her in place -- instead of deleting and later recreating the
+// actor -- is necessary.
+static bool s_hideSpawnedZeldaInCutscene = false;
+
+// The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same
+// `dScnPly_c` gameplay scene class as ordinary play, just requested under a different proc name
+// (`fpcNm_OPENING_SCENE_e` instead of `fpcNm_PLAY_SCENE_e`, see `dComIfG_changeOpeningScene()` in
+// `d_com_inf_game.cpp`), and that scene drives Epona exactly the same way a scripted cutscene
+// does. Without specifically excluding it, that would make the title screen itself count as a
+// "scripted cutscene" and hide this mod's Zelda there by default -- but she should always be
+// visible on the title screen regardless of the cutscene-visibility toggle.
+static bool is_title_screen() {
+    scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
+    return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -237,6 +258,36 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // computation and was never part of this bug.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
+// How far underground (in game units) and how small a scale to push this mod's own spawned
+// Zelda's rendered model to while she should be hidden during a scripted cutscene. Both her
+// position and scale are overridden by a wide margin so she's imperceptible to the player and the
+// camera regardless of where the cutscene happens to place the camera or how it's framed.
+//
+// This replaces an earlier approach of simply deleting (`fopAcM_delete`) the actor for the
+// cutscene's duration and recreating it once the cutscene ended: `fopAcM_create` isn't safe to
+// call while `daHorse_c` is being puppeted by scripted demo data (see `spawn_zelda_on_horse()`'s
+// callers below), but more importantly, deleting *and recreating* her around every cutscene
+// boundary was found to crash (SIGABRT) outright, almost certainly for the same underlying
+// reason. Hiding her in place -- she's never deleted, just moved/shrunk somewhere the player can
+// never see or reach -- sidesteps that entirely: the actor is always alive and ticking normally,
+// so there's no unsafe create/delete anywhere near a cutscene boundary, and she reappears the
+// instant the cutscene ends with no recreation (and no multi-frame delay) needed at all.
+static const f32 kHiddenUndergroundOffset = -100000.0f;
+static const f32 kHiddenScale = 0.0001f;
+
+static void hide_zelda_visually(daHoZelda_c* zelda) {
+    Vec hiddenPos = {
+        zelda->current.pos.x,
+        zelda->current.pos.y + kHiddenUndergroundOffset,
+        zelda->current.pos.z,
+    };
+
+    mDoMtx_stack_c::transS(hiddenPos);
+    mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
+    mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
+    zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     // How much of a rear's local-offset blend (0 = fully vanilla, 1 = fully Link's offset) has
     // eased in so far; chased every frame toward 0 or 1 depending on `checkTurnStand()` so the
@@ -245,6 +296,19 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
 
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!s_hasSpawnedZelda || (ActorId)fopAcM_GetID(zelda) != s_spawnedZeldaId) {
+        s_turnStandBlend = 0.0f;
+        return;
+    }
+
+    // Hiding her for a cutscene overrides everything else below: her position/rotation/animation
+    // don't matter while she's imperceptible underground, and `current.pos`/`shape_angle` (her
+    // actual logical transform, read by other systems such as the horse-rider-flag clearing in
+    // `mod_update()`) are deliberately left untouched -- only the matrix actually used to draw her
+    // this frame is overridden, so she's back exactly where she belongs the instant hiding ends.
+    if (s_hideSpawnedZeldaInCutscene) {
+        if (zelda->model != nullptr) {
+            hide_zelda_visually(zelda);
+        }
         s_turnStandBlend = 0.0f;
         return;
     }
@@ -1168,8 +1232,9 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     control.label = "Show Zelda during cutscenes";
     control.help_rml = "When off (default), Zelda is hidden for the duration of scripted story "
                         "cutscenes and reappears once they end. Cutscenes that already feature "
-                        "their own story-placed Zelda, and the horse call/grass whistle, are "
-                        "unaffected either way.";
+                        "their own story-placed Zelda, the horse call/grass whistle, the opening "
+                        "title screen, and area/scene transitions are unaffected either way -- "
+                        "she always stays visible there.";
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvarShowInCutscenes;
     svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
@@ -1318,6 +1383,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn
         // a second HoZelda while the first, orphaned one is still alive and animating.
         remove_spawned_zelda();
+        s_hideSpawnedZeldaInCutscene = false;
         return MOD_OK;
     }
 
@@ -1339,14 +1405,24 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     }
 
     // Whether a real, scripted story cutscene -- as opposed to ordinary gameplay -- is currently
-    // driving Epona. `daHorse_c::procToolDemo()` (`m_procID == PROC_TOOL_DEMO_e`) is the state the
-    // horse enters only while being puppeted directly by JStudio demo data
-    // (`dDemo_c::getActor()`), which is exactly how every scripted story cutscene moves and
-    // animates her; ordinary player-driven riding, and the horse-call/grass-whistle gallop-back
-    // (which repurposes some of the same demo-mode plumbing for its own unrelated "run to player"
-    // behavior, flagged by `FLG0_CALL_HORSE` instead), never set it.
-    bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
-                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
+    // driving Epona. `daHorse_c::checkHorseDemoMode()` (`field_0x16b8 != 0`) is set by
+    // `setDemoData()` any time the horse is being driven by something other than the player --
+    // i.e. a scripted cutscene -- including ordinary non-"tool demo" procs (jump/stop/turn/move/
+    // wait) that a cutscene can puppet her through, not just the single `procToolDemo()`
+    // (`PROC_TOOL_DEMO_e`) state. An earlier version of this check only looked at
+    // `PROC_TOOL_DEMO_e`, which missed every cutscene that drives Epona via one of those other
+    // procs instead, letting this mod's own Zelda incorrectly appear in cutscenes she shouldn't
+    // regardless of the "Show Zelda during cutscenes" toggle. The horse-call/grass-whistle
+    // gallop-back (which repurposes some of the same demo-mode plumbing for its own unrelated
+    // "run to player" behavior) is excluded by its own distinct flag (`FLG0_CALL_HORSE`), as are
+    // two further cases where this mod's Zelda should always stay visible regardless of the
+    // toggle: the opening title screen (`is_title_screen()`, which drives Epona the exact same
+    // way a cutscene does) and scene/room transitions (`dComIfGp_isEnableNextStage()`, true from
+    // the moment a stage/room change is requested until the new scene finishes loading --
+    // `dScnPly_c::init()` calls `dComIfGp_offEnableNextStage()` right as the new scene starts up).
+    bool inScriptedCutscene = horse->checkHorseDemoMode() &&
+                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE) &&
+                              !is_title_screen() && !dComIfGp_isEnableNextStage();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
@@ -1360,20 +1436,21 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     if (storyHoZeldaActive) {
         remove_spawned_zelda();
+        s_hideSpawnedZeldaInCutscene = false;
     } else if (inScriptedCutscene) {
         // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
         // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
         // own spawned actor -- cutscenes with their own story-placed HoZelda (e.g. the real
         // Ganondorf duel) are already handled above by the `storyHoZeldaActive` check.
-        if (!show_zelda_in_cutscenes()) {
-            remove_spawned_zelda();
-        }
-        // Note: we deliberately never spawn here, even if the toggle is (or just became, via the
-        // user flipping it mid-cutscene) true. `fopAcM_create` is not safe to call while
-        // `daHorse_c::procToolDemo()` is actively puppeting the horse from scripted JStudio demo
-        // data; doing so crashed (SIGABRT) rather than simply creating the actor a frame late. If
-        // she isn't already attached by the time a cutscene starts, she stays hidden for its
-        // duration and only (re)spawns, below, once the cutscene actually ends.
+        //
+        // Unlike earlier, she is never deleted here: the `HoZeldaSetMatrix` hook instead hides her
+        // in place (moved far underground and shrunk to an imperceptible size) for as long as
+        // `s_hideSpawnedZeldaInCutscene` stays true, so she's back exactly where she belongs the
+        // instant the cutscene ends with no recreation needed. If she doesn't already exist by the
+        // time a cutscene starts, she simply stays unspawned for its duration (see below) rather
+        // than being created mid-cutscene, which isn't safe (see `spawn_zelda_on_horse()`'s
+        // callers' comments).
+        s_hideSpawnedZeldaInCutscene = !show_zelda_in_cutscenes();
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
         // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
@@ -1382,7 +1459,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // `setAnm()` already support her sitting alone at the front of the saddle whenever Link
         // isn't riding (the `mIsSingleRide` case), so once created it takes care of the rest on its
         // own: reins, dual-ride animation blending, and the solo idle animation.
+        s_hideSpawnedZeldaInCutscene = false;
         spawn_zelda_on_horse(horse);
+    } else {
+        s_hideSpawnedZeldaInCutscene = false;
     }
 
     // `daHoZelda_c::setMatrix()` unconditionally calls `onHorseZelda()` every tick whenever any
