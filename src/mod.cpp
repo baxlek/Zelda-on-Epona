@@ -184,6 +184,34 @@ static void remove_spawned_zelda() {
         return;
     }
 
+    // Just like `find_spawned_zelda()` above, actor creation (`fopAcM_create`/`fpcSCtRq_Request`)
+    // is a multi-phase request that can take more than one frame (e.g. resource loading -- her
+    // own model/animation set is sizeable, tens of files), during which she sits in the engine's
+    // "create queue" rather than its normal execute queue. `svc_actor->delete_actor()` looks her
+    // up by ID via `fopAcM_SearchByID` first, which -- for that exact same reason -- reports "not
+    // found" (a null actor, but still a success return) for as long as that request is still in
+    // flight, so it silently does nothing at all (just an "actor doesn't exist" log warning) while
+    // she's still being created. Previously this function cleared `s_hasSpawnedZelda` regardless
+    // of whether the delete actually did anything, discarding our only record that a creation
+    // request for her was already underway; the request itself was never cancelled by this, so it
+    // kept completing in the background over the following frames exactly as if we'd never tried
+    // to remove her. If this mod's own "nobody has her attached, spawn her" logic then ran again
+    // before that request finished (e.g. a brief scripted event starting and ending again while
+    // she was still loading from an earlier room change), it had no way of knowing a spawn was
+    // already in flight and issued a second one -- leaving two overlapping in-flight creation
+    // requests both loading a full duplicate set of her resources at once, which was enough on its
+    // own to crash (SIGABRT, likely from resource/heap exhaustion the engine never has to handle
+    // for a single copy of any one actor).
+    //
+    // So: while she's still being created, leave `s_hasSpawnedZelda` (and the in-flight request)
+    // alone entirely and try again next frame instead -- this function is already called every
+    // single frame for as long as she should stay removed/hidden, so this just defers the actual
+    // deletion until she's finished creating and is actually searchable, at which point the delete
+    // below runs normally.
+    if (fpcM_IsCreating((fpc_ProcID)s_spawnedZeldaId)) {
+        return;
+    }
+
     svc_actor->delete_actor(mod_ctx, s_spawnedZeldaId);
     s_hasSpawnedZelda = false;
 }
