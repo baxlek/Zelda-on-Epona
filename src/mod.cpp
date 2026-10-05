@@ -18,7 +18,9 @@
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_particle.h"
+#include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
+#include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
@@ -141,6 +143,20 @@ static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
 // catches that window regardless of exactly which frame the handoff happens on.
 static fopAc_ac_c* find_other_hozelda() {
     return (fopAc_ac_c*)fopAcIt_Judge((fopAcIt_JudgeFunc)judge_other_hozelda, nullptr);
+}
+
+// Whether the title screen's background cinematic -- Link riding Epona across Hyrule Field,
+// looping behind the logo until the player presses Start -- is currently showing. This reuses the
+// same `dScnPly_c` gameplay scene class as ordinary play (`dComIfG_changeOpeningScene` just
+// requests it under a different proc name, `fpcNm_OPENING_SCENE_e`, instead of
+// `fpcNm_PLAY_SCENE_e`), loading stage "F_SP102" with its own real horse (and, once this mod
+// spawns her, Zelda) riding along a scripted demo path. `dStage_roomControl_c::getProcID()` is set
+// to whichever scene instance is currently running that gameplay logic (`dScnPly_c::phase_1`,
+// shared by both proc names), so looking that scene up and checking its name distinguishes the
+// title screen from ordinary gameplay.
+static bool is_title_screen() {
+    scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
+    return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
 static void spawn_zelda_on_horse(daHorse_c* horse) {
@@ -1168,8 +1184,8 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     control.label = "Show Zelda during cutscenes";
     control.help_rml = "When off (default), Zelda is hidden for the duration of scripted story "
                         "cutscenes and reappears once they end. Cutscenes that already feature "
-                        "their own story-placed Zelda, and the horse call/grass whistle, are "
-                        "unaffected either way.";
+                        "their own story-placed Zelda, the horse call/grass whistle, and the "
+                        "title screen, are unaffected either way.";
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvarShowInCutscenes;
     svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
@@ -1352,9 +1368,14 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // player-driven riding. The horse-call/grass-whistle gallop-back also repurposes this same
     // demo-mode plumbing for its own unrelated "run to player" behavior (via `changeOriginalDemo()`
     // + `changeDemoMode(12, 0)`), flagged by `FLG0_CALL_HORSE` instead, so it's excluded here same
-    // as before.
+    // as before. The title screen's own background cinematic (`is_title_screen()`) also drives the
+    // horse through this same demo-mode plumbing, but -- unlike real story cutscenes -- she's not
+    // normally in it at all (it's just Link and Epona, no Zelda placed by the story to begin with,
+    // and nothing else to clash with), so it's excluded here too: this mod's Zelda should always
+    // ride along on the title screen regardless of the toggle below.
     bool inScriptedCutscene = horse->checkHorseDemoMode() &&
-                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
+                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE) &&
+                              !is_title_screen();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
@@ -1384,13 +1405,15 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // cutscene starts, she stays hidden for its duration and only (re)spawns, below, once the
         // cutscene actually ends.
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
-        // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
-        // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
-        // horse, spawn her. `daHoZelda_c::execute()` attaches itself to the current horse every
-        // tick (`horse->setZeldaActor(this)`), and `daHoZelda_c::setMatrix()`/`setRideOffset()`/
-        // `setAnm()` already support her sitting alone at the front of the saddle whenever Link
-        // isn't riding (the `mIsSingleRide` case), so once created it takes care of the rest on its
-        // own: reins, dual-ride animation blending, and the solo idle animation.
+        // Keep Zelda riding along on Epona at all times during ordinary gameplay (and on the
+        // title screen, which reaches this branch too since it's excluded from
+        // `inScriptedCutscene` above), even after Link dismounts: if nobody (neither the story nor
+        // this mod) currently has her attached to the horse, spawn her. `daHoZelda_c::execute()`
+        // attaches itself to the current horse every tick (`horse->setZeldaActor(this)`), and
+        // `daHoZelda_c::setMatrix()`/`setRideOffset()`/`setAnm()` already support her sitting alone
+        // at the front of the saddle whenever Link isn't riding (the `mIsSingleRide` case), so once
+        // created it takes care of the rest on its own: reins, dual-ride animation blending, and
+        // the solo idle animation.
         spawn_zelda_on_horse(horse);
     }
 
