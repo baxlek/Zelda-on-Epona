@@ -81,6 +81,13 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// Counts down, once per `mod_update()` tick, after `remove_spawned_zelda()` actually deletes her;
+// `mod_update()`'s spawn branch below withholds a replacement spawn until this reaches zero. See
+// `remove_spawned_zelda()` for why this is necessary: deleting an actor is just as much a deferred,
+// multi-frame request as creating one is, so clearing `s_hasSpawnedZelda` the instant the delete is
+// merely *requested* isn't enough on its own.
+static u8 s_zeldaRespawnCooldownFrames = 0;
+
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -212,8 +219,29 @@ static void remove_spawned_zelda() {
         return;
     }
 
+    // Deleting an actor (`svc_actor->delete_actor()` -> `fopAcM_delete()` -> `fpcM_Delete()` ->
+    // `fpcDt_Delete()`) is, symmetrically to creating one, a deferred request rather than something
+    // that happens synchronously on this call: it just moves her onto the engine's own "delete
+    // queue" (`fpcDt_ToDeleteQ`), which is only actually processed -- her class-specific delete
+    // method run, and critically her resources freed via `fpcLd_Free()` -- the *next* time the
+    // engine's own once-per-frame delete-queue handler (`fpcDt_Handler()`) runs, not instantly here.
+    // Until that happens, her model/animation resources are still fully loaded and occupying
+    // memory. Previously, nothing stopped `mod_update()`'s "nobody has her attached, spawn her"
+    // logic from firing again as soon as the very next frame (since `s_hasSpawnedZelda` was already
+    // cleared below) -- issuing a brand new creation request that starts loading a full second copy
+    // of her resources while the just-deleted copy's resources hadn't actually been freed yet. That
+    // produced the exact same "two overlapping full resource sets loaded at once" SIGABRT as the
+    // in-flight-creation race above, just triggered from the deletion side instead: a brief,
+    // legitimate removal (e.g. a one-frame cutscene-detection blip) immediately followed by an
+    // immediate respawn, with no gap for the engine to actually free her first.
+    //
+    // So: every time we actually delete her here, start a short cooldown that withholds the next
+    // spawn (see `mod_update()`) for a couple of frames -- comfortably more than the single frame
+    // the delete queue needs to finish freeing her resources, regardless of exactly where in the
+    // per-frame sequence our own hook happens to run relative to the engine's delete-queue handler.
     svc_actor->delete_actor(mod_ctx, s_spawnedZeldaId);
     s_hasSpawnedZelda = false;
+    s_zeldaRespawnCooldownFrames = 2;
 }
 
 // `daHorse_c::callHorseSubstance()` (the grass-whistle horse call) special-cases *any* moment
@@ -1352,6 +1380,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    // Tick down the post-removal respawn cooldown (see `remove_spawned_zelda()`) regardless of
+    // anything else going on this frame, so it always finishes counting down on schedule.
+    if (s_zeldaRespawnCooldownFrames > 0) {
+        s_zeldaRespawnCooldownFrames--;
+    }
+
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
@@ -1433,7 +1467,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // cutscene starts, she stays hidden for its duration and only (re)spawns, below, once the
         // cutscene actually ends.
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda &&
-               !dComIfGp_event_runCheck()) {
+               !dComIfGp_event_runCheck() && s_zeldaRespawnCooldownFrames == 0) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay (and on the
         // title screen, which reaches this branch too since it's excluded from
         // `inScriptedCutscene` above), even after Link dismounts: if nobody (neither the story nor
@@ -1459,6 +1493,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // outright, just one frame later than `checkHorseDemoMode()` alone accounts for -- so
         // respawning here waits for `dComIfGp_event_runCheck()` to clear too, which costs at most
         // one extra frame of her staying hidden right as a cutscene ends.
+        //
+        // `s_zeldaRespawnCooldownFrames == 0` guards a separate, later window: see
+        // `remove_spawned_zelda()` for why a brand new spawn can't safely follow a removal
+        // immediately, even once every other condition above already looks clear.
         spawn_zelda_on_horse(horse);
     }
 
