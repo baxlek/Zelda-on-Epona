@@ -1339,13 +1339,21 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     }
 
     // Whether a real, scripted story cutscene -- as opposed to ordinary gameplay -- is currently
-    // driving Epona. `daHorse_c::procToolDemo()` (`m_procID == PROC_TOOL_DEMO_e`) is the state the
-    // horse enters only while being puppeted directly by JStudio demo data
-    // (`dDemo_c::getActor()`), which is exactly how every scripted story cutscene moves and
-    // animates her; ordinary player-driven riding, and the horse-call/grass-whistle gallop-back
-    // (which repurposes some of the same demo-mode plumbing for its own unrelated "run to player"
-    // behavior, flagged by `FLG0_CALL_HORSE` instead), never set it.
-    bool inScriptedCutscene = horse->m_procID == daHorse_c::PROC_TOOL_DEMO_e &&
+    // driving Epona. `daHorse_c::procToolDemo()` (`m_procID == PROC_TOOL_DEMO_e`) only covers the
+    // subset of scripted sequences that puppet the horse directly from JStudio demo data
+    // (`dDemo_c::getActor()`); plenty of other story cutscenes drive her through `setDemoData()`'s
+    // event-staff path instead (`m_demoMode` values that resolve to ordinary
+    // jump/stop/turn/move/wait procs, e.g. `checkDemoAction()`'s `m_demoMode == 7/9/15/...`
+    // branches), which never set `PROC_TOOL_DEMO_e` and so slipped past the old check, letting
+    // this mod's Zelda show up in them. `checkHorseDemoMode()` (`field_0x16b8 != 0`) is the
+    // broader flag `setDemoData()` itself uses to know whether *any* scripted event currently owns
+    // the horse -- covering `PROC_TOOL_DEMO_e` plus every other event-driven `m_demoMode` -- and is
+    // cleared the moment `dComIfGp_getEvent()->isOrderOK()` hands control back for ordinary
+    // player-driven riding. The horse-call/grass-whistle gallop-back also repurposes this same
+    // demo-mode plumbing for its own unrelated "run to player" behavior (via `changeOriginalDemo()`
+    // + `changeDemoMode(12, 0)`), flagged by `FLG0_CALL_HORSE` instead, so it's excluded here same
+    // as before.
+    bool inScriptedCutscene = horse->checkHorseDemoMode() &&
                               !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE);
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
@@ -1369,11 +1377,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
             remove_spawned_zelda();
         }
         // Note: we deliberately never spawn here, even if the toggle is (or just became, via the
-        // user flipping it mid-cutscene) true. `fopAcM_create` is not safe to call while
-        // `daHorse_c::procToolDemo()` is actively puppeting the horse from scripted JStudio demo
-        // data; doing so crashed (SIGABRT) rather than simply creating the actor a frame late. If
-        // she isn't already attached by the time a cutscene starts, she stays hidden for its
-        // duration and only (re)spawns, below, once the cutscene actually ends.
+        // user flipping it mid-cutscene) true. `fopAcM_create` is not safe to call while a
+        // scripted event is actively puppeting the horse (`checkHorseDemoMode()` true, e.g.
+        // `daHorse_c::procToolDemo()`'s JStudio demo data); doing so crashed (SIGABRT) rather than
+        // simply creating the actor a frame late. If she isn't already attached by the time a
+        // cutscene starts, she stays hidden for its duration and only (re)spawns, below, once the
+        // cutscene actually ends.
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
         // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
