@@ -244,6 +244,52 @@ static void remove_spawned_zelda() {
     s_zeldaRespawnCooldownFrames = 2;
 }
 
+// `mod_update()`'s own `storyHoZeldaActive` check (`find_other_hozelda()`, via `fopAcIt_Judge`)
+// only ever sees a HoZelda actor once it's *fully* created and sitting in the engine's normal
+// executor list -- while one is still being created (its own multi-phase, multi-frame resource
+// load, same as this mod's own spawned Zelda), it simply isn't there yet to be found. That left a
+// gap: a story-placed HoZelda created by some other scripted event (e.g. the vanilla event-staff
+// action seen right after a horse-call/grass-whistle summon briefly nudges `daHorse_c` into a
+// one-frame demo-mode blip, even though `FLG0_CALL_HORSE` is otherwise excluded from
+// `inScriptedCutscene` so this mod's own Zelda keeps showing through the whole call) can spend
+// many frames loading her full resource set -- tens of files, the same size as this mod's own
+// spawned Zelda -- while this mod's own copy is *still alive*, before `mod_update()` ever gets a
+// chance to notice and tear ours down. Two full HoZelda resource sets loaded at once was already
+// established (see `remove_spawned_zelda()` above) to be enough on its own to crash (SIGABRT,
+// resource/heap exhaustion), and that crash happens mid-load -- before the new actor ever reaches
+// the executor list `find_other_hozelda()` scans, so by the time `mod_update()`'s next tick could
+// react, it's already too late.
+//
+// Hooking `daHoZelda_c::create()` itself closes that gap: it's invoked the instant the engine
+// starts creating *any* HoZelda actor (ours or not), every single frame its own multi-phase
+// resource load is still in progress, which is as early as this mod can possibly react -- before
+// that actor has loaded even its first resource file. If the actor just starting to create isn't
+// the one this mod is already tracking, and this mod still has one of its own alive, immediately
+// remove ours right here instead of waiting for `mod_update()`'s own polling to catch up.
+//
+// Safe to call on every single invocation (not just the first): `remove_spawned_zelda()` is a
+// no-op once `s_hasSpawnedZelda` is already false, and `is_spawned_zelda()` correctly recognizes
+// this mod's *own* freshly spawned actor (so this never tears down the very actor it's hooking
+// into) even in the edge case where `create()`'s first invocation for it runs before
+// `spawn_zelda_on_horse()` has finished assigning `s_spawnedZeldaId`: `s_hasSpawnedZelda` is only
+// ever set *after* that assignment, and is guaranteed false up to that point (it's a precondition
+// of `mod_update()`'s own spawn branch), so the condition below can't misfire against our own
+// actor regardless of exactly when within that call this hook happens to run.
+DEFINE_HOOK(&daHoZelda_c::create, HoZeldaCreate);
+
+static HookAction on_hozelda_create_pre(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (s_hasSpawnedZelda && !is_spawned_zelda(zelda)) {
+        mods::log::warn(
+            "another HoZelda actor (id {}) is being created while this mod's own spawned Zelda "
+            "(id {}) is still alive -- removing ours immediately so both don't load a full "
+            "resource set at once",
+            (int)fopAcM_GetID(zelda), (int)s_spawnedZeldaId);
+        remove_spawned_zelda();
+    }
+    return HOOK_CONTINUE;
+}
+
 // `daHorse_c::callHorseSubstance()` (the grass-whistle horse call) special-cases *any* moment
 // where the current HoZelda passenger is riding alone (`checkSingleRide()`, true whenever Link
 // isn't mounted) by assuming the scripted final-duel reunion is underway: instead of the normal
@@ -1268,6 +1314,16 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, just without the horse-call fix.
     }
 
+    result = mods::hook::add_pre<HoZeldaCreate>(on_hozelda_create_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda create, a story-placed Zelda appearing alongside this mod's "
+            "own spawned Zelda may crash the game: {}",
+            (int)result);
+        // Not fatal: the mod still works; `mod_update()`'s own `storyHoZeldaActive` check still
+        // catches this (just a frame or more later, after the other HoZelda finishes creating).
+    }
+
     result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1528,6 +1584,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<HorseCallSubstance>();
+    mods::hook::uninstall<HoZeldaCreate>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
