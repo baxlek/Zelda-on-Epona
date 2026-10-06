@@ -531,6 +531,44 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
+// Post-hook: while this mod's own spawned Zelda is hidden for a cutscene (`setMatrix()`, already
+// run earlier this same `execute()` via the hook above, shrinks her model down to
+// `kHiddenScale`), `daHoZelda_c::execute()` itself still unconditionally ends with
+// `horse->setReinPosHand(6)` whenever she's riding solo (`mIsSingleRide`) and Link isn't mounted
+// -- attaching Epona's reins to her hand joint (`getRightFingerMtx()`) regardless of whether she's
+// currently visible. Shrinking her model collapses that joint down toward her own seated position
+// rather than moving it away to nothing, so the reins end up visibly anchored at (approximately)
+// where she's sitting instead of following her actual hand -- exactly as conspicuous as not hiding
+// the reins at all.
+//
+// Once `execute()` returns, if she's currently hidden, this re-derives the reins' position from
+// `daHorse_c::setReinPosNormal()` instead -- the same saddle-anchored position (`m_model`'s own
+// joint 0x15) the reins already default to whenever nobody is riding solo at all. That function
+// itself skips doing anything when `getZeldaActor()` is attached and riding solo (deferring to the
+// hand-based logic instead, by design): since our Zelda is still attached at this point (`execute()`
+// just reattached her, as it does every tick regardless of hiding), she's briefly detached
+// (`setZeldaActor(nullptr)`) around this one call so `setReinPosNormal()` actually recomputes the
+// reins. This has no lasting effect -- `execute()` unconditionally reattaches her
+// (`horse->setZeldaActor(this)`) at the very start of next tick's call anyway, the same trick
+// already used for the grass-whistle fix above.
+static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+        return;
+    }
+
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse == nullptr) {
+        return;
+    }
+
+    fopAc_ac_c* currentZelda = horse->getZeldaActor();
+    if (currentZelda != nullptr && (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+        horse->setZeldaActor(nullptr);
+    }
+    horse->setReinPosNormal();
+}
+
 // Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
 // draw/ready/shoot/recover state machine below: one between nocking the arrow and it becoming
 // ready to fire, and one between a shot landing and the next draw starting. Shortening both
@@ -1274,6 +1312,16 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
         // Not fatal: the mod still works, Zelda just won't auto-target enemies.
     }
+
+    result = mods::hook::add_post<HoZeldaExecute>(on_hozelda_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda execute post, Epona's reins may follow her hand while she's "
+            "hidden in cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the hidden-reins fix.
+    }
+
 
     result = mods::hook::replace<HoZeldaSetAnm>(on_hozelda_set_anm_replace);
     if (result != MOD_OK) {
