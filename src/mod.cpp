@@ -117,6 +117,21 @@ static bool is_spawned_zelda(const fopAc_ac_c* actor) {
            (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId;
 }
 
+// Whether the HoZelda actor currently attached to `horse` (if any) is this mod's own spawned
+// actor. Unlike `is_spawned_zelda(horse->getZeldaActor())`, this never dereferences the attached
+// actor's own pointer to find out -- it only reads `daHorse_c::m_zeldaActorKeep`'s cached ID field
+// (a plain integer, not a pointer) directly. `daHorse_c::getZeldaActor()` returns that same
+// cache's raw actor pointer as-is, refreshed only once per tick by `daHorse_c::execute()` (via
+// `fopAcM_SearchByID`); if the actor it refers to has since been deleted elsewhere in the same
+// tick -- e.g. the engine tearing down actors during a room/stage change, which can happen before
+// `execute()` gets a chance to run again -- that pointer is left dangling until the next refresh.
+// `fopAcM_GetID()`/`fpcM_GetID()` unconditionally dereference whatever pointer they're given (no
+// liveness check beyond a null check), so calling `is_spawned_zelda()` on that stale pointer, as
+// every caller below used to, is a use-after-free.
+static bool is_spawned_zelda_attached(daHorse_c* horse) {
+    return s_hasSpawnedZelda && horse->m_zeldaActorKeep.getID() == (fpc_ProcID)s_spawnedZeldaId;
+}
+
 // Whether the mod's own spawned Zelda should currently be visually hidden (shrunk to an
 // imperceptible size) rather than deleted, set once per tick by `mod_update()` and read back by
 // the `HoZeldaSetMatrix` hook below, which does the actual hiding. See that hook's comment for why
@@ -320,8 +335,14 @@ static void remove_spawned_zelda() {
     // already known to trigger it (`checkHorseCallWait()`, see `mod_update()`'s own comment); doing
     // it unconditionally here closes the same dangling-pointer window for every other caller of
     // this function too.
+    //
+    // `is_spawned_zelda_attached()` (not `is_spawned_zelda(horse->getZeldaActor())`) is required
+    // here specifically: by the time this runs, the actor this function is about to delete may
+    // already have been torn down by the engine itself (e.g. a room/stage change), in which case
+    // `horse->getZeldaActor()`'s cached pointer is already dangling -- see that helper's own
+    // comment.
     daHorse_c* horse = dComIfGp_getHorseActor();
-    if (horse != nullptr && is_spawned_zelda(horse->getZeldaActor())) {
+    if (horse != nullptr && is_spawned_zelda_attached(horse)) {
         horse->setZeldaActor(nullptr);
     }
 
@@ -343,13 +364,17 @@ static void remove_spawned_zelda() {
 // normal path instead. This has no lasting effect: `daHoZelda_c::execute()` unconditionally
 // reattaches our Zelda to the horse (`horse->setZeldaActor(this)`) on every single tick anyway,
 // so by the very next frame she's back exactly where she was.
+//
+// This hook fires synchronously the instant the player uses the grass whistle -- including right
+// after a room/stage change that may have already torn down the previously-attached actor behind
+// `m_zeldaActorKeep`'s back (its cached pointer is only refreshed once per tick, by
+// `daHorse_c::execute()`). `is_spawned_zelda_attached()` (not `is_spawned_zelda(horse->getZeldaActor())`)
+// is required here to avoid dereferencing that potentially-dangling pointer -- see its own comment.
 DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);
 
 static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
-    fopAc_ac_c* currentZelda = horse->getZeldaActor();
-    if (s_hasSpawnedZelda && currentZelda != nullptr &&
-        (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+    if (is_spawned_zelda_attached(horse)) {
         horse->setZeldaActor(nullptr);
     }
     return HOOK_CONTINUE;
@@ -777,8 +802,13 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    fopAc_ac_c* currentZelda = horse->getZeldaActor();
-    if (currentZelda != nullptr && (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+    // Compared directly against `zelda` (already known live, since `is_spawned_zelda(zelda)` above
+    // only returns true for the actor currently calling its own `execute()`) rather than
+    // re-fetching and dereferencing `horse->getZeldaActor()` to find out: `daHoZelda_c::execute()`
+    // -- whose post-hook this is -- already called `horse->setZeldaActor(this)` moments ago (see
+    // this function's own comment), so the two are guaranteed to be the same actor here. Comparing
+    // pointer values this way never dereferences either side, unlike `is_spawned_zelda()`.
+    if (horse->getZeldaActor() == zelda) {
         horse->setZeldaActor(nullptr);
     }
     horse->setReinPosNormal();
@@ -1687,12 +1717,17 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // riding at the same time as ours — i.e. exactly the "two overlapping Zelda models" bug. This
     // should never happen given the checks below, but if it does, logging it (with both actors'
     // IDs) is the best lead available for further diagnosis without being able to run the game.
+    // The `attachedZelda != nullptr && attachedZelda != trackedZelda` comparisons below only ever
+    // compare pointer values (never dereference either side), so they stay safe even if
+    // `attachedZelda` -- `horse->getZeldaActor()`'s cached pointer -- happens to be stale; the
+    // logged ID likewise reads `m_zeldaActorKeep.getID()` directly rather than dereferencing it via
+    // `fopAcM_GetID(attachedZelda)`, for the same reason `is_spawned_zelda_attached()` does.
     fopAc_ac_c* attachedZelda = horse->getZeldaActor();
     if (trackedZelda != nullptr && attachedZelda != nullptr && attachedZelda != trackedZelda) {
         mods::log::warn(
             "horse has HoZelda actor id {} attached, but our own HoZelda actor id {} is still "
             "alive and unattached -- two Zelda actors may be visible at once",
-            (int)fopAcM_GetID(attachedZelda), (int)s_spawnedZeldaId);
+            (int)horse->m_zeldaActorKeep.getID(), (int)s_spawnedZeldaId);
     }
 
     // Whether a real, scripted story cutscene -- as opposed to ordinary gameplay -- is currently
@@ -1786,9 +1821,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // single frame in which `daHoZelda_c` re-asserts it, and it is always false again by the time
     // the player's dismount/Midna checks run on the next tick. A real scripted duel always places
     // its own HoZelda actor (never ours), so this never touches the flag during the actual fight.
-    fopAc_ac_c* currentZelda = horse->getZeldaActor();
-    if (s_hasSpawnedZelda && currentZelda != nullptr &&
-        (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
+    if (is_spawned_zelda_attached(horse)) {
         daPy_getLinkPlayerActorClass()->offHorseZelda();
     }
 
