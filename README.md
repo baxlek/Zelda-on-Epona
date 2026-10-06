@@ -82,32 +82,55 @@ archery duel, where she rides alone) is never touched or duplicated.
 > kept surfacing new, similarly-themed issues with no end in sight, since every story cutscene that drives Epona
 > directly risks a new mismatch with a permanent extra rider that vanilla was never designed around.
 >
-> Rather than continuing down that path, the mod now removes its own spawned Zelda for the duration of any
-> *scripted* story cutscene by default (detected via `daHorse_c::checkHorseDemoMode()` — true any time something
-> other than the player is driving Epona, which covers every cutscene proc she can be puppeted through, not just
-> the single "tool demo" state an earlier version of this check looked at), and she's spawned again automatically
-> once the cutscene ends. This is purely a visibility toggle: cutscenes that already feature their own story-placed
-> Zelda (such as the horseback archery duel against Ganondorf) are completely unaffected either way, since the mod
-> only ever manages the actor it spawned itself.
+> Rather than continuing down that path, the mod now hides its own spawned Zelda for the duration of any *scripted*
+> story cutscene by default (detected via `daHorse_c::checkHorseDemoMode()` — true any time something other than the
+> player is driving Epona, which covers every cutscene proc she can be puppeted through, not just the single
+> "tool demo" state an earlier version of this check looked at — or via `dComIfGp_event_runCheck()`, true any time
+> the game's own general-purpose event system is running a scripted event/conversation that doesn't puppet Epona
+> directly at all, e.g. one that plays out while Link and Zelda just sit still mounted), and she reappears
+> automatically once the cutscene ends. This is purely a visibility toggle: cutscenes that already feature their own
+> story-placed Zelda (such as the horseback archery duel against Ganondorf) are completely unaffected either way,
+> since the mod only ever manages the actor it spawned itself.
 >
 > The only exception is the opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona
 > through the exact same `checkHorseDemoMode()` plumbing as a real cutscene but should always show her regardless
 > of the toggle (`is_title_screen()`). Every other cutscene-like event — including the horse-call/grass-whistle
 > gallop-back, NPC conversations, and area/scene transitions — is treated the same as any other story cutscene and
-> removed by default; she's never kept around for those just because the horse happens to only briefly be in demo
+> hidden by default; she's never kept visible for those just because the horse happens to only briefly be in demo
 > mode for them.
 >
-> An earlier version instead hid her in place (shrinking her rendered model down to an imperceptible size while
-> leaving the actor itself alive) rather than deleting and recreating it, after deleting/recreating her around a
-> cutscene boundary was once observed to cause a SIGABRT. That turned out to be a one-off edge case rather than a
-> systemic problem, and the in-place hiding it motivated came with its own, worse regression: she could get stuck
-> hidden, never reappearing at the start of the next demo stage or after the cutscene genuinely ended. Deleting and
-> recreating her is simple and matches how this mod already handles every other "Zelda shouldn't be present right
-> now" case (e.g. no horse loaded at all), so that's what it goes back to doing. `remove_spawned_zelda()` now always
-> detaches her from the horse (`horse->setZeldaActor(nullptr)`) before deleting her, closing the specific gap that
-> caused a related SIGABRT when the horse call/grass whistle was used shortly after a delete: `daHorse_c`'s own
-> cached rider pointer is only refreshed from inside `execute()`, so deleting an actor still cached there (without
-> detaching first) could otherwise leave a dangling pointer for the grass whistle's handler to crash on.
+> Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
+> "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an
+> actor (`fopAcM_create`) isn't safe immediately around a cutscene boundary. Instead, she's now hidden in place: a
+> hook on `daHoZelda_c::setMatrix()` overrides the matrix used to draw her for the frame, shrinking her model down
+> to an imperceptible size while leaving the actor itself alive and ticking normally the entire time. She's back to
+> normal the instant hiding ends, with no recreation (and no extra delay) needed.
+>
+> An earlier version of this hiding also moved her model far underground on top of shrinking it, but that dragged
+> Epona's reins down with her — they're attached to Zelda's hand while she's riding solo, so moving her position
+> visibly stretched them downward every time she was hidden. Shrinking her scale alone, without touching her
+> position, avoids that: her seated position (and the reins' attachment point) never moves, she's just rendered too
+> small to make out.
+>
+> Scaling her down alone wasn't quite enough on its own, though: shrinking collapses her hand joint down toward her
+> own seated position rather than moving it away to nothing, so the reins — still attached to that joint every tick
+> regardless of whether she's hidden — ended up visibly anchored right where she's sitting instead of following her
+> actual (collapsed) hand, just as conspicuous as not hiding the reins at all. A second hook, right after
+> `daHoZelda_c::execute()` finishes each tick, now re-derives the reins' position from
+> `daHorse_c::setReinPosNormal()` instead whenever she's hidden — the same saddle-anchored position the reins
+> already default to whenever nobody is riding solo. That function normally refuses to do anything while she's
+> attached and riding solo (deferring to the hand-based logic by design), so she's briefly detached
+> (`setZeldaActor(nullptr)`) around this one call to force it to recompute — with no lasting effect, since
+> `execute()` unconditionally reattaches her at the very start of next tick regardless, the same trick already used
+> for the grass-whistle fix above.
+>
+> Being hidden also now stops her auto-targeting/firing Light Arrows at nearby enemies (when the **Zelda active in
+> combat** toggle is on), not just rendering invisibly: `daHoZelda_c::execute()`'s own nearest-enemy search is
+> normally fed straight into her target slot every tick regardless of visibility, so without this she kept shooting
+> at anything nearby — visibly reacting enemies, or even an unrelated NPC conversation (e.g. talking to Midna) —
+> while completely invisible herself. The same pre-hook that feeds her target slot now drops whatever target she'd
+> picked and leaves it empty for as long as she's hidden, exactly as if the combat toggle were off; the rest of her
+> bow-draw state machine already falls back to doing nothing on its own once her target is empty.
 >
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
@@ -115,15 +138,6 @@ archery duel, where she rides alone) is never touched or duplicated.
 > while a cutscene is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than just
 > appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into that
 > cutscene if she wasn't already present, it only applies going forward.
->
-> While she's present and visible during a cutscene (the toggle above is on), she still won't auto-target/fire
-> Light Arrows at nearby enemies (when the **Zelda active in combat** toggle is on) for the cutscene's duration:
-> `daHoZelda_c::execute()`'s own nearest-enemy search is normally fed straight into her target slot every tick
-> regardless, so without this she kept shooting at anything nearby — visibly reacting enemies, or even an unrelated
-> NPC conversation (e.g. talking to Midna) — which would be a jarring, obviously unscripted interruption. The same
-> pre-hook that feeds her target slot drops whatever target she'd picked and leaves it empty for the cutscene's
-> duration, exactly as if the combat toggle were off; the rest of her bow-draw state machine already falls back to
-> doing nothing on its own once her target is empty.
 
 > [!NOTE]
 > AI can get WORDY! 
