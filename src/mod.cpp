@@ -662,23 +662,23 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
 // own puppeting, is entirely owned by the scripted demo data, and `daDemo00_c` is a shared generic
 // actor class used by every ordinary cutscene prop throughout the game -- deleting or fighting
 // over its actor state risks the same kind of crash earlier attempts at patching individual
-// cutscenes kept running into, see the overview comment near `g_cvarShowInCutscenes` above), this
-// takes the same approach already used to hide our own spawned Zelda: shrink the prop's model down
-// to `kHiddenScale` every frame, imperceptible regardless of camera distance, leaving the actor
-// itself completely untouched and still ticking normally. Unlike our own Zelda's cutscene-hide
-// (scale-only, see the `cutscene visibility` notes above), the firewood prop also gets shoved deep
-// underground on top of being shrunk -- see `kFirewoodPropUndergroundOffset` below for why.
-//
-// A scale override applied only in `setBaseMtx()` was reported to not actually hide the prop in
-// practice, despite being the same technique already proven to hide our own spawned Zelda. The
-// root cause wasn't confirmed (the scale-vs-shape-ID matching logic here checks out against
-// `dusklight`'s own source, so the leading theory is that this particular, otherwise-unremarkable
-// member function doesn't resolve to a hookable address in every build for reasons that can't be
-// verified without a live game to test against), so this re-applies the exact same override a
-// second time, immediately before `daDemo00_c::draw()` (`src/d/actor/d_a_demo00.cpp`) submits the
-// model's display list each frame, as a second, independent chance for the hiding to actually take
-// effect even if `setBaseMtx()`'s hook turns out not to be firing.
-DEFINE_HOOK(&daDemo00_c::setBaseMtx, Demo00SetBaseMtx);
+// cutscenes kept running into, see the overview comment near `g_cvarShowInCutscenes` above), and
+// since neither shrinking the model down (`setBaseScale`) nor dragging it underground
+// (`setBaseTRMtx`) actually stopped it from appearing on screen in practice -- despite both being
+// applied from two independent hook points, and the matching logic checking out against
+// `dusklight`'s own source, so the two techniques aren't being silently skipped by a bad
+// condition -- this takes a more forceful approach: skip `daDemo00_c::draw()` (`src/d/actor/d_a_
+// demo00.cpp`) entirely for this one actor while hiding is active, via `HOOK_SKIP_ORIGINAL`. That
+// function is solely responsible for submitting the prop's display list each frame; cancelling it
+// outright means no geometry is ever handed to the renderer for this actor on a hidden frame,
+// regardless of whatever matrix/scale state it's sitting in -- which should succeed even if the
+// previous attempts' failure turns out to have been caused by some other system (e.g. a shadow or
+// outline pass) independently re-deriving and drawing from the model's unmodified transform.
+// `draw()`'s own return value is never inspected by its caller (`fpcDw_Execute()` simply forwards
+// whatever the per-actor draw method returns), so skipping it and leaving the default `int{}` (0)
+// return in place is safe -- it doesn't get misread as an error that deletes or disables the
+// actor. The rest of the actor (and its physical presence, if any) continues ticking completely
+// normally; only this one frame's draw submission is skipped.
 DEFINE_HOOK(&daDemo00_c::draw, Demo00Draw);
 
 // The BMD's resource index within the archive differs per cutscene archive (and isn't guaranteed
@@ -693,9 +693,9 @@ static const char* kFirewoodPropModelName = "demo01_fwood_cut00_gp_1.bmd";
 // `demo01_fwood_cut0#_gp_1_o.bck`-prefixed resources alongside the `.bmd` in the asset list) rather
 // than one single clip reused for the whole cutscene. These are listed here (one list per archive,
 // since each cutscene only uses its own subset of cuts) so the resource-load hook below can refuse
-// to hand any of them out while hiding is active, in addition to (not instead of) the scale-based
-// hiding above: see that hook's own comment for why the model itself still has to be hidden by
-// scale regardless, and what blocking just the `.bck` clips does and doesn't accomplish on its own.
+// to hand any of them out while hiding is active: with `draw()` itself skipped the prop can't be
+// seen regardless, but there's no reason to let the game spend time decoding and applying an
+// animation that will never be drawn, so this is kept as a cheap complement to the real fix above.
 static const char* kFirewoodPropBckNames_Demo01_01[] = {"demo01_fwood_cut08_gp_1_o.bck"};
 static const char* kFirewoodPropBckNames_Demo01_02[] = {
     "demo01_fwood_cut01_gp_1_o.bck",
@@ -717,62 +717,35 @@ static bool is_hidden_firewood_prop_cutscene() {
     return false;
 }
 
-// Scaling the prop down to `kHiddenScale` alone was reported to still leave it visible (just
-// shrunk, sitting wherever its current cut's `.bck` pose happens to place it), so in addition to
-// the scale override below, this also drags the whole model straight down by this many units --
-// far enough to clear any terrain/geometry in every one of these cutscenes' camera cuts -- which
-// should hide it regardless of whether the scale override by itself is actually taking effect.
-static const f32 kFirewoodPropUndergroundOffset = 100000.0f;
-
-static void hide_firewood_prop_model(daDemo00_c* demoAc) {
+static bool is_firewood_prop(daDemo00_c* demoAc) {
     if (demoAc == nullptr || demoAc->mModel.field_0x5d4 == nullptr) {
-        return;
+        return false;
     }
 
     // Only while Zelda is actually visible on Epona during these two cutscenes does the firewood
     // prop have anything to clash with; leave it completely alone otherwise (including the default
     // "hidden in cutscenes" state, where our own Zelda is already shrunk down the same way).
     if (!show_zelda_in_cutscenes() || !is_hidden_firewood_prop_cutscene()) {
-        return;
+        return false;
     }
 
     const char* arcName = dStage_roomControl_c::getDemoArcName();
     int firewoodIndex = dComIfG_getObjctResName2Index(arcName, kFirewoodPropModelName);
-    if (firewoodIndex == -1 || demoAc->mModel.mID.mShapeID != (u32)firewoodIndex) {
-        return;
-    }
-
-    // Rebuilt from scratch (rather than reading back and further offsetting whatever matrix is
-    // already there) using the actor's own tracked position/angle, exactly mirroring the vanilla
-    // `setBaseMtx()` matrix build above it -- just with the Y position pushed deep underground.
-    // Being an absolute rebuild rather than an incremental adjustment, this is safe to call more
-    // than once in the same frame (both hooks below do) without compounding the offset each time.
-    cXyz hiddenPos = demoAc->current.pos;
-    hiddenPos.y -= kFirewoodPropUndergroundOffset;
-    mDoMtx_stack_c::transS(hiddenPos.x, hiddenPos.y, hiddenPos.z);
-    mDoMtx_stack_c::XYZrotM(demoAc->current.angle.x, demoAc->current.angle.y, demoAc->current.angle.z);
-    demoAc->mModel.field_0x5d4->setBaseTRMtx(mDoMtx_stack_c::get());
-    demoAc->mModel.field_0x5d4->setBaseScale(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
-}
-
-static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
-    hide_firewood_prop_model(mods::arg<daDemo00_c*>(args, 0));
+    return firewoodIndex != -1 && demoAc->mModel.mID.mShapeID == (u32)firewoodIndex;
 }
 
 static HookAction on_demo00_draw_pre(ModContext*, void* args, void*, void*) {
-    hide_firewood_prop_model(mods::arg<daDemo00_c*>(args, 0));
-    return HOOK_CONTINUE;
+    return is_firewood_prop(mods::arg<daDemo00_c*>(args, 0)) ? HOOK_SKIP_ORIGINAL : HOOK_CONTINUE;
 }
 
 // Refuses to hand out any of the firewood bundle's own per-cut `.bck` animation clips (see the
 // list above) while hiding is active, so its `daDemo00_c` actor's `mDoExt_McaMorfSO` wrapper is
 // built with a null animation source (`createHeap()` in `src/d/actor/d_a_demo00.cpp` already
 // handles that safely -- `mDoExt_McaMorfSO::create()` null-checks its anim parameter throughout --
-// so this doesn't crash). On its own this only freezes the prop in its bind pose rather than
-// actually hiding it (the underlying `J3DModel` still gets created and drawn regardless of whether
-// it has an animation clip), which is why it's applied in addition to, not instead of, the
-// scale-based hiding above; the two together mean neither the model nor its posing animation ever
-// visibly appear during these cutscenes while Zelda is shown.
+// so this doesn't crash). This is a minor complement to the `draw()`-skipping fix above, not a
+// replacement for it: on its own, blocking just the `.bck` clip only freezes the prop in its bind
+// pose rather than hiding it (the underlying `J3DModel` still gets created and drawn regardless of
+// whether it has an animation clip).
 DEFINE_HOOK(&dComIfG_getObjectIDRes, Demo00FirewoodBckRes);
 
 static bool is_firewood_bck_resource(const char* arcName, u16 resID) {
@@ -1580,15 +1553,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
     }
 
-    result = mods::hook::add_post<Demo00SetBaseMtx>(on_demo00_set_base_mtx_post);
-    if (result != MOD_OK) {
-        mods::log::warn(
-            "failed to hook generic cutscene prop matrix, the firewood bundle prop may clip "
-            "through Zelda during Demo01_01/Demo01_02 when shown in cutscenes: {}",
-            (int)result);
-        // Not fatal: the mod still works, the firewood prop just won't be hidden.
-    }
-
     result = mods::hook::add_pre<Demo00Draw>(on_demo00_draw_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1807,7 +1771,6 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
-    mods::hook::uninstall<Demo00SetBaseMtx>();
     mods::hook::uninstall<Demo00Draw>();
     mods::hook::uninstall<Demo00FirewoodBckRes>();
     return MOD_OK;
