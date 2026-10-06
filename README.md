@@ -98,7 +98,17 @@ archery duel, where she rides alone) is never touched or duplicated.
 >   actually running back in response to the call.
 > - Any NPC conversation, since simply talking to an NPC anywhere near Epona otherwise flags the horse as "in demo
 >   mode" for the conversation's entire duration despite having nothing to do with the horse (excluded via
->   `dComIfGp_event_getTalkPartner()`, non-null from the moment a conversation starts until it ends).
+>   `dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e`, the one mode the engine's event-control class only ever
+>   enters for genuine dialogue). An earlier version of this check instead tested
+>   `dComIfGp_event_getTalkPartner() != nullptr`, which turned out not to mean "a conversation is in progress" at
+>   all: that accessor is set by the event-control class for *every* kind of event it handles — ordinary scripted
+>   demos, door/treasure events, catch events, and more, not just real conversations — to whichever of the event's
+>   own request/target actor isn't the player, and the engine's own camera-script code uses it purely as a generic
+>   "the event's other-party actor" symbolic reference for any event type's camera direction data. Checking it this
+>   way wrongly excluded (and so kept Zelda incorrectly visible through) any ordinary story cutscene that happened to
+>   be implemented as an NPC-requested scripted demo rather than a player-compulsory one — i.e. most cutscenes NPCs
+>   themselves trigger, not just actual dialogue — which is exactly the kind of cutscene she should still be hidden
+>   for. This was a major cause of Zelda repeatedly showing up in cutscenes she shouldn't.
 > - The opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene
 >   does but should always show her.
 > - Area/scene transitions, including each area's own one-time "first time here" introductory cutscene and any

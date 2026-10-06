@@ -135,6 +135,33 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
+// Whether the event currently running (if any) is specifically an NPC conversation -- a dialogue
+// box, not any other kind of scripted cutscene -- so this mod's Zelda can stay visible through
+// ordinary dialogue regardless of the "Show Zelda during cutscenes" toggle (see
+// `poll_excluded_cutscene_category()`'s comment for why that's needed at all).
+//
+// This deliberately checks `dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e` rather than
+// `dComIfGp_event_getTalkPartner() != nullptr`, which an earlier version of this check used
+// instead. `getTalkPartner()` (`dEvt_control_c::getPtT()`) is not actually an "is a conversation
+// in progress" signal at all -- `dEvt_control_c::setParam()` sets it for *every* kind of event this
+// control class handles (ordinary scripted demos, door/treasure events, catch events, etc.), not
+// just real conversations, to whichever of the event's own request/target actor isn't the player;
+// the engine's own camera-script code (`dCamera_c::getEvActor()`'s `'@TAL'` case) uses it purely as
+// a generic "the event's other-party actor" symbolic reference for any event type's camera
+// direction data, confirming it was never meant to mean "a conversation is happening". Using it
+// this way excluded (and therefore incorrectly kept Zelda visible through) any ordinary story
+// cutscene that happened to be implemented as an NPC-requested scripted demo rather than a
+// player-compulsory one -- i.e. most cutscenes NPCs themselves trigger, not just actual dialogue --
+// which is exactly the kind of cutscene Zelda should still be hidden for. `getMode()` instead
+// reports which of `dEvt_mode_e`'s four modes the control class is actually in, and is only ever
+// set to `dEvt_mode_TALK_e` by `talkCheck()`/`talkXyCheck()` -- the two functions that handle real
+// NPC dialogue -- as opposed to `dEvt_mode_DEMO_e` (sets through `demoCheck()`/`doorCheck()`/
+// `itemCheck()`/`potentialCheck()`/`catchCheck()`, i.e. ordinary scripted cutscenes) or
+// `dEvt_mode_COMPULSORY_e` (player-triggered stage demos).
+static bool is_npc_conversation_active() {
+    return dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e;
+}
+
 // How many extra ticks of `mod_update()` to keep excluding cutscene-hiding for after a stage/room
 // transition's loading screen finishes (see `s_transitionGraceTicksRemaining` below).
 static const int kTransitionGraceTicks = 90;
@@ -229,10 +256,10 @@ static void reset_excluded_cutscene_latch() {
 // stays continuously true -- i.e. for the event's entire real duration -- only re-evaluating once
 // `checkHorseDemoMode()` goes false again and some later event begins anew. Since every excluded
 // category's own flag is already true from the very first tick of its event (the horse sets
-// `FLG0_UNK_10000000` the instant the gallop-back starts; `dComIfGp_event_getTalkPartner()` is set
-// as soon as a conversation begins; `i_areaTransitionActive` is true from the moment a stage/room
-// change is requested), latching at the start is enough to correctly cover cases where the specific
-// transient signal ends before the event itself actually does.
+// `FLG0_UNK_10000000` the instant the gallop-back starts; `getMode()` is already
+// `dEvt_mode_TALK_e` as soon as a conversation begins; `i_areaTransitionActive` is true from the
+// moment a stage/room change is requested), latching at the start is enough to correctly cover
+// cases where the specific transient signal ends before the event itself actually does.
 static bool poll_excluded_cutscene_category(daHorse_c* horse, bool i_areaTransitionActive) {
     bool horseDemoModeActive = horse->checkHorseDemoMode();
     if (!horseDemoModeActive) {
@@ -241,7 +268,7 @@ static bool poll_excluded_cutscene_category(daHorse_c* horse, bool i_areaTransit
     }
 
     bool excludedRightNow = horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) ||
-                            dComIfGp_event_getTalkPartner() != nullptr || is_title_screen() ||
+                            is_npc_conversation_active() || is_title_screen() ||
                             i_areaTransitionActive;
 
     if (!s_wasHorseDemoModeActive) {
