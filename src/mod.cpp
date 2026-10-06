@@ -193,12 +193,30 @@ static const char* const kAlwaysExcludeDemoArchives[] = {
 // `inScriptedCutscene`'s own toggleable handling should apply to that later event, same as it
 // would anywhere else. The latch only resets back to `kNotStarted` (ready to exclude again) once
 // the archive name itself actually changes away from the excluded list.
+//
+// `kNotStarted` itself isn't a safe permanent fallback either: `loadDemoArchive()` sets the demo
+// archive name from static per-room/layer data alone (see its own comment in `d_s_room.cpp`),
+// completely independent of whether the cutscene's own trigger (gated separately by story/event
+// flags) will actually fire this visit. Once a one-time cutscene like `Demo36_00` has already
+// played, the *room* keeps preloading the same archive name on every later visit, but the
+// cutscene itself never runs again -- so `liveCutsceneActive` never turns true, and the latch
+// would otherwise sit in `kNotStarted` (which this function still treats as excluded) forever,
+// hiding this mod's Zelda for as long as the player occupies that room. `kNotStartedFrameCount`
+// bounds that wait: if no real cutscene has shown up within `kNotStartedGraceFrames` of first
+// seeing this archive, give up waiting and release the exclusion (transition straight to
+// `kEnded`), the same way a genuinely-observed cutscene's own end would. Chosen generously (10
+// seconds at 60 FPS) to comfortably outlast any actual cutscene's initial lead-in (e.g.
+// `Demo01_01`'s own pre-puppet dialogue), so a real first-time cutscene is never cut short, while
+// still bounding a stale revisit to a one-time wait instead of an indefinite one.
 enum class ExcludedCutsceneState { kNotStarted, kActive, kEnded };
 static ExcludedCutsceneState s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
+static u32 s_notStartedFrameCount = 0;
+static constexpr u32 kNotStartedGraceFrames = 600;
 
 static bool always_exclude_spawned_zelda(bool liveCutsceneActive) {
     if (always_show_spawned_zelda()) {
         s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
+        s_notStartedFrameCount = 0;
         return false;
     }
 
@@ -215,6 +233,7 @@ static bool always_exclude_spawned_zelda(bool liveCutsceneActive) {
         // Reset the latch so re-entering an excluded archive later (if that's ever possible)
         // starts over from "not started" rather than remembering a stale "ended" state.
         s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
+        s_notStartedFrameCount = 0;
         return false;
     }
 
@@ -225,6 +244,12 @@ static bool always_exclude_spawned_zelda(bool liveCutsceneActive) {
             s_excludedCutsceneState = ExcludedCutsceneState::kActive;
         } else if (s_excludedCutsceneState == ExcludedCutsceneState::kActive) {
             s_excludedCutsceneState = ExcludedCutsceneState::kEnded;
+        } else if (s_excludedCutsceneState == ExcludedCutsceneState::kNotStarted) {
+            // Still waiting for a cutscene to actually start. See the grace-period comment above:
+            // give up (and stop excluding) once we've waited too long without one ever showing up.
+            if (++s_notStartedFrameCount >= kNotStartedGraceFrames) {
+                s_excludedCutsceneState = ExcludedCutsceneState::kEnded;
+            }
         }
     }
 
@@ -282,6 +307,22 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
 static void remove_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return;
+    }
+
+    // Detach from the horse first, if it's still the one attached, mirroring the same
+    // detach-before-operate pattern `on_horse_call_substance_pre()`/`on_hozelda_execute_post()`
+    // already use elsewhere: `daHorse_c::execute()` only refreshes `m_zeldaActorKeep` (via
+    // `fopAcM_SearchByID`) once per tick, so deleting this actor while it's still attached leaves
+    // that pointer dangling until `execute()` happens to run again -- and anything that reads it
+    // in the meantime (e.g. `callHorseSubstance()`'s unconditional `m_zeldaActorKeep.getActor()`
+    // dereference, triggered synchronously the instant the player uses the grass whistle) would be
+    // a use-after-free (SIGABRT). This was previously only worked around for the one specific case
+    // already known to trigger it (`checkHorseCallWait()`, see `mod_update()`'s own comment); doing
+    // it unconditionally here closes the same dangling-pointer window for every other caller of
+    // this function too.
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse != nullptr && is_spawned_zelda(horse->getZeldaActor())) {
+        horse->setZeldaActor(nullptr);
     }
 
     svc_actor->delete_actor(mod_ctx, s_spawnedZeldaId);
@@ -1619,23 +1660,20 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         //
         // An earlier version of this check called `remove_spawned_zelda()` here, matching the
         // "no horse loaded" case above -- but, unlike that case, `horse` itself is a live object
-        // here, and deleting our own spawned actor without first detaching it
-        // (`horse->setZeldaActor(nullptr)`) leaves `daHorse_c::m_zeldaActorKeep` holding a
-        // dangling pointer to the now-freed actor until `daHorse_c::execute()` happens to refresh
-        // it -- which that early-return above means won't happen until *after* this flag clears.
-        // Reading that dangling pointer in the meantime -- e.g. `callHorseSubstance()` itself,
-        // called the instant the player uses the grass whistle, unconditionally dereferences
-        // `m_zeldaActorKeep.getActor()` to check `checkSingleRide()` -- crashes (SIGABRT). (See
-        // `kHiddenScale`'s own comment: this codebase has already hit that same delete-near-a-
-        // horse-demo-boundary crash once before, which is why the ordinary cutscene-hide case
-        // below hides her in place instead of deleting/recreating her too.)
+        // here, and `daHorse_c::execute()` -- which normally refreshes `m_zeldaActorKeep` (via
+        // `fopAcM_SearchByID`) once per tick, clearing it back to null once the actor it pointed
+        // at is deleted -- returns immediately while this flag is set, which that early-return
+        // above means won't happen until *after* the flag clears. `remove_spawned_zelda()` now
+        // always detaches (`horse->setZeldaActor(nullptr)`) before deleting, closing that dangling
+        // `m_zeldaActorKeep` window unconditionally (see its own comment) -- but hiding her in
+        // place here instead is still preferable regardless, to avoid tearing down and later
+        // recreating the actor right at this visibility boundary for no reason.
         //
         // Mirroring exactly what the game itself does to Epona in this state -- instead of
         // deleting Zelda, just hide her (unconditionally, regardless of the "Show Zelda during
         // cutscenes" toggle) using that same in-place scale-hide mechanism. If she isn't spawned
         // yet, this simply does nothing until she is (see the final `else if` below, reached once
-        // this flag clears); if she already exists, she's hidden without ever being deleted, so
-        // there's no dangling `m_zeldaActorKeep` pointer for anything to read.
+        // this flag clears).
         s_hideSpawnedZeldaInCutscene = true;
         return MOD_OK;
     }
