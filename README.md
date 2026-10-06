@@ -122,6 +122,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > `execute()` unconditionally reattaches her at the very start of next tick regardless, the same trick already used
 > for the grass-whistle fix above.
 >
+> Being hidden also now stops her auto-targeting/firing Light Arrows at nearby enemies (when the **Zelda active in
+> combat** toggle is on), not just rendering invisibly: `daHoZelda_c::execute()`'s own nearest-enemy search is
+> normally fed straight into her target slot every tick regardless of visibility, so without this she kept shooting
+> at anything nearby — visibly reacting enemies, or even an unrelated NPC conversation (e.g. talking to Midna) —
+> while completely invisible herself. The same pre-hook that feeds her target slot now drops whatever target she'd
+> picked and leaves it empty for as long as she's hidden, exactly as if the combat toggle were off; the rest of her
+> bow-draw state machine already falls back to doing nothing on its own once her target is empty.
+>
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
 > off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor
