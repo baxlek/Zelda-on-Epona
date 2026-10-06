@@ -18,6 +18,7 @@
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_event.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
@@ -175,6 +176,91 @@ static bool before_opening_cutscene() {
     }
 
     return strcmp(dComIfGp_getStartStageName(), kOrdonVillageStageName) != 0;
+}
+
+// --- TEMPORARY DIAGNOSTIC: log the current area and demo while investigating why Zelda still
+// doesn't reappear once the opening cutscene reaches Ordon Village ----------------------------
+//
+// `dComIfGp_getStartStageName()`/`...RoomNo()` (what `before_opening_cutscene()` above checks)
+// only reflect the stage *this mod* believes is current. If the cutscene's third leg (outside
+// Link's house, firewood unloaded) actually runs as a separate, cutscene-only area rather than
+// the ordinary explorable `F_SP103`/room 1 -- e.g. a different stage name entirely, or the same
+// name but a room/layer combination not covered by the `before_opening_cutscene()` check above --
+// that would explain Zelda staying hidden without the stage-name check above being wrong by
+// itself. Logging the actual values every time the scene or demo changes (rather than
+// unconditionally every frame, which would flood the log) makes it possible to read the true
+// area/demo sequence this cutscene drives through directly out of the logs instead of guessing
+// at it.
+//
+// "Scene" here is the running `scene_class`'s own proc name (`fpcM_GetName()` on whatever
+// `fopScnM_SearchByID(dStage_roomControl_c::getProcID())` currently returns -- the same lookup
+// `is_title_screen()` uses), not just the stage/room/layer this mod's own checks key off of: a
+// cutscene-only area could in principle run under its own distinct scene proc entirely, which a
+// stage/room/layer comparison alone wouldn't surface.
+//
+// `dEvt_control_c::getStbDemoData()` is hooked below to additionally log the literal resource
+// name of each `.stb` demo clip requested as the cutscene's event flow advances (see
+// `d_event_data.cpp`'s own `getStbDemoData(sdata)` call, immediately before `dDemo_c::start()`),
+// which is the closest thing to a "demo ID" available without deeper reverse-engineering, and the
+// demo archive name changing is itself tracked as a "demo changed" event below.
+//
+// Remove this entire block (and its hook registration in `mod_initialize()`) once the actual
+// cause of the bug has been identified from these logs.
+static void log_area_demo_diagnostics_if_changed(daHorse_c* horse) {
+    static char s_lastStageName[32] = {0};
+    static char s_lastDemoArchive[32] = {0};
+    static s8 s_lastRoomNo = -2;
+    static s8 s_lastLayer = -2;
+    static s16 s_lastSceneProcName = -1;
+    static bool s_lastInDemoMode = false;
+    static bool s_lastHaveHorse = true;  // Start "true" so a null horse on the very first frame
+                                         // (quite possible, e.g. mid-cutscene before Epona loads)
+                                         // is itself logged as a change.
+
+    const char* stageName = dComIfGp_getStartStageName();
+    const char* demoArchive = (const char*)dStage_roomControl_c::getDemoArcName();
+    s8 roomNo = dComIfGp_getStartStageRoomNo();
+    s8 layer = dComIfGp_getStartStageLayer();
+    scene_class* currentScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
+    s16 sceneProcName = currentScene != nullptr ? fpcM_GetName(currentScene) : (s16)-1;
+    bool haveHorse = horse != nullptr;
+    bool inDemoMode = haveHorse && horse->checkHorseDemoMode();
+
+    bool changed = strncmp(stageName, s_lastStageName, sizeof(s_lastStageName)) != 0 ||
+                   strncmp(demoArchive, s_lastDemoArchive, sizeof(s_lastDemoArchive)) != 0 ||
+                   roomNo != s_lastRoomNo || layer != s_lastLayer ||
+                   sceneProcName != s_lastSceneProcName || haveHorse != s_lastHaveHorse ||
+                   inDemoMode != s_lastInDemoMode;
+    if (!changed) {
+        return;
+    }
+
+    strncpy(s_lastStageName, stageName, sizeof(s_lastStageName) - 1);
+    s_lastStageName[sizeof(s_lastStageName) - 1] = '\0';
+    strncpy(s_lastDemoArchive, demoArchive, sizeof(s_lastDemoArchive) - 1);
+    s_lastDemoArchive[sizeof(s_lastDemoArchive) - 1] = '\0';
+    s_lastRoomNo = roomNo;
+    s_lastLayer = layer;
+    s_lastSceneProcName = sceneProcName;
+    s_lastHaveHorse = haveHorse;
+    s_lastInDemoMode = inDemoMode;
+
+    mods::log::info(
+        "[diag] scene/demo changed: stage={} room={} layer={} sceneProcName={} demoArchive={} "
+        "horseLoaded={} horseDemoMode={} titleScreen={} beforeOpeningCutscene={}",
+        stageName, (int)roomNo, (int)layer, (int)sceneProcName, demoArchive, haveHorse, inDemoMode,
+        is_title_screen(), before_opening_cutscene());
+}
+
+DEFINE_HOOK(&dEvt_control_c::getStbDemoData, EventGetStbDemoData);
+
+static HookAction on_event_get_stb_demo_data_pre(ModContext*, void* args, void*, void*) {
+    char* resName = mods::arg<char*>(args, 1);
+    mods::log::info(
+        "[diag] demo requested: id={} stage={} room={} demoArchive={}", resName,
+        dComIfGp_getStartStageName(), (int)dComIfGp_getStartStageRoomNo(),
+        (const char*)dStage_roomControl_c::getDemoArcName());
+    return HOOK_CONTINUE;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1497,6 +1583,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: same as above.
     }
 
+    // TEMPORARY DIAGNOSTIC (see `log_area_demo_diagnostics_if_changed()`'s own comment): remove
+    // this registration along with that function and `on_event_get_stb_demo_data_pre()` once the
+    // investigation concludes.
+    result = mods::hook::add_pre<EventGetStbDemoData>(on_event_get_stb_demo_data_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook demo data lookup, diagnostic demo-id logging will be "
+                         "unavailable: {}",
+                         (int)result);
+        // Not fatal: this is a diagnostic-only hook, unrelated to the mod's actual functionality.
+    }
+
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
     cvarDesc.name = "showInCutscenes";
     cvarDesc.type = CONFIG_VAR_BOOL;
@@ -1539,6 +1636,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
 MOD_EXPORT ModResult mod_update(ModError*) {
     daHorse_c* horse = dComIfGp_getHorseActor();
+
+    // TEMPORARY DIAGNOSTIC: see `log_area_demo_diagnostics_if_changed()`'s own comment. Placed
+    // ahead of every early-return below so it still logs area changes even while no horse is
+    // loaded (e.g. the cutscene's earlier legs).
+    log_area_demo_diagnostics_if_changed(horse);
 
     if (horse == nullptr) {
         // No horse actor is currently loaded (e.g. a different area, or before Epona is tamed).
