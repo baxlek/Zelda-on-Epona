@@ -392,8 +392,19 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         // the technique already used for her *position* above (and vanilla's own, for ordinary
         // riding): a local offset carried through `horse->getRootMtx()`, just keeping the matrix's
         // rotation part intact instead of discarding it in favor of a separately-reconstructed one.
+        //
+        // Epona's joint-0 matrix itself isn't oriented the same way `shape_angle`'s Y axis treats
+        // "facing forward" -- built straight from the model's own root joint, it's rotated a fixed
+        // 90 degrees clockwise relative to that convention (Zelda's seat position above was already
+        // correct through this same matrix, since translation isn't affected by that discrepancy,
+        // but her orientation visibly came out facing off Epona's right side instead of forward).
+        // Correcting for it here, as a local Y rotation applied *after* the translate above (so it
+        // turns her in place around her already-correctly-placed seat position rather than moving
+        // her), rotates her the needed 90 degrees counter-clockwise to align with Epona's actual
+        // forward direction.
         mDoMtx_stack_c::copy(horse->getRootMtx());
         mDoMtx_stack_c::transM(localPos.x, localPos.y, localPos.z);
+        mDoMtx_stack_c::YrotM(-0x4000);
         zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
     } else {
         mDoMtx_stack_c::transS(zelda->current.pos);
