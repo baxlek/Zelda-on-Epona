@@ -665,7 +665,9 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
 // cutscenes kept running into, see the overview comment near `g_cvarShowInCutscenes` above), this
 // takes the same approach already used to hide our own spawned Zelda: shrink the prop's model down
 // to `kHiddenScale` every frame, imperceptible regardless of camera distance, leaving the actor
-// itself completely untouched and still ticking normally.
+// itself completely untouched and still ticking normally. Unlike our own Zelda's cutscene-hide
+// (scale-only, see the `cutscene visibility` notes above), the firewood prop also gets shoved deep
+// underground on top of being shrunk -- see `kFirewoodPropUndergroundOffset` below for why.
 //
 // A scale override applied only in `setBaseMtx()` was reported to not actually hide the prop in
 // practice, despite being the same technique already proven to hide our own spawned Zelda. The
@@ -715,6 +717,13 @@ static bool is_hidden_firewood_prop_cutscene() {
     return false;
 }
 
+// Scaling the prop down to `kHiddenScale` alone was reported to still leave it visible (just
+// shrunk, sitting wherever its current cut's `.bck` pose happens to place it), so in addition to
+// the scale override below, this also drags the whole model straight down by this many units --
+// far enough to clear any terrain/geometry in every one of these cutscenes' camera cuts -- which
+// should hide it regardless of whether the scale override by itself is actually taking effect.
+static const f32 kFirewoodPropUndergroundOffset = 100000.0f;
+
 static void hide_firewood_prop_model(daDemo00_c* demoAc) {
     if (demoAc == nullptr || demoAc->mModel.field_0x5d4 == nullptr) {
         return;
@@ -733,6 +742,16 @@ static void hide_firewood_prop_model(daDemo00_c* demoAc) {
         return;
     }
 
+    // Rebuilt from scratch (rather than reading back and further offsetting whatever matrix is
+    // already there) using the actor's own tracked position/angle, exactly mirroring the vanilla
+    // `setBaseMtx()` matrix build above it -- just with the Y position pushed deep underground.
+    // Being an absolute rebuild rather than an incremental adjustment, this is safe to call more
+    // than once in the same frame (both hooks below do) without compounding the offset each time.
+    cXyz hiddenPos = demoAc->current.pos;
+    hiddenPos.y -= kFirewoodPropUndergroundOffset;
+    mDoMtx_stack_c::transS(hiddenPos.x, hiddenPos.y, hiddenPos.z);
+    mDoMtx_stack_c::XYZrotM(demoAc->current.angle.x, demoAc->current.angle.y, demoAc->current.angle.z);
+    demoAc->mModel.field_0x5d4->setBaseTRMtx(mDoMtx_stack_c::get());
     demoAc->mModel.field_0x5d4->setBaseScale(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
 }
 
