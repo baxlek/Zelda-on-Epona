@@ -135,6 +135,26 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
+// `dSv_event_flag_c::M_001` ("Opening cutscene") -- set once the player has watched the game's
+// very first story cutscene: Rusl and Link riding Epona, who is visibly carrying bundles of
+// firewood to deliver, from Ordon Spring back to Ordon Village (spanning two separate stage
+// loads along the way). This mod's own spawned Zelda would look wrong riding alongside that
+// firewood, so she must stay suppressed for the entirety of this introduction, regardless of the
+// "Show Zelda during cutscenes" toggle.
+//
+// Unlike every other cutscene, this one can't be relied on to keep `daHorse_c::checkHorseDemoMode()`
+// true for its whole duration -- e.g. during the initial dialogue before Epona actually starts
+// moving, she isn't yet being puppeted by any tool-demo/scripted proc at all -- so the usual
+// `inScriptedCutscene` check in `mod_update()` doesn't catch all of it on its own. Checking this
+// save bit instead covers the entire introduction regardless of Epona's demo-mode state from one
+// frame to the next, and -- since it's simply false for a save that hasn't reached it yet, true
+// forever after -- it has no effect on any save that has already progressed past it.
+static const u16 kOpeningCutsceneEventBit = 0x1010;
+
+static bool before_opening_cutscene() {
+    return !dComIfGs_isEventBit(kOpeningCutsceneEventBit);
+}
+
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
 // than our own spawned one.
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -1571,7 +1591,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // respawned until the story's HoZelda is gone again.
     bool storyHoZeldaActive = find_other_hozelda() != nullptr;
 
-    if (storyHoZeldaActive) {
+    // See `before_opening_cutscene()`'s own comment: the game's very first story cutscene
+    // (Rusl/Link riding Epona while she carries firewood to deliver) gets the exact same
+    // unconditional treatment as `storyHoZeldaActive` -- removed outright, with no toggle
+    // override -- rather than folding it into `inScriptedCutscene` below, since that check's
+    // `checkHorseDemoMode()` isn't reliably true for this cutscene's entire duration.
+    if (storyHoZeldaActive || before_opening_cutscene()) {
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
     } else if (inScriptedCutscene) {
