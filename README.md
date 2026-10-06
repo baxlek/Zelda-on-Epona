@@ -119,6 +119,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > tick of each new `checkHorseDemoMode()` event, and latched for that event's entire remaining duration — since every
 > one of these four flags is already true from its own event's very first tick, catching them at the start is enough,
 > and latching means a transient flag clearing early mid-event can no longer flip Zelda back to hidden.
+>
+> That area-transition grace period's own countdown has to tick down in real time regardless of whatever else is or
+> isn't happening -- including long stretches with no horse actor loaded at all, e.g. most dungeons and buildings --
+> or its leftover count from one transition can carry over almost intact into however much later the next, likely
+> completely unrelated scripted event happens to begin, incorrectly tagging an unrelated story cutscene as a scene
+> transition too (and therefore always showing Zelda in it). An earlier version of this logic only advanced that
+> countdown on ticks convenient to the cutscene-category check itself, which effectively paused it for most of the
+> game and caused almost exactly that: Zelda reappearing in most/all cutscenes again.
 
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct

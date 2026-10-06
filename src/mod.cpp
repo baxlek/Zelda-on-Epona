@@ -180,6 +180,19 @@ static bool s_wasHorseDemoModeActive = false;
 // scene/room transition (including each area's one-time "first visit" cutscene and any standalone
 // "establishing shot" cutscene that plays right after loading).
 //
+// `i_areaTransitionActive` must be this tick's `poll_area_transition()` result, computed by the
+// caller *unconditionally* every single `mod_update()` tick regardless of `checkHorseDemoMode()` --
+// not computed only on the ticks this function happens to be called on. `poll_area_transition()`
+// tracks a real-time grace period countdown (`s_transitionGraceTicksRemaining`) that must keep
+// ticking down during ordinary gameplay too; calling it only while `checkHorseDemoMode()` is true
+// would instead freeze that countdown for the entire time the horse isn't in demo mode, letting
+// whatever ticks happened to be left over at that point carry over -- possibly largely intact --
+// into however much later the *next*, likely completely unrelated `checkHorseDemoMode()` event
+// happens to begin, incorrectly tagging it as a scene transition too. That was exactly the cause of
+// a regression where this mod's Zelda started reappearing in most/all story cutscenes again: almost
+// any cutscene starting within a while of the previous one left the grace counter nonzero, so its
+// own first-tick check below kept finding `i_areaTransitionActive` true by pure coincidence.
+//
 // Naively re-checking these conditions fresh every tick isn't enough, because none of them are
 // guaranteed to stay true for the *entire* duration of the single `checkHorseDemoMode()` event they
 // mark the start of:
@@ -199,10 +212,10 @@ static bool s_wasHorseDemoModeActive = false;
 // `checkHorseDemoMode()` goes false again and some later event begins anew. Since every excluded
 // category's own flag is already true from the very first tick of its event (the horse sets
 // `FLG0_UNK_10000000` the instant the gallop-back starts; `dComIfGp_event_getTalkPartner()` is set
-// as soon as a conversation begins; `poll_area_transition()` is true from the moment a stage/room
+// as soon as a conversation begins; `i_areaTransitionActive` is true from the moment a stage/room
 // change is requested), latching at the start is enough to correctly cover cases where the specific
 // transient signal ends before the event itself actually does.
-static bool poll_excluded_cutscene_category(daHorse_c* horse) {
+static bool poll_excluded_cutscene_category(daHorse_c* horse, bool i_areaTransitionActive) {
     bool horseDemoModeActive = horse->checkHorseDemoMode();
     if (!horseDemoModeActive) {
         s_currentEventIsExcludedCategory = false;
@@ -212,7 +225,7 @@ static bool poll_excluded_cutscene_category(daHorse_c* horse) {
 
     bool excludedRightNow = horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) ||
                             dComIfGp_event_getTalkPartner() != nullptr || is_title_screen() ||
-                            poll_area_transition();
+                            i_areaTransitionActive;
 
     if (!s_wasHorseDemoModeActive) {
         // The very first tick of a new event: whatever the excluded-category checks say right now
@@ -1465,6 +1478,21 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    // Must run unconditionally, every single tick, regardless of whether a horse actor currently
+    // exists or is in demo mode: `poll_area_transition()`'s grace-period countdown is a real-time
+    // timer, and it needs to actually keep ticking down during every tick it's conceptually active
+    // for (including stretches with no horse loaded at all, e.g. most dungeons and buildings) for
+    // it to mean anything by the time some later cutscene checks it. Calling it only on the ticks
+    // convenient to the checks further down (e.g. only while a horse exists and is already in demo
+    // mode) would instead freeze its countdown for the entirety of every tick in between, letting
+    // whatever's left over at that point carry over intact into however much later the *next*
+    // scripted event happens to begin -- incorrectly tagging an otherwise unrelated cutscene as a
+    // scene transition too. That was exactly the cause of a regression where this mod's Zelda
+    // started reappearing in most/all story cutscenes again: by the time any later cutscene first
+    // checked it, the leftover grace count from an earlier, unrelated transition was still sitting
+    // above zero far more often than not.
+    bool areaTransitionActive = poll_area_transition();
+
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
@@ -1519,7 +1547,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // has to latch across the whole event rather than re-checking its own transient flags fresh
     // every tick.
     bool inScriptedCutscene =
-        horse->checkHorseDemoMode() && !poll_excluded_cutscene_category(horse);
+        horse->checkHorseDemoMode() && !poll_excluded_cutscene_category(horse, areaTransitionActive);
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
