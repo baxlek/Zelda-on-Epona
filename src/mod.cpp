@@ -149,10 +149,18 @@ static bool is_title_screen() {
 // save bit instead covers the entire introduction regardless of Epona's demo-mode state from one
 // frame to the next, and -- since it's simply false for a save that hasn't reached it yet, true
 // forever after -- it has no effect on any save that has already progressed past it.
+//
+// This bit is unset not just for a brand-new save but also for the title screen's own attract-mode
+// cutscene (`is_title_screen()`, see that function's own comment) -- the title screen runs the
+// exact same `OPENING_SCENE_e` proc on every boot and "quit to title", without ever loading an
+// actual save's progress, so the bit simply reads as whatever a fresh/default save reads as there
+// too. Unlike the real new-save introduction, the title screen must always show this mod's Zelda
+// (see `is_title_screen()`), so it's explicitly excluded here the same way it's already excluded
+// from `inScriptedCutscene` below.
 static const u16 kOpeningCutsceneEventBit = 0x1010;
 
 static bool before_opening_cutscene() {
-    return !dComIfGs_isEventBit(kOpeningCutsceneEventBit);
+    return !dComIfGs_isEventBit(kOpeningCutsceneEventBit) && !is_title_screen();
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
