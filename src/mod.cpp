@@ -1561,12 +1561,28 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // return immediately while it's set -- vanilla Epona is loaded but neither drawn nor
         // given a chance to update her physics/collision. She stays that way until the player
         // calls her with the grass whistle (`callHorseSubstance()` clears the flag the moment
-        // it's set). Without this check, this mod would still spawn/keep its own Zelda riding a
-        // horse that is itself invisible and intangible, leaving Zelda floating there on her own
-        // with no visible Epona underneath her. Treat this exactly like the "no horse loaded"
-        // case above.
-        remove_spawned_zelda();
-        s_hideSpawnedZeldaInCutscene = false;
+        // it's set).
+        //
+        // An earlier version of this check called `remove_spawned_zelda()` here, matching the
+        // "no horse loaded" case above -- but, unlike that case, `horse` itself is a live object
+        // here, and deleting our own spawned actor without first detaching it
+        // (`horse->setZeldaActor(nullptr)`) leaves `daHorse_c::m_zeldaActorKeep` holding a
+        // dangling pointer to the now-freed actor until `daHorse_c::execute()` happens to refresh
+        // it -- which that early-return above means won't happen until *after* this flag clears.
+        // Reading that dangling pointer in the meantime -- e.g. `callHorseSubstance()` itself,
+        // called the instant the player uses the grass whistle, unconditionally dereferences
+        // `m_zeldaActorKeep.getActor()` to check `checkSingleRide()` -- crashes (SIGABRT). (See
+        // `kHiddenScale`'s own comment: this codebase has already hit that same delete-near-a-
+        // horse-demo-boundary crash once before, which is why the ordinary cutscene-hide case
+        // below hides her in place instead of deleting/recreating her too.)
+        //
+        // Mirroring exactly what the game itself does to Epona in this state -- instead of
+        // deleting Zelda, just hide her (unconditionally, regardless of the "Show Zelda during
+        // cutscenes" toggle) using that same in-place scale-hide mechanism. If she isn't spawned
+        // yet, this simply does nothing until she is (see the final `else if` below, reached once
+        // this flag clears); if she already exists, she's hidden without ever being deleted, so
+        // there's no dangling `m_zeldaActorKeep` pointer for anything to read.
+        s_hideSpawnedZeldaInCutscene = true;
         return MOD_OK;
     }
 
