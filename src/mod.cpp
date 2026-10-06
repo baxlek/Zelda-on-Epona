@@ -256,10 +256,10 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // seat only (no Link riding): the dual-ride (rear) seat already works correctly via vanilla's own
 // computation and was never part of this bug.
 //
-// This same post-hook also re-asserts Zelda's rotation (`shape_angle = horse->shape_angle`, the
-// exact copy vanilla's own `setMatrix()` already performs unconditionally) on every single frame
-// of any scripted cutscene while she's riding solo, not just while blending a rear -- see that
-// part of the hook's body below for why.
+// This same post-hook also fixes a separate rotation-mismatch bug during scripted cutscenes while
+// riding solo: see the `inCutscene` branch further down in the hook's body for why a plain
+// `shape_angle = horse->shape_angle` copy (vanilla's own, unconditional, already-correct technique
+// for ordinary gameplay) isn't actually enough there, and what's done differently instead.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
 // How small a scale to shrink this mod's own spawned Zelda's rendered model to while she should
@@ -335,21 +335,7 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     cLib_chaseF(&s_turnStandBlend, horse->checkTurnStand() ? 1.0f : 0.0f, 1.0f / 8.0f);
 
     // Whether a scripted cutscene (as opposed to ordinary player-driven riding) is currently
-    // puppeting Epona. Outside of a cutscene, vanilla's own unconditional `shape_angle =
-    // horse->shape_angle` copy (already run by the time this post-hook fires, inside
-    // `daHoZelda_c::setMatrix()` itself) is solid -- it's exactly how `daAlink_c` keeps Link's own
-    // riding rotation in sync with Epona the entire game, with no reported issues. But solo-riding
-    // Zelda (this mod's whole premise) is a combination vanilla itself never exercises outside of
-    // that one scripted duel, which always places its own precisely-choreographed HoZelda rather
-    // than relying on `setMatrix()`'s general-purpose solo-seat path. Several of Epona's scripted
-    // cutscene demo modes (`setDemoData()` in `d_a_horse.cpp`) drive her rotation through paths
-    // other than the one the general gameplay/rearing case exercises, and this general-purpose
-    // path has no guarantee of staying byte-for-byte in sync with whatever `shape_angle` ends up
-    // holding once such a demo mode is done with it for the frame. Rather than chase down every
-    // individual demo mode that might leave the two out of step, re-asserting the copy here --
-    // unconditionally, every single cutscene frame she's riding solo -- guarantees her drawn
-    // rotation always matches Epona's own for that frame, regardless of exactly which demo mode is
-    // currently puppeting the horse.
+    // puppeting Epona.
     bool inCutscene = horse->checkHorseDemoMode();
 
     // Fully settled outside of a rear and outside of a cutscene: vanilla's own computation (already
@@ -358,41 +344,62 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    // Position only needs overriding while blending out of/into a rear; outside of that, vanilla's
-    // own solo-seat position (already computed by the time this post-hook fires) is left as-is --
-    // only her rotation is in scope for the cutscene case above.
+    // Vanilla's own solo-seat local offset (`localFrontHorseRidePos` in `d_a_hozelda.cpp`), kept
+    // here so it can be blended against during a rear (and reused as-is otherwise) -- outside of a
+    // rear this is exactly what vanilla already uses, so blending starts and ends at the same place
+    // vanilla would have placed her.
+    static const Vec kZeldaFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
+
+    // `daAlink_c`'s own local ride offset for Link's solo riding position (`l_localHorseRidePos` in
+    // `d_a_alink.cpp`, a file-local constant we can't reference directly). Blending toward it in
+    // place of Zelda's own, further-forward/higher offset is the whole point of the rear fix: it's
+    // the offset Link's own riding position already proves doesn't clip or float during a rear.
+    static const Vec kLinkHorseRidePos = {-68.208984f, 41.609924f, 0.883789f};
+
+    Vec localPos = kZeldaFrontHorseRidePos;
     if (s_turnStandBlend > 0.0f) {
-        // Vanilla's own solo-seat local offset (`localFrontHorseRidePos` in `d_a_hozelda.cpp`),
-        // kept here only so it can be blended against -- outside of a rear this is exactly what
-        // vanilla already uses, so blending starts and ends at the same place vanilla would have
-        // placed her.
-        static const Vec kZeldaFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};
+        localPos.x += (kLinkHorseRidePos.x - kZeldaFrontHorseRidePos.x) * s_turnStandBlend;
+        localPos.y += (kLinkHorseRidePos.y - kZeldaFrontHorseRidePos.y) * s_turnStandBlend;
+        localPos.z += (kLinkHorseRidePos.z - kZeldaFrontHorseRidePos.z) * s_turnStandBlend;
 
-        // `daAlink_c`'s own local ride offset for Link's solo riding position
-        // (`l_localHorseRidePos` in `d_a_alink.cpp`, a file-local constant we can't reference
-        // directly). Blending toward it in place of Zelda's own, further-forward/higher offset is
-        // the whole point of the fix: it's the offset Link's own riding position already proves
-        // doesn't clip or float during a rear.
-        static const Vec kLinkHorseRidePos = {-68.208984f, 41.609924f, 0.883789f};
-
-        Vec blendedPos = {
-            kZeldaFrontHorseRidePos.x +
-                (kLinkHorseRidePos.x - kZeldaFrontHorseRidePos.x) * s_turnStandBlend,
-            kZeldaFrontHorseRidePos.y +
-                (kLinkHorseRidePos.y - kZeldaFrontHorseRidePos.y) * s_turnStandBlend,
-            kZeldaFrontHorseRidePos.z +
-                (kLinkHorseRidePos.z - kZeldaFrontHorseRidePos.z) * s_turnStandBlend,
-        };
-
-        mDoMtx_multVec(horse->getRootMtx(), &blendedPos, &zelda->current.pos);
+        mDoMtx_multVec(horse->getRootMtx(), &localPos, &zelda->current.pos);
     }
 
+    // Kept in sync for other systems that read her logical transform (e.g. the horse-rider-flag
+    // clearing and reins handling in `mod_update()`/`on_hozelda_execute_post`), even though the
+    // drawn matrix itself is no longer reconstructed from these during a cutscene (see below).
     zelda->shape_angle = horse->shape_angle;
     zelda->current.angle.y = zelda->shape_angle.y;
 
-    mDoMtx_stack_c::transS(zelda->current.pos);
-    mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
-    zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+    if (inCutscene) {
+        // Several of Epona's scripted cutscene "tool demo" modes (`daHorse_c::procToolDemo()` in
+        // `d_a_horse.cpp`) drive her purely through a baked animation root-motion track on her own
+        // model's joint 0, *without* ever touching `shape_angle` at all -- the demo data's rotate
+        // channel (`dDemo_actor_c::checkEnable(ENABLE_ROTATE_e)`) is frequently left unset for such
+        // clips, relying entirely on the animation itself to turn her body. `horse->shape_angle`
+        // then simply stays frozen at whatever heading she had before the cutscene started, even
+        // while Epona's own drawn body visibly swivels via that animation -- exactly the "doesn't
+        // face forward" bug, since a `shape_angle`-only copy (as used below for ordinary riding)
+        // can't see or reproduce animation-only root motion that never touches `shape_angle` at
+        // all.
+        //
+        // `horse->getRootMtx()` (her own model's joint 0, read fresh after Epona's own `calc()` for
+        // this frame already ran) *does* reflect that root motion -- it's the actual matrix Epona
+        // herself is drawn with. So instead of reconstructing Zelda's drawn matrix from the
+        // `shape_angle` Euler angles (which may be stale), her whole base matrix is built directly
+        // from that same joint matrix plus her local seat offset, rigidly gluing her orientation to
+        // Epona's own drawn body for every cutscene frame, baked root motion or not. This mirrors
+        // the technique already used for her *position* above (and vanilla's own, for ordinary
+        // riding): a local offset carried through `horse->getRootMtx()`, just keeping the matrix's
+        // rotation part intact instead of discarding it in favor of a separately-reconstructed one.
+        mDoMtx_stack_c::copy(horse->getRootMtx());
+        mDoMtx_stack_c::transM(localPos.x, localPos.y, localPos.z);
+        zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+    } else {
+        mDoMtx_stack_c::transS(zelda->current.pos);
+        mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
+        zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+    }
 }
 
 // --- Auto-targeting nearby enemies with Light Arrows ---------------------------------------
