@@ -167,6 +167,68 @@ static bool poll_area_transition() {
     return nextStageEnabledNow || s_transitionGraceTicksRemaining > 0;
 }
 
+// Whether the always-excluded-category check (`poll_excluded_cutscene_category()` below) found a
+// match at some point during the `daHorse_c::checkHorseDemoMode()` event currently in progress.
+// Latched on, not just read fresh every tick: see that function's comment for why.
+static bool s_currentEventIsExcludedCategory = false;
+static bool s_wasHorseDemoModeActive = false;
+
+// Whether the scripted event currently puppeting Epona (if any, i.e. whenever
+// `daHorse_c::checkHorseDemoMode()` is true) belongs to one of the categories that should always
+// keep this mod's Zelda visible regardless of the "Show Zelda during cutscenes" toggle: the
+// horse-call/grass-whistle gallop-back, an NPC conversation, the opening title screen, or a
+// scene/room transition (including each area's one-time "first visit" cutscene and any standalone
+// "establishing shot" cutscene that plays right after loading).
+//
+// Naively re-checking these conditions fresh every tick isn't enough, because none of them are
+// guaranteed to stay true for the *entire* duration of the single `checkHorseDemoMode()` event they
+// mark the start of:
+//
+//  - `daHorse_c::FLG0_UNK_10000000` (the horse-call gallop-back) is cleared by `procMove()` the
+//    moment Epona arrives/times out/hits a wall, but the camera's own "establishing shot" of her
+//    arrival can keep running -- and keep the same underlying event (and thus
+//    `checkHorseDemoMode()`) active -- for a little while after that.
+//  - `poll_area_transition()`'s grace period is a fixed, deliberately approximate number of ticks;
+//    a slow-loading area or a longer-than-usual first-visit/establishing-shot cutscene can easily
+//    outlast it while `checkHorseDemoMode()` is still true for the same event.
+//
+// So instead of trusting the instantaneous value of these checks, this function latches: the first
+// tick a new `checkHorseDemoMode()` event starts, it records whether any excluded category applies
+// *at that moment*, and keeps returning that same answer for as long as `checkHorseDemoMode()`
+// stays continuously true -- i.e. for the event's entire real duration -- only re-evaluating once
+// `checkHorseDemoMode()` goes false again and some later event begins anew. Since every excluded
+// category's own flag is already true from the very first tick of its event (the horse sets
+// `FLG0_UNK_10000000` the instant the gallop-back starts; `dComIfGp_event_getTalkPartner()` is set
+// as soon as a conversation begins; `poll_area_transition()` is true from the moment a stage/room
+// change is requested), latching at the start is enough to correctly cover cases where the specific
+// transient signal ends before the event itself actually does.
+static bool poll_excluded_cutscene_category(daHorse_c* horse) {
+    bool horseDemoModeActive = horse->checkHorseDemoMode();
+    if (!horseDemoModeActive) {
+        s_currentEventIsExcludedCategory = false;
+        s_wasHorseDemoModeActive = false;
+        return false;
+    }
+
+    bool excludedRightNow = horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) ||
+                            dComIfGp_event_getTalkPartner() != nullptr || is_title_screen() ||
+                            poll_area_transition();
+
+    if (!s_wasHorseDemoModeActive) {
+        // The very first tick of a new event: whatever the excluded-category checks say right now
+        // is the one chance to catch them, since by definition they're all true from their own
+        // event's first tick onward.
+        s_currentEventIsExcludedCategory = excludedRightNow;
+    } else if (excludedRightNow) {
+        // Mid-event: only ever latch further toward "excluded", never back away from it, so a
+        // transient signal going false part-way through doesn't un-exclude the rest of the event.
+        s_currentEventIsExcludedCategory = true;
+    }
+
+    s_wasHorseDemoModeActive = true;
+    return s_currentEventIsExcludedCategory;
+}
+
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
 // than our own spawned one.
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -1449,39 +1511,15 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // `dComIfGp_getEvent()->isOrderOK()` is false, whether or not that event has anything to do
     // with the horse at all -- so without further narrowing, this would also misfire for things
     // like a plain NPC conversation that happens to take place while Zelda's riding along. Several
-    // cases always need to stay visible regardless of the "Show Zelda during cutscenes" toggle:
-    //
-    //  - The horse-call/grass-whistle gallop-back. `checkDemoAction()` clears `field_0x16b8` back
-    //    to 0 (and `FLG0_CALL_HORSE` with it) again within the very same tick `callHorseSubstance()`
-    //    set it, so `checkOriginalDemo()`/`checkHorseDemoMode()` are true for at most one frame and
-    //    can't be used to recognize the gallop-back at all -- an earlier version of this exclusion
-    //    relied on `checkOriginalDemo()` believing it covered the whole sequence, which it never
-    //    actually did. Worse, whatever concurrent camera work plays alongside the gallop-back (an
-    //    "establishing shot" of Epona running back) keeps a real `dComIfGp` event active the whole
-    //    time, which independently keeps `checkHorseDemoMode()` true (via `field_0x16b8 == 2`) for
-    //    the gallop-back's entire duration -- so without a further exclusion, Zelda is hidden for
-    //    virtually all of it regardless. The actual, unique flag for this sequence is
-    //    `FLG0_UNK_10000000`, which `checkDemoAction()` sets the moment it clears `FLG0_CALL_HORSE`
-    //    and which `procMove()` only clears again once the gallop-back truly ends (arrival,
-    //    timeout, or a wall hit) -- nothing else in the engine sets or clears this flag, making it
-    //    the correct signal to track for this entire sequence.
-    //  - Any NPC conversation (`dComIfGp_event_getTalkPartner()` is non-null from the moment a
-    //    conversation starts until it ends), since -- per the above -- simply talking to an NPC
-    //    anywhere near Epona otherwise flags the horse as "in demo mode" for its entire duration
-    //    despite having nothing to do with the horse.
-    //  - The opening title screen (`is_title_screen()`, which drives Epona the exact same way a
-    //    cutscene does).
-    //  - Scene/room transitions, including each area's own one-time "first time here" cutscene
-    //    (`poll_area_transition()`, true from the moment a stage/room change is requested through a
-    //    grace period after the new scene finishes loading -- see its comment for why a grace
-    //    period is needed rather than just `dComIfGp_isEnableNextStage()` on its own). This also
-    //    covers the standalone "establishing shot" cutscenes that play on their own (not tied to a
-    //    horse-call) right after a stage/room change, since those are driven by the same
-    //    `dComIfGp_isEnableNextStage()`/event plumbing.
-    bool inScriptedCutscene = horse->checkHorseDemoMode() &&
-                              !horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) &&
-                              dComIfGp_event_getTalkPartner() == nullptr && !is_title_screen() &&
-                              !poll_area_transition();
+    // cases always need to stay visible regardless of the "Show Zelda during cutscenes" toggle --
+    // the horse-call/grass-whistle gallop-back, any NPC conversation, the opening title screen, and
+    // scene/room transitions (including each area's one-time "first time here" cutscene and any
+    // standalone "establishing shot" cutscene right after loading) -- see
+    // `poll_excluded_cutscene_category()`'s comment for how those are detected and why that check
+    // has to latch across the whole event rather than re-checking its own transient flags fresh
+    // every tick.
+    bool inScriptedCutscene =
+        horse->checkHorseDemoMode() && !poll_excluded_cutscene_category(horse);
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives

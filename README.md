@@ -94,12 +94,8 @@ archery duel, where she rides alone) is never touched or duplicated.
 > since none of them are really the kind of story cutscene this default is meant to hide her for:
 >
 > - The horse call/grass whistle, including any camera work (an "establishing shot" of Epona running back) that
->   plays alongside it. The call briefly reuses some of the same demo-mode plumbing for its own unrelated "gallop
->   back to the player" behavior, but that plumbing (`field_0x16b8`, `daHorse_c::checkOriginalDemo()`) only stays
->   set for a single tick, and any concurrent camera cutscene independently keeps `checkHorseDemoMode()` true for the
->   gallop-back's whole duration anyway — so neither one can be used to recognize this sequence. It's excluded
->   instead via `daHorse_c::FLG0_UNK_10000000`, the one flag the game sets for exactly as long as Epona is actually
->   running back in response to the call and nothing else.
+>   plays alongside it, excluded via `daHorse_c::FLG0_UNK_10000000`, the flag the game sets for as long as Epona is
+>   actually running back in response to the call.
 > - Any NPC conversation, since simply talking to an NPC anywhere near Epona otherwise flags the horse as "in demo
 >   mode" for the conversation's entire duration despite having nothing to do with the horse (excluded via
 >   `dComIfGp_event_getTalkPartner()`, non-null from the moment a conversation starts until it ends).
@@ -111,6 +107,18 @@ archery duel, where she rides alone) is never touched or duplicated.
 >   finishes loading) plus a short grace period afterward, since that flag only covers the loading screen itself —
 >   those cutscenes actually start a little after loading finishes, while the new scene is still fading in, and the
 >   engine doesn't expose a dedicated signal for them.
+>
+> None of these four flags is actually guaranteed to stay true for the *entire* cutscene it marks the start of —
+> `FLG0_UNK_10000000` clears the moment Epona physically stops moving, but the camera's own "establishing shot" of
+> her arrival can keep running (and keep `checkHorseDemoMode()` active) for a little while longer; the area-transition
+> grace period is a fixed, deliberately approximate number of ticks that a slower-than-usual load or a longer
+> first-visit/establishing-shot cutscene can easily outlast. Re-checking these flags fresh every tick, as an earlier
+> version of this logic did, meant Zelda could start out correctly visible at the start of one of these cutscenes and
+> then suddenly get hidden partway through once the specific flag it relied on cleared, even though the same
+> underlying `checkHorseDemoMode()` event was still ongoing. Instead, the category is now decided once, on the first
+> tick of each new `checkHorseDemoMode()` event, and latched for that event's entire remaining duration — since every
+> one of these four flags is already true from its own event's very first tick, catching them at the start is enough,
+> and latching means a transient flag clearing early mid-event can no longer flip Zelda back to hidden.
 
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
