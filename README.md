@@ -88,76 +88,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > "tool demo" state an earlier version of this check looked at), and she reappears automatically once the cutscene
 > ends. This is purely a visibility toggle: cutscenes that already feature their own story-placed Zelda (such as
 > the horseback archery duel against Ganondorf) are completely unaffected either way, since the mod only ever
-> manages the actor it spawned itself. `checkHorseDemoMode()` is actually broader than just "a story cutscene is
-> puppeting Epona", though — the game sets it any time *any* scripted event is active, whether or not that event
-> has anything to do with the horse at all — so several further cases always show her regardless of the toggle,
-> since none of them are really the kind of story cutscene this default is meant to hide her for:
+> manages the actor it spawned itself.
 >
-> - The horse call/grass whistle, including any camera work (an "establishing shot" of Epona running back) that
->   plays alongside it, excluded via `daHorse_c::FLG0_UNK_10000000`, the flag the game sets for as long as Epona is
->   actually running back in response to the call.
-> - Any NPC conversation, since simply talking to an NPC anywhere near Epona otherwise flags the horse as "in demo
->   mode" for the conversation's entire duration despite having nothing to do with the horse (excluded via
->   `dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e`, the one mode the engine's event-control class only ever
->   enters for genuine dialogue). An earlier version of this check instead tested
->   `dComIfGp_event_getTalkPartner() != nullptr`, which turned out not to mean "a conversation is in progress" at
->   all: that accessor is set by the event-control class for *every* kind of event it handles — ordinary scripted
->   demos, door/treasure events, catch events, and more, not just real conversations — to whichever of the event's
->   own request/target actor isn't the player, and the engine's own camera-script code uses it purely as a generic
->   "the event's other-party actor" symbolic reference for any event type's camera direction data. Checking it this
->   way wrongly excluded (and so kept Zelda incorrectly visible through) any ordinary story cutscene that happened to
->   be implemented as an NPC-requested scripted demo rather than a player-compulsory one — i.e. most cutscenes NPCs
->   themselves trigger, not just actual dialogue — which is exactly the kind of cutscene she should still be hidden
->   for. This was a major cause of Zelda repeatedly showing up in cutscenes she shouldn't.
-> - The opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene
->   does but should always show her.
-> - Area/scene transitions, including each area's own one-time "first time here" introductory cutscene and any
->   standalone "establishing shot" cutscene that plays right after loading. These are excluded via
->   `dComIfGp_isEnableNextStage()` (true from the moment a stage/room change is requested until the new scene
->   finishes loading) plus a short grace period afterward, since that flag only covers the loading screen itself —
->   those cutscenes actually start a little after loading finishes, while the new scene is still fading in, and the
->   engine doesn't expose a dedicated signal for them.
->
-> None of these four flags is actually guaranteed to stay true for the *entire* cutscene it marks the start of —
-> `FLG0_UNK_10000000` clears the moment Epona physically stops moving, but the camera's own "establishing shot" of
-> her arrival can keep running (and keep `checkHorseDemoMode()` active) for a little while longer; the area-transition
-> grace period is a fixed, deliberately approximate number of ticks that a slower-than-usual load or a longer
-> first-visit/establishing-shot cutscene can easily outlast. Re-checking these flags fresh every tick, as an earlier
-> version of this logic did, meant Zelda could start out correctly visible at the start of one of these cutscenes and
-> then suddenly get hidden partway through once the specific flag it relied on cleared, even though the same
-> underlying `checkHorseDemoMode()` event was still ongoing. Instead, the category is now decided once, on the first
-> tick of each new `checkHorseDemoMode()` event, and latched for that event's entire remaining duration — since every
-> one of these four flags is already true from its own event's very first tick, catching them at the start is enough,
-> and latching means a transient flag clearing early mid-event can no longer flip Zelda back to hidden.
->
-> That area-transition grace period's own countdown has to tick down in real time regardless of whatever else is or
-> isn't happening -- including long stretches with no horse actor loaded at all, e.g. most dungeons and buildings --
-> or its leftover count from one transition can carry over almost intact into however much later the next, likely
-> completely unrelated scripted event happens to begin, incorrectly tagging an unrelated story cutscene as a scene
-> transition too (and therefore always showing Zelda in it). An earlier version of this logic only advanced that
-> countdown on ticks convenient to the cutscene-category check itself, which effectively paused it for most of the
-> game and caused almost exactly that: Zelda reappearing in most/all cutscenes again.
->
-> That per-event latch has to be reset every single tick `checkHorseDemoMode()` is false, regardless of whether
-> anything else currently cares about the result -- which means the category check must actually be called every
-> tick, not merely referenced as one side of a `&&` with `checkHorseDemoMode()` itself. Short-circuit evaluation would
-> skip calling it entirely the moment `checkHorseDemoMode()` goes false, silently skipping that reset too and leaving
-> whichever category the *previous* cutscene landed on (excluded or not) stuck in place indefinitely: the next
-> cutscene would then look like a continuation of the old one instead of a fresh event to classify from scratch. An
-> earlier version of this logic had exactly that mistake, which meant that once any single excluded-category
-> cutscene played once (even something as mundane as talking to an NPC, or the opening title screen), every ordinary
-> story cutscene afterward kept silently reusing that same stale "excluded" answer and stayed unaffected by the
-> toggle -- i.e. Zelda kept showing up in scenes she shouldn't, for the rest of that play session.
->
-> That reset has to run on every tick the category check itself isn't called at all, too -- not just every tick it's
-> called and finds `checkHorseDemoMode()` false. Riding the horse into a dungeon or building despawns the horse actor
-> entirely, and `mod_update()` has its own separate early return for that case (there's no horse actor left to even
-> pass the category check); that early return used to skip resetting the latch completely, leaving it frozen at
-> whatever it last was for however long the horse stayed despawned. The moment the horse reappeared, that stale
-> verdict got wrongly reused for the next `checkHorseDemoMode()` event -- which, by then, is almost always a
-> completely different, unrelated cutscene -- rather than being freshly classified from scratch. This is the same
-> underlying mistake as the short-circuit bug just above, surfacing through a second, separate gap in when the reset
-> actually ran.
+> The only exception is the opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona
+> through the exact same `checkHorseDemoMode()` plumbing as a real cutscene but should always show her regardless
+> of the toggle (`is_title_screen()`). Every other cutscene-like event — including the horse-call/grass-whistle
+> gallop-back, NPC conversations, and area/scene transitions — is treated the same as any other story cutscene and
+> hidden by default; she's never kept visible for those just because the horse happens to only briefly be in demo
+> mode for them.
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an

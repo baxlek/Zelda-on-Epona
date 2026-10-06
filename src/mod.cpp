@@ -135,157 +135,6 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// Whether the event currently running (if any) is specifically an NPC conversation -- a dialogue
-// box, not any other kind of scripted cutscene -- so this mod's Zelda can stay visible through
-// ordinary dialogue regardless of the "Show Zelda during cutscenes" toggle (see
-// `poll_excluded_cutscene_category()`'s comment for why that's needed at all).
-//
-// This deliberately checks `dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e` rather than
-// `dComIfGp_event_getTalkPartner() != nullptr`, which an earlier version of this check used
-// instead. `getTalkPartner()` (`dEvt_control_c::getPtT()`) is not actually an "is a conversation
-// in progress" signal at all -- `dEvt_control_c::setParam()` sets it for *every* kind of event this
-// control class handles (ordinary scripted demos, door/treasure events, catch events, etc.), not
-// just real conversations, to whichever of the event's own request/target actor isn't the player;
-// the engine's own camera-script code (`dCamera_c::getEvActor()`'s `'@TAL'` case) uses it purely as
-// a generic "the event's other-party actor" symbolic reference for any event type's camera
-// direction data, confirming it was never meant to mean "a conversation is happening". Using it
-// this way excluded (and therefore incorrectly kept Zelda visible through) any ordinary story
-// cutscene that happened to be implemented as an NPC-requested scripted demo rather than a
-// player-compulsory one -- i.e. most cutscenes NPCs themselves trigger, not just actual dialogue --
-// which is exactly the kind of cutscene Zelda should still be hidden for. `getMode()` instead
-// reports which of `dEvt_mode_e`'s four modes the control class is actually in, and is only ever
-// set to `dEvt_mode_TALK_e` by `talkCheck()`/`talkXyCheck()` -- the two functions that handle real
-// NPC dialogue -- as opposed to `dEvt_mode_DEMO_e` (sets through `demoCheck()`/`doorCheck()`/
-// `itemCheck()`/`potentialCheck()`/`catchCheck()`, i.e. ordinary scripted cutscenes) or
-// `dEvt_mode_COMPULSORY_e` (player-triggered stage demos).
-static bool is_npc_conversation_active() {
-    return dComIfGp_getEvent()->getMode() == dEvt_mode_TALK_e;
-}
-
-// How many extra ticks of `mod_update()` to keep excluding cutscene-hiding for after a stage/room
-// transition's loading screen finishes (see `s_transitionGraceTicksRemaining` below).
-static const int kTransitionGraceTicks = 90;
-
-// Sticks around nonzero for a little while after `dComIfGp_isEnableNextStage()` itself goes false
-// again, i.e. after a stage/room transition's loading screen finishes. `isEnableNextStage()` only
-// covers the loading screen itself -- it's turned off the instant the new scene starts
-// initializing (`dScnPly_c::phase_1()` calls `dComIfGp_offEnableNextStage()` right away) -- but
-// both the ordinary camera pan the game plays while riding between areas and a new area's own
-// one-time "first time here" introductory cutscene start shortly *after* that, while the new scene
-// is still fading in. There's no dedicated engine signal for "one of those is currently playing",
-// so this grace period is a deliberately generous approximation: better to let a few ordinary
-// frames right after loading go unhidden than to clip either kind of cutscene early.
-static int s_transitionGraceTicksRemaining = 0;
-static bool s_wasNextStageEnabled = false;
-
-// Updates `s_transitionGraceTicksRemaining` from the current `dComIfGp_isEnableNextStage()` value
-// and returns whether a stage/room transition (its loading screen, or the grace period following
-// it) is currently considered active.
-static bool poll_area_transition() {
-    bool nextStageEnabledNow = dComIfGp_isEnableNextStage();
-    if (s_wasNextStageEnabled && !nextStageEnabledNow) {
-        s_transitionGraceTicksRemaining = kTransitionGraceTicks;
-    }
-    s_wasNextStageEnabled = nextStageEnabledNow;
-
-    if (s_transitionGraceTicksRemaining > 0) {
-        s_transitionGraceTicksRemaining--;
-    }
-    return nextStageEnabledNow || s_transitionGraceTicksRemaining > 0;
-}
-
-// Whether the always-excluded-category check (`poll_excluded_cutscene_category()` below) found a
-// match at some point during the `daHorse_c::checkHorseDemoMode()` event currently in progress.
-// Latched on, not just read fresh every tick: see that function's comment for why.
-static bool s_currentEventIsExcludedCategory = false;
-static bool s_wasHorseDemoModeActive = false;
-
-// Resets the excluded-category latch above, as if no `checkHorseDemoMode()` event were in
-// progress. Must be called on every tick the latch's own owning function,
-// `poll_excluded_cutscene_category()`, *isn't* called -- i.e. every tick there's no horse actor to
-// even pass it, not just every tick that function itself observes `checkHorseDemoMode()` as false
-// -- or the exact same stale-latch bug described in that function's comment resurfaces through this
-// other gap: riding into a dungeon/building despawns the horse actor entirely (see `mod_update()`'s
-// `horse == nullptr` branch), which used to return early without ever calling
-// `poll_excluded_cutscene_category()` at all, silently skipping this same reset for however long
-// the horse stays unloaded. Any excluded/non-excluded verdict latched from whatever cutscene was
-// last active before the horse despawned would then survive completely untouched across that entire
-// stretch, and get wrongly treated as still describing the very next `checkHorseDemoMode()` event
-// once the horse reappears -- even though that event has nothing to do with the one the latch
-// actually came from.
-static void reset_excluded_cutscene_latch() {
-    s_currentEventIsExcludedCategory = false;
-    s_wasHorseDemoModeActive = false;
-}
-
-// Whether the scripted event currently puppeting Epona (if any, i.e. whenever
-// `daHorse_c::checkHorseDemoMode()` is true) belongs to one of the categories that should always
-// keep this mod's Zelda visible regardless of the "Show Zelda during cutscenes" toggle: the
-// horse-call/grass-whistle gallop-back, an NPC conversation, the opening title screen, or a
-// scene/room transition (including each area's one-time "first visit" cutscene and any standalone
-// "establishing shot" cutscene that plays right after loading).
-//
-// `i_areaTransitionActive` must be this tick's `poll_area_transition()` result, computed by the
-// caller *unconditionally* every single `mod_update()` tick regardless of `checkHorseDemoMode()` --
-// not computed only on the ticks this function happens to be called on. `poll_area_transition()`
-// tracks a real-time grace period countdown (`s_transitionGraceTicksRemaining`) that must keep
-// ticking down during ordinary gameplay too; calling it only while `checkHorseDemoMode()` is true
-// would instead freeze that countdown for the entire time the horse isn't in demo mode, letting
-// whatever ticks happened to be left over at that point carry over -- possibly largely intact --
-// into however much later the *next*, likely completely unrelated `checkHorseDemoMode()` event
-// happens to begin, incorrectly tagging it as a scene transition too. That was exactly the cause of
-// a regression where this mod's Zelda started reappearing in most/all story cutscenes again: almost
-// any cutscene starting within a while of the previous one left the grace counter nonzero, so its
-// own first-tick check below kept finding `i_areaTransitionActive` true by pure coincidence.
-//
-// Naively re-checking these conditions fresh every tick isn't enough, because none of them are
-// guaranteed to stay true for the *entire* duration of the single `checkHorseDemoMode()` event they
-// mark the start of:
-//
-//  - `daHorse_c::FLG0_UNK_10000000` (the horse-call gallop-back) is cleared by `procMove()` the
-//    moment Epona arrives/times out/hits a wall, but the camera's own "establishing shot" of her
-//    arrival can keep running -- and keep the same underlying event (and thus
-//    `checkHorseDemoMode()`) active -- for a little while after that.
-//  - `poll_area_transition()`'s grace period is a fixed, deliberately approximate number of ticks;
-//    a slow-loading area or a longer-than-usual first-visit/establishing-shot cutscene can easily
-//    outlast it while `checkHorseDemoMode()` is still true for the same event.
-//
-// So instead of trusting the instantaneous value of these checks, this function latches: the first
-// tick a new `checkHorseDemoMode()` event starts, it records whether any excluded category applies
-// *at that moment*, and keeps returning that same answer for as long as `checkHorseDemoMode()`
-// stays continuously true -- i.e. for the event's entire real duration -- only re-evaluating once
-// `checkHorseDemoMode()` goes false again and some later event begins anew. Since every excluded
-// category's own flag is already true from the very first tick of its event (the horse sets
-// `FLG0_UNK_10000000` the instant the gallop-back starts; `getMode()` is already
-// `dEvt_mode_TALK_e` as soon as a conversation begins; `i_areaTransitionActive` is true from the
-// moment a stage/room change is requested), latching at the start is enough to correctly cover
-// cases where the specific transient signal ends before the event itself actually does.
-static bool poll_excluded_cutscene_category(daHorse_c* horse, bool i_areaTransitionActive) {
-    bool horseDemoModeActive = horse->checkHorseDemoMode();
-    if (!horseDemoModeActive) {
-        reset_excluded_cutscene_latch();
-        return false;
-    }
-
-    bool excludedRightNow = horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) ||
-                            is_npc_conversation_active() || is_title_screen() ||
-                            i_areaTransitionActive;
-
-    if (!s_wasHorseDemoModeActive) {
-        // The very first tick of a new event: whatever the excluded-category checks say right now
-        // is the one chance to catch them, since by definition they're all true from their own
-        // event's first tick onward.
-        s_currentEventIsExcludedCategory = excludedRightNow;
-    } else if (excludedRightNow) {
-        // Mid-event: only ever latch further toward "excluded", never back away from it, so a
-        // transient signal going false part-way through doesn't un-exclude the rest of the event.
-        s_currentEventIsExcludedCategory = true;
-    }
-
-    s_wasHorseDemoModeActive = true;
-    return s_currentEventIsExcludedCategory;
-}
-
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
 // than our own spawned one.
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -1522,21 +1371,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    // Must run unconditionally, every single tick, regardless of whether a horse actor currently
-    // exists or is in demo mode: `poll_area_transition()`'s grace-period countdown is a real-time
-    // timer, and it needs to actually keep ticking down during every tick it's conceptually active
-    // for (including stretches with no horse loaded at all, e.g. most dungeons and buildings) for
-    // it to mean anything by the time some later cutscene checks it. Calling it only on the ticks
-    // convenient to the checks further down (e.g. only while a horse exists and is already in demo
-    // mode) would instead freeze its countdown for the entirety of every tick in between, letting
-    // whatever's left over at that point carry over intact into however much later the *next*
-    // scripted event happens to begin -- incorrectly tagging an otherwise unrelated cutscene as a
-    // scene transition too. That was exactly the cause of a regression where this mod's Zelda
-    // started reappearing in most/all story cutscenes again: by the time any later cutscene first
-    // checked it, the leftover grace count from an earlier, unrelated transition was still sitting
-    // above zero far more often than not.
-    bool areaTransitionActive = poll_area_transition();
-
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
@@ -1546,15 +1380,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // forever, orphaned from any horse. That leaked actor is a likely cause of the
         // "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn
         // a second HoZelda while the first, orphaned one is still alive and animating.
-        //
-        // This also has to reset the excluded-cutscene-category latch exactly as if
-        // `poll_excluded_cutscene_category()` itself had been called and found `checkHorseDemoMode()`
-        // false -- which it can't be, since there's no horse actor here to even ask. Returning early
-        // without this reset would leave the latch's state frozen at whatever it last was before the
-        // horse despawned, for however long it stays despawned, and have it wrongly reused as the
-        // verdict for a later, likely completely unrelated cutscene the moment the horse reappears.
-        // See `reset_excluded_cutscene_latch()`'s own comment for the full reasoning.
-        reset_excluded_cutscene_latch();
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
         return MOD_OK;
@@ -1587,35 +1412,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // procs instead, letting this mod's own Zelda incorrectly appear in cutscenes she shouldn't
     // regardless of the "Show Zelda during cutscenes" toggle.
     //
-    // `checkHorseDemoMode()` is actually much broader than just "a story cutscene is puppeting
-    // Epona", though: `setDemoData()` sets it any time *any* scripted event is active and
-    // `dComIfGp_getEvent()->isOrderOK()` is false, whether or not that event has anything to do
-    // with the horse at all -- so without further narrowing, this would also misfire for things
-    // like a plain NPC conversation that happens to take place while Zelda's riding along. Several
-    // cases always need to stay visible regardless of the "Show Zelda during cutscenes" toggle --
-    // the horse-call/grass-whistle gallop-back, any NPC conversation, the opening title screen, and
-    // scene/room transitions (including each area's one-time "first time here" cutscene and any
-    // standalone "establishing shot" cutscene right after loading) -- see
-    // `poll_excluded_cutscene_category()`'s comment for how those are detected and why that check
-    // has to latch across the whole event rather than re-checking its own transient flags fresh
-    // every tick.
-    //
-    // `poll_excluded_cutscene_category()` must always be called here, every tick, regardless of
-    // `checkHorseDemoMode()`'s own value -- never written as the right-hand side of a `&&` with
-    // `checkHorseDemoMode()`, which would let short-circuit evaluation skip calling it entirely
-    // the instant `checkHorseDemoMode()` goes false. That function's own internal latch-reset (see
-    // its "if (!horseDemoModeActive)" branch) only ever runs on ticks it's actually called on, so
-    // skipping the call on every tick `checkHorseDemoMode()` happens to already be false would
-    // silently skip that reset too -- leaving whatever category the *previous* event latched
-    // (excluded or not) stuck in place forever, since the next event would then wrongly look like
-    // a continuation of the old one (`s_wasHorseDemoModeActive` still true) rather than a fresh one
-    // to classify from scratch. This exact bug is what let Zelda keep appearing in scenes she
-    // shouldn't: once any single excluded-category cutscene (e.g. the title screen, or simply
-    // talking to an NPC) latched `s_currentEventIsExcludedCategory` to true, it silently stayed
-    // true for every single subsequent story cutscene for the rest of that play session.
-    bool horseDemoModeActive = horse->checkHorseDemoMode();
-    bool excludedCategory = poll_excluded_cutscene_category(horse, areaTransitionActive);
-    bool inScriptedCutscene = horseDemoModeActive && !excludedCategory;
+    // The only case that should always stay visible regardless of that toggle is the opening
+    // title screen (`is_title_screen()`, which drives Epona the exact same way a cutscene does --
+    // see that function's own comment). Every other `checkHorseDemoMode()` event -- including the
+    // horse-call/grass-whistle gallop-back, NPC conversations, and area/scene transitions -- is
+    // treated the same as any other story cutscene and hidden by default.
+    bool inScriptedCutscene = horse->checkHorseDemoMode() && !is_title_screen();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
