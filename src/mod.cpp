@@ -141,34 +141,38 @@ static bool always_show_spawned_zelda() {
     return false;
 }
 
-// The game's very first story cutscene: Rusl and Link riding Epona, who is visibly carrying
-// bundles of firewood to deliver, from Ordon Spring back to Ordon Village (spanning three
-// separate stage loads along the way, plus the initial dialogue before Epona starts moving).
-// This mod's own spawned Zelda would look wrong riding alongside that firewood, so she must stay
-// suppressed for the entire thing, regardless of the "Show Zelda during cutscenes" toggle.
+// Demo archives (`dStage_roomControl_c::getDemoArcName()`) for story cutscenes where this mod's
+// own spawned Zelda would look wrong riding along and so must stay suppressed for the entire
+// thing, regardless of the "Show Zelda during cutscenes" toggle:
 //
-// Every leg of this cutscene -- including the initial dialogue, before Epona is puppeted by any
-// tool-demo/scripted proc at all, when the usual `inScriptedCutscene` check in `mod_update()`
-// doesn't yet apply -- runs under one of two demo archives, `Demo01_01` and `Demo01_02`
-// (`dStage_roomControl_c::getDemoArcName()`), regardless of which of the three stages is actually
-// loaded underneath it. Checking the demo archive name directly is therefore both necessary (it
-// catches every leg, including the dialogue-only one) and sufficient (it stops being true the
-// instant this introduction actually ends, including its final leg in Ordon Village/"Outside
-// Link's House", without needing any separate stage-name or save-bit check).
+// - `Demo01_01`/`Demo01_02`: the game's very first story cutscene -- Rusl and Link riding Epona,
+//   who is visibly carrying bundles of firewood to deliver, from Ordon Spring back to Ordon
+//   Village (spanning three separate stage loads along the way, plus the initial dialogue before
+//   Epona starts moving). Every leg of this cutscene -- including the initial dialogue, before
+//   Epona is puppeted by any tool-demo/scripted proc at all, when the usual `inScriptedCutscene`
+//   check in `mod_update()` doesn't yet apply -- runs under one of these two demo archives,
+//   regardless of which of the three stages is actually loaded underneath it. Checking the demo
+//   archive name directly is therefore both necessary (it catches every leg, including the
+//   dialogue-only one) and sufficient (it stops being true the instant this introduction actually
+//   ends, including its final leg in Ordon Village/"Outside Link's House", without needing any
+//   separate stage-name or save-bit check).
+// - `Demo36_00`/`Demo90_00`: further story cutscenes with the same problem -- this mod's own
+//   Zelda has no business appearing in them either.
 //
 // The title screen's own attract-mode cutscene (`Demo38_01`, see `always_show_spawned_zelda()`'s
-// own comment) never loads either of these demo archives -- it's excluded below anyway, purely as
+// own comment) never loads any of these demo archives -- it's excluded below anyway, purely as
 // defense in depth, since it must always show this mod's Zelda regardless (the same exclusion
 // `inScriptedCutscene` already applies).
-static const char* const kOpeningCutsceneDemoArchives[] = {"Demo01_01", "Demo01_02"};
+static const char* const kAlwaysExcludeDemoArchives[] = {
+    "Demo01_01", "Demo01_02", "Demo36_00", "Demo90_00"};
 
-static bool before_opening_cutscene() {
+static bool always_exclude_spawned_zelda() {
     if (always_show_spawned_zelda()) {
         return false;
     }
 
     const char* demoArchive = (const char*)dStage_roomControl_c::getDemoArcName();
-    for (const char* archive : kOpeningCutsceneDemoArchives) {
+    for (const char* archive : kAlwaysExcludeDemoArchives) {
         if (strcmp(demoArchive, archive) == 0) {
             return true;
         }
@@ -1631,12 +1635,13 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // respawned until the story's HoZelda is gone again.
     bool storyHoZeldaActive = find_other_hozelda() != nullptr;
 
-    // See `before_opening_cutscene()`'s own comment: the game's very first story cutscene
-    // (Rusl/Link riding Epona while she carries firewood to deliver) gets the exact same
-    // unconditional treatment as `storyHoZeldaActive` -- removed outright, with no toggle
-    // override -- rather than folding it into `inScriptedCutscene` below, since that check's
-    // `checkHorseDemoMode()` isn't reliably true for this cutscene's entire duration.
-    if (storyHoZeldaActive || before_opening_cutscene()) {
+    // See `always_exclude_spawned_zelda()`'s own comment: each of its demo archives -- including
+    // the game's very first story cutscene (Rusl/Link riding Epona while she carries firewood to
+    // deliver) -- gets the exact same unconditional treatment as `storyHoZeldaActive` -- removed
+    // outright, with no toggle override -- rather than folding it into `inScriptedCutscene` below,
+    // since that check's `checkHorseDemoMode()` isn't reliably true for the opening cutscene's
+    // entire duration.
+    if (storyHoZeldaActive || always_exclude_spawned_zelda()) {
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
     } else if (inScriptedCutscene) {
