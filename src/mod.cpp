@@ -117,11 +117,10 @@ static bool is_spawned_zelda(const fopAc_ac_c* actor) {
            (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId;
 }
 
-// Whether the mod's own spawned Zelda should currently be visually hidden (moved far underground
-// and shrunk to an imperceptible size) rather than deleted, set once per tick by `mod_update()`
-// and read back by the `HoZeldaSetMatrix` hook below, which does the actual hiding. See that
-// hook's comment for why hiding her in place -- instead of deleting and later recreating the
-// actor -- is necessary.
+// Whether the mod's own spawned Zelda should currently be visually hidden (shrunk to an
+// imperceptible size) rather than deleted, set once per tick by `mod_update()` and read back by
+// the `HoZeldaSetMatrix` hook below, which does the actual hiding. See that hook's comment for why
+// hiding her in place -- instead of deleting and later recreating the actor -- is necessary.
 static bool s_hideSpawnedZeldaInCutscene = false;
 
 // The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same
@@ -134,6 +133,38 @@ static bool s_hideSpawnedZeldaInCutscene = false;
 static bool is_title_screen() {
     scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
+}
+
+// How many extra ticks of `mod_update()` to keep excluding cutscene-hiding for after a stage/room
+// transition's loading screen finishes (see `s_transitionGraceTicksRemaining` below).
+static const int kTransitionGraceTicks = 90;
+
+// Sticks around nonzero for a little while after `dComIfGp_isEnableNextStage()` itself goes false
+// again, i.e. after a stage/room transition's loading screen finishes. `isEnableNextStage()` only
+// covers the loading screen itself -- it's turned off the instant the new scene starts
+// initializing (`dScnPly_c::phase_1()` calls `dComIfGp_offEnableNextStage()` right away) -- but
+// both the ordinary camera pan the game plays while riding between areas and a new area's own
+// one-time "first time here" introductory cutscene start shortly *after* that, while the new scene
+// is still fading in. There's no dedicated engine signal for "one of those is currently playing",
+// so this grace period is a deliberately generous approximation: better to let a few ordinary
+// frames right after loading go unhidden than to clip either kind of cutscene early.
+static int s_transitionGraceTicksRemaining = 0;
+static bool s_wasNextStageEnabled = false;
+
+// Updates `s_transitionGraceTicksRemaining` from the current `dComIfGp_isEnableNextStage()` value
+// and returns whether a stage/room transition (its loading screen, or the grace period following
+// it) is currently considered active.
+static bool poll_area_transition() {
+    bool nextStageEnabledNow = dComIfGp_isEnableNextStage();
+    if (s_wasNextStageEnabled && !nextStageEnabledNow) {
+        s_transitionGraceTicksRemaining = kTransitionGraceTicks;
+    }
+    s_wasNextStageEnabled = nextStageEnabledNow;
+
+    if (s_transitionGraceTicksRemaining > 0) {
+        s_transitionGraceTicksRemaining--;
+    }
+    return nextStageEnabledNow || s_transitionGraceTicksRemaining > 0;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1411,17 +1442,35 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // (`PROC_TOOL_DEMO_e`) state. An earlier version of this check only looked at
     // `PROC_TOOL_DEMO_e`, which missed every cutscene that drives Epona via one of those other
     // procs instead, letting this mod's own Zelda incorrectly appear in cutscenes she shouldn't
-    // regardless of the "Show Zelda during cutscenes" toggle. The horse-call/grass-whistle
-    // gallop-back (which repurposes some of the same demo-mode plumbing for its own unrelated
-    // "run to player" behavior) is excluded by its own distinct flag (`FLG0_CALL_HORSE`), as are
-    // two further cases where this mod's Zelda should always stay visible regardless of the
-    // toggle: the opening title screen (`is_title_screen()`, which drives Epona the exact same
-    // way a cutscene does) and scene/room transitions (`dComIfGp_isEnableNextStage()`, true from
-    // the moment a stage/room change is requested until the new scene finishes loading --
-    // `dScnPly_c::init()` calls `dComIfGp_offEnableNextStage()` right as the new scene starts up).
-    bool inScriptedCutscene = horse->checkHorseDemoMode() &&
-                              !horse->checkStateFlg0(daHorse_c::FLG0_CALL_HORSE) &&
-                              !is_title_screen() && !dComIfGp_isEnableNextStage();
+    // regardless of the "Show Zelda during cutscenes" toggle.
+    //
+    // `checkHorseDemoMode()` is actually much broader than just "a story cutscene is puppeting
+    // Epona", though: `setDemoData()` sets it any time *any* scripted event is active and
+    // `dComIfGp_getEvent()->isOrderOK()` is false, whether or not that event has anything to do
+    // with the horse at all -- so without further narrowing, this would also misfire for things
+    // like a plain NPC conversation that happens to take place while Zelda's riding along. Several
+    // cases always need to stay visible regardless of the "Show Zelda during cutscenes" toggle:
+    //
+    //  - The horse-call/grass-whistle gallop-back, which repurposes some of the same demo-mode
+    //    plumbing for its own unrelated "run to player" behavior. `changeOriginalDemo()` is the
+    //    one place that sets this specific mode (`field_0x16b8 == 3`, i.e. `checkOriginalDemo()`),
+    //    for as long as the call/whistle sequence lasts; an earlier version of this exclusion only
+    //    checked the single-frame `FLG0_CALL_HORSE` flag the call sets and `checkDemoAction()`
+    //    immediately clears again the very next tick, which missed virtually the entire gallop-back
+    //    and let Zelda still be hidden for most of it.
+    //  - Any NPC conversation (`dComIfGp_event_getTalkPartner()` is non-null from the moment a
+    //    conversation starts until it ends), since -- per the above -- simply talking to an NPC
+    //    anywhere near Epona otherwise flags the horse as "in demo mode" for its entire duration
+    //    despite having nothing to do with the horse.
+    //  - The opening title screen (`is_title_screen()`, which drives Epona the exact same way a
+    //    cutscene does).
+    //  - Scene/room transitions, including each area's own one-time "first time here" cutscene
+    //    (`poll_area_transition()`, true from the moment a stage/room change is requested through a
+    //    grace period after the new scene finishes loading -- see its comment for why a grace
+    //    period is needed rather than just `dComIfGp_isEnableNextStage()` on its own).
+    bool inScriptedCutscene = horse->checkHorseDemoMode() && !horse->checkOriginalDemo() &&
+                              dComIfGp_event_getTalkPartner() == nullptr && !is_title_screen() &&
+                              !poll_area_transition();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives

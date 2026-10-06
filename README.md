@@ -88,13 +88,28 @@ archery duel, where she rides alone) is never touched or duplicated.
 > "tool demo" state an earlier version of this check looked at), and she reappears automatically once the cutscene
 > ends. This is purely a visibility toggle: cutscenes that already feature their own story-placed Zelda (such as
 > the horseback archery duel against Ganondorf) are completely unaffected either way, since the mod only ever
-> manages the actor it spawned itself. Three further cases always show her regardless of the toggle: the horse
-> call/grass whistle, even though it briefly reuses some of the same demo-mode plumbing for its own unrelated
-> "gallop back to the player" behavior (excluded by its own distinct flag, `FLG0_CALL_HORSE`); the opening title
-> screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene does but should
-> always show her; and area/scene transitions (`dComIfGp_isEnableNextStage()`, true from the moment a stage/room
-> change is requested until the new scene finishes loading), so she doesn't flicker out every time the player
-> simply rides between areas.
+> manages the actor it spawned itself. `checkHorseDemoMode()` is actually broader than just "a story cutscene is
+> puppeting Epona", though — the game sets it any time *any* scripted event is active, whether or not that event
+> has anything to do with the horse at all — so several further cases always show her regardless of the toggle,
+> since none of them are really the kind of story cutscene this default is meant to hide her for:
+>
+> - The horse call/grass whistle, even though it briefly reuses some of the same demo-mode plumbing for its own
+>   unrelated "gallop back to the player" behavior (excluded via `daHorse_c::checkOriginalDemo()`, which stays true
+>   for the entire call/whistle sequence — an earlier version of this exclusion only checked the single-frame
+>   `FLG0_CALL_HORSE` flag the call sets and the game clears again the very next tick, which missed virtually the
+>   entire gallop-back).
+> - Any NPC conversation, since simply talking to an NPC anywhere near Epona otherwise flags the horse as "in demo
+>   mode" for the conversation's entire duration despite having nothing to do with the horse (excluded via
+>   `dComIfGp_event_getTalkPartner()`, non-null from the moment a conversation starts until it ends).
+> - The opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene
+>   does but should always show her.
+> - Area/scene transitions, including each area's own one-time "first time here" introductory cutscene. These are
+>   excluded via `dComIfGp_isEnableNextStage()` (true from the moment a stage/room change is requested until the new
+>   scene finishes loading) plus a short grace period afterward, since that flag only covers the loading screen
+>   itself — both the ordinary camera pan the game plays while riding between areas and an area's first-visit
+>   cutscene actually start a little after loading finishes, while the new scene is still fading in, and the engine
+>   doesn't expose a dedicated signal for either one.
+
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an
