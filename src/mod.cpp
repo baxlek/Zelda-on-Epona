@@ -1701,10 +1701,24 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         //
         // Mirroring exactly what the game itself does to Epona in this state -- instead of
         // deleting Zelda, just hide her (unconditionally, regardless of the "Show Zelda during
-        // cutscenes" toggle) using that same in-place scale-hide mechanism. If she isn't spawned
-        // yet, this simply does nothing until she is (see the final `else if` below, reached once
-        // this flag clears).
+        // cutscenes" toggle) using that same in-place scale-hide mechanism.
+        //
+        // Unlike an earlier version of this branch, she *is* still spawned here if she doesn't
+        // already exist, rather than leaving her unspawned until the flag happens to clear: this
+        // flag isn't a one-off, momentary condition -- `daHorse_c::savePos()` (which keeps Epona's
+        // saved restart position in sync with wherever she actually is) is itself only ever called
+        // from code paths that `execute()`'s own early-return above skips while this flag is set,
+        // so her restart position stays exactly as stale as it was the moment this flag first got
+        // set. Every subsequent stage load compares the *same* stale restart stage/room against
+        // wherever the player has since wandered off to, setting this same flag again on every
+        // fresh horse instance for as long as the player goes without ever calling her with the
+        // grass whistle -- so if spawning were skipped here, this mod's own Zelda could stay
+        // entirely unspawned (not merely hidden) for the rest of a long play session, rather than
+        // matching Epona's own "loaded, just not visible or tangible" state as intended.
         s_hideSpawnedZeldaInCutscene = true;
+        if (!s_hasSpawnedZelda) {
+            spawn_zelda_on_horse(horse);
+        }
         return MOD_OK;
     }
 
