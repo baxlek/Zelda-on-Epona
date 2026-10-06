@@ -666,7 +666,18 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
 // takes the same approach already used to hide our own spawned Zelda: shrink the prop's model down
 // to `kHiddenScale` every frame, imperceptible regardless of camera distance, leaving the actor
 // itself completely untouched and still ticking normally.
+//
+// A scale override applied only in `setBaseMtx()` was reported to not actually hide the prop in
+// practice, despite being the same technique already proven to hide our own spawned Zelda. The
+// root cause wasn't confirmed (the scale-vs-shape-ID matching logic here checks out against
+// `dusklight`'s own source, so the leading theory is that this particular, otherwise-unremarkable
+// member function doesn't resolve to a hookable address in every build for reasons that can't be
+// verified without a live game to test against), so this re-applies the exact same override a
+// second time, immediately before `daDemo00_c::draw()` (`src/d/actor/d_a_demo00.cpp`) submits the
+// model's display list each frame, as a second, independent chance for the hiding to actually take
+// effect even if `setBaseMtx()`'s hook turns out not to be firing.
 DEFINE_HOOK(&daDemo00_c::setBaseMtx, Demo00SetBaseMtx);
+DEFINE_HOOK(&daDemo00_c::draw, Demo00Draw);
 
 // The BMD's resource index within the archive differs per cutscene archive (and isn't guaranteed
 // to stay the same across game versions/regions), so rather than hardcoding it, this looks it up
@@ -674,6 +685,22 @@ DEFINE_HOOK(&daDemo00_c::setBaseMtx, Demo00SetBaseMtx);
 // bank lookup above (`on_particle_get_rm_id_replace`) replacing an earlier hardcoded ID allowlist.
 static const char* kHiddenCutsceneDemoArchives[] = {"Demo01_01", "Demo01_02"};
 static const char* kFirewoodPropModelName = "demo01_fwood_cut00_gp_1.bmd";
+
+// Separately from the shared model above, each individual camera "cut" within these two cutscenes
+// re-poses the firewood bundle via its own dedicated `.bck` joint-animation clip (visible as the
+// `demo01_fwood_cut0#_gp_1_o.bck`-prefixed resources alongside the `.bmd` in the asset list) rather
+// than one single clip reused for the whole cutscene. These are listed here (one list per archive,
+// since each cutscene only uses its own subset of cuts) so the resource-load hook below can refuse
+// to hand any of them out while hiding is active, in addition to (not instead of) the scale-based
+// hiding above: see that hook's own comment for why the model itself still has to be hidden by
+// scale regardless, and what blocking just the `.bck` clips does and doesn't accomplish on its own.
+static const char* kFirewoodPropBckNames_Demo01_01[] = {"demo01_fwood_cut08_gp_1_o.bck"};
+static const char* kFirewoodPropBckNames_Demo01_02[] = {
+    "demo01_fwood_cut01_gp_1_o.bck",
+    "demo01_fwood_cut02_gp_1_o.bck",
+    "demo01_fwood_cut03_gp_1_o.bck",
+    "demo01_fwood_cut04_gp_1_o.bck",
+};
 
 static bool is_hidden_firewood_prop_cutscene() {
     const char* arcName = dStage_roomControl_c::getDemoArcName();
@@ -688,8 +715,7 @@ static bool is_hidden_firewood_prop_cutscene() {
     return false;
 }
 
-static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
-    daDemo00_c* demoAc = mods::arg<daDemo00_c*>(args, 0);
+static void hide_firewood_prop_model(daDemo00_c* demoAc) {
     if (demoAc == nullptr || demoAc->mModel.field_0x5d4 == nullptr) {
         return;
     }
@@ -708,6 +734,60 @@ static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
     }
 
     demoAc->mModel.field_0x5d4->setBaseScale(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
+}
+
+static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
+    hide_firewood_prop_model(mods::arg<daDemo00_c*>(args, 0));
+}
+
+static HookAction on_demo00_draw_pre(ModContext*, void* args, void*, void*) {
+    hide_firewood_prop_model(mods::arg<daDemo00_c*>(args, 0));
+    return HOOK_CONTINUE;
+}
+
+// Refuses to hand out any of the firewood bundle's own per-cut `.bck` animation clips (see the
+// list above) while hiding is active, so its `daDemo00_c` actor's `mDoExt_McaMorfSO` wrapper is
+// built with a null animation source (`createHeap()` in `src/d/actor/d_a_demo00.cpp` already
+// handles that safely -- `mDoExt_McaMorfSO::create()` null-checks its anim parameter throughout --
+// so this doesn't crash). On its own this only freezes the prop in its bind pose rather than
+// actually hiding it (the underlying `J3DModel` still gets created and drawn regardless of whether
+// it has an animation clip), which is why it's applied in addition to, not instead of, the
+// scale-based hiding above; the two together mean neither the model nor its posing animation ever
+// visibly appear during these cutscenes while Zelda is shown.
+DEFINE_HOOK(&dComIfG_getObjectIDRes, Demo00FirewoodBckRes);
+
+static bool is_firewood_bck_resource(const char* arcName, u16 resID) {
+    const char** names;
+    size_t count;
+    if (strcmp(arcName, "Demo01_01") == 0) {
+        names = kFirewoodPropBckNames_Demo01_01;
+        count = sizeof(kFirewoodPropBckNames_Demo01_01) / sizeof(names[0]);
+    } else if (strcmp(arcName, "Demo01_02") == 0) {
+        names = kFirewoodPropBckNames_Demo01_02;
+        count = sizeof(kFirewoodPropBckNames_Demo01_02) / sizeof(names[0]);
+    } else {
+        return false;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        int id = dComIfG_getObjctResName2Index(arcName, names[i]);
+        if (id != -1 && (u16)id == resID) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void on_demo00_firewood_bck_res_post(ModContext*, void* args, void* retval, void*) {
+    if (retval == nullptr || *static_cast<void**>(retval) == nullptr || !show_zelda_in_cutscenes()) {
+        return;
+    }
+
+    const char* arcName = mods::arg<const char*>(args, 0);
+    u16 resID = mods::arg<u16>(args, 1);
+    if (arcName != nullptr && is_firewood_bck_resource(arcName, resID)) {
+        *static_cast<void**>(retval) = nullptr;
+    }
 }
 
 // Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
@@ -1490,6 +1570,24 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, the firewood prop just won't be hidden.
     }
 
+    result = mods::hook::add_pre<Demo00Draw>(on_demo00_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook generic cutscene prop draw, the firewood bundle prop may clip "
+            "through Zelda during Demo01_01/Demo01_02 when shown in cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, the firewood prop just won't be hidden.
+    }
+
+    result = mods::hook::add_post<Demo00FirewoodBckRes>(on_demo00_firewood_bck_res_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook object resource loading, the firewood bundle prop's posing "
+            "animation may still play during Demo01_01/Demo01_02 when shown in cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, the firewood prop's animation just won't be blocked.
+    }
+
     result = mods::hook::add_pre<CcAtCheck>(on_cc_at_check_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1691,6 +1789,8 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<Demo00SetBaseMtx>();
+    mods::hook::uninstall<Demo00Draw>();
+    mods::hook::uninstall<Demo00FirewoodBckRes>();
     return MOD_OK;
 }
 }
