@@ -21,7 +21,6 @@
 #include "d/d_particle.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
-#include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
@@ -124,16 +123,22 @@ static bool is_spawned_zelda(const fopAc_ac_c* actor) {
 // hiding her in place -- instead of deleting and later recreating the actor -- is necessary.
 static bool s_hideSpawnedZeldaInCutscene = false;
 
-// The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same
-// `dScnPly_c` gameplay scene class as ordinary play, just requested under a different proc name
-// (`fpcNm_OPENING_SCENE_e` instead of `fpcNm_PLAY_SCENE_e`, see `dComIfG_changeOpeningScene()` in
-// `d_com_inf_game.cpp`), and that scene drives Epona exactly the same way a scripted cutscene
-// does. Without specifically excluding it, that would make the title screen itself count as a
-// "scripted cutscene" and hide this mod's Zelda there by default -- but she should always be
-// visible on the title screen regardless of the cutscene-visibility toggle.
-static bool is_title_screen() {
-    scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
-    return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
+// The opening title screen (Link/Epona galloping across Hyrule Field) drives Epona through the
+// same scripted-cutscene machinery (`checkHorseDemoMode()`) as any other cutscene, under its own
+// demo archive, `Demo38_01`. Without specifically excluding it, that would make the title screen
+// itself count as a "scripted cutscene" and hide this mod's Zelda there by default -- but she
+// should always be visible on the title screen regardless of the cutscene-visibility toggle.
+static const char* const kAlwaysShowDemoArchives[] = {"Demo38_01"};
+
+static bool always_show_spawned_zelda() {
+    const char* demoArchive = (const char*)dStage_roomControl_c::getDemoArcName();
+    for (const char* archive : kAlwaysShowDemoArchives) {
+        if (strcmp(demoArchive, archive) == 0) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // The game's very first story cutscene: Rusl and Link riding Epona, who is visibly carrying
@@ -151,15 +156,14 @@ static bool is_title_screen() {
 // instant this introduction actually ends, including its final leg in Ordon Village/"Outside
 // Link's House", without needing any separate stage-name or save-bit check).
 //
-// The title screen's own attract-mode cutscene (`is_title_screen()`, see that function's own
-// comment) drives Epona the same way a cutscene does, but under a completely separate stage/proc
-// (`F_SP102`/`OPENING_SCENE_e`) that never loads either of these demo archives -- it's excluded
-// below anyway, purely as defense in depth, since it must always show this mod's Zelda regardless
-// (the same exclusion `inScriptedCutscene` already applies).
+// The title screen's own attract-mode cutscene (`Demo38_01`, see `always_show_spawned_zelda()`'s
+// own comment) never loads either of these demo archives -- it's excluded below anyway, purely as
+// defense in depth, since it must always show this mod's Zelda regardless (the same exclusion
+// `inScriptedCutscene` already applies).
 static const char* const kOpeningCutsceneDemoArchives[] = {"Demo01_01", "Demo01_02"};
 
 static bool before_opening_cutscene() {
-    if (is_title_screen()) {
+    if (always_show_spawned_zelda()) {
         return false;
     }
 
@@ -630,13 +634,14 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     // function below naturally falls back to doing nothing, the same as if she'd never found
     // anyone.
     //
-    // The opening title screen is deliberately excluded from this check (`!is_title_screen()`,
-    // mirroring `mod_update()`'s own exclusion): it drives Epona through the exact same
-    // `checkHorseDemoMode()` machinery as a real cutscene, but this mod's Zelda is always shown
-    // there regardless of the "Show Zelda during cutscenes" toggle, so there's no reason to
-    // suppress her combat behavior there either.
+    // The opening title screen is deliberately excluded from this check
+    // (`!always_show_spawned_zelda()`, mirroring `mod_update()`'s own exclusion): it drives Epona
+    // through the exact same `checkHorseDemoMode()` machinery as a real cutscene, but this mod's
+    // Zelda is always shown there regardless of the "Show Zelda during cutscenes" toggle, so
+    // there's no reason to suppress her combat behavior there either.
     daHorse_c* horse = dComIfGp_getHorseActor();
-    bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
+    bool inCutscene =
+        horse != nullptr && horse->checkHorseDemoMode() && !always_show_spawned_zelda();
 
     if (auto_target_enemies_enabled() && !inCutscene) {
         zelda->mGndAcKeep.setData(find_nearest_enemy(zelda));
@@ -1593,11 +1598,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // regardless of the "Show Zelda during cutscenes" toggle.
     //
     // The only case that should always stay visible regardless of that toggle is the opening
-    // title screen (`is_title_screen()`, which drives Epona the exact same way a cutscene does --
-    // see that function's own comment). Every other `checkHorseDemoMode()` event -- including the
-    // horse-call/grass-whistle gallop-back, NPC conversations, and area/scene transitions -- is
-    // treated the same as any other story cutscene and hidden by default.
-    bool inScriptedCutscene = horse->checkHorseDemoMode() && !is_title_screen();
+    // title screen (`always_show_spawned_zelda()`, which drives Epona the exact same way a
+    // cutscene does -- see that function's own comment). Every other `checkHorseDemoMode()`
+    // event -- including the horse-call/grass-whistle gallop-back, NPC conversations, and
+    // area/scene transitions -- is treated the same as any other story cutscene and hidden by
+    // default.
+    bool inScriptedCutscene = horse->checkHorseDemoMode() && !always_show_spawned_zelda();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
