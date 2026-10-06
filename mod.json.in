@@ -3,7 +3,7 @@
   "name": "Zelda on Epona",
   "version": "@PROJECT_VERSION@",
   "author": "baxlek",
-  "description": "Zelda rides along on Epona with you at all times.",
+  "description": "Allows Princess Zelda to ride Epona and join you on your travels!",
   "abi": 1,
   "imports": [
     {
