@@ -127,7 +127,17 @@ archery duel, where she rides alone) is never touched or duplicated.
 > transition too (and therefore always showing Zelda in it). An earlier version of this logic only advanced that
 > countdown on ticks convenient to the cutscene-category check itself, which effectively paused it for most of the
 > game and caused almost exactly that: Zelda reappearing in most/all cutscenes again.
-
+>
+> That per-event latch has to be reset every single tick `checkHorseDemoMode()` is false, regardless of whether
+> anything else currently cares about the result -- which means the category check must actually be called every
+> tick, not merely referenced as one side of a `&&` with `checkHorseDemoMode()` itself. Short-circuit evaluation would
+> skip calling it entirely the moment `checkHorseDemoMode()` goes false, silently skipping that reset too and leaving
+> whichever category the *previous* cutscene landed on (excluded or not) stuck in place indefinitely: the next
+> cutscene would then look like a continuation of the old one instead of a fresh event to classify from scratch. An
+> earlier version of this logic had exactly that mistake, which meant that once any single excluded-category
+> cutscene played once (even something as mundane as talking to an NPC, or the opening title screen), every ordinary
+> story cutscene afterward kept silently reusing that same stale "excluded" answer and stayed unaffected by the
+> toggle -- i.e. Zelda kept showing up in scenes she shouldn't, for the rest of that play session.
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an

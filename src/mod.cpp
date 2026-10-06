@@ -1546,8 +1546,23 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // `poll_excluded_cutscene_category()`'s comment for how those are detected and why that check
     // has to latch across the whole event rather than re-checking its own transient flags fresh
     // every tick.
-    bool inScriptedCutscene =
-        horse->checkHorseDemoMode() && !poll_excluded_cutscene_category(horse, areaTransitionActive);
+    //
+    // `poll_excluded_cutscene_category()` must always be called here, every tick, regardless of
+    // `checkHorseDemoMode()`'s own value -- never written as the right-hand side of a `&&` with
+    // `checkHorseDemoMode()`, which would let short-circuit evaluation skip calling it entirely
+    // the instant `checkHorseDemoMode()` goes false. That function's own internal latch-reset (see
+    // its "if (!horseDemoModeActive)" branch) only ever runs on ticks it's actually called on, so
+    // skipping the call on every tick `checkHorseDemoMode()` happens to already be false would
+    // silently skip that reset too -- leaving whatever category the *previous* event latched
+    // (excluded or not) stuck in place forever, since the next event would then wrongly look like
+    // a continuation of the old one (`s_wasHorseDemoModeActive` still true) rather than a fresh one
+    // to classify from scratch. This exact bug is what let Zelda keep appearing in scenes she
+    // shouldn't: once any single excluded-category cutscene (e.g. the title screen, or simply
+    // talking to an NPC) latched `s_currentEventIsExcludedCategory` to true, it silently stayed
+    // true for every single subsequent story cutscene for the rest of that play session.
+    bool horseDemoModeActive = horse->checkHorseDemoMode();
+    bool excludedCategory = poll_excluded_cutscene_category(horse, areaTransitionActive);
+    bool inScriptedCutscene = horseDemoModeActive && !excludedCategory;
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
