@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -137,10 +138,10 @@ static bool is_title_screen() {
 
 // `dSv_event_flag_c::M_001` ("Opening cutscene") -- set once the player has watched the game's
 // very first story cutscene: Rusl and Link riding Epona, who is visibly carrying bundles of
-// firewood to deliver, from Ordon Spring back to Ordon Village (spanning two separate stage
+// firewood to deliver, from Ordon Spring back to Ordon Village (spanning three separate stage
 // loads along the way). This mod's own spawned Zelda would look wrong riding alongside that
-// firewood, so she must stay suppressed for the entirety of this introduction, regardless of the
-// "Show Zelda during cutscenes" toggle.
+// firewood, so she must stay suppressed while it's still loaded, regardless of the "Show Zelda
+// during cutscenes" toggle.
 //
 // Unlike every other cutscene, this one can't be relied on to keep `daHorse_c::checkHorseDemoMode()`
 // true for its whole duration -- e.g. during the initial dialogue before Epona actually starts
@@ -157,10 +158,23 @@ static bool is_title_screen() {
 // too. Unlike the real new-save introduction, the title screen must always show this mod's Zelda
 // (see `is_title_screen()`), so it's explicitly excluded here the same way it's already excluded
 // from `inScriptedCutscene` below.
+//
+// The bit itself isn't set until sometime after this introduction's last leg finishes -- well
+// after the firewood is actually unloaded off Epona, once that last leg's stage (Ordon Village,
+// `F_SP103`, which also covers the "Outside Link's House" room) has already loaded. Waiting on
+// the bit alone would therefore keep Zelda hidden there too, for however long it takes the bit to
+// catch up (e.g. until the player regains control), even though nothing is riding on Epona's back
+// to clash with her anymore. So this stage is checked directly as an earlier, more precise signal
+// that the firewood is gone, in addition to the save bit for every stage before it.
 static const u16 kOpeningCutsceneEventBit = 0x1010;
+static const char* const kOrdonVillageStageName = "F_SP103";
 
 static bool before_opening_cutscene() {
-    return !dComIfGs_isEventBit(kOpeningCutsceneEventBit) && !is_title_screen();
+    if (is_title_screen() || dComIfGs_isEventBit(kOpeningCutsceneEventBit)) {
+        return false;
+    }
+
+    return strcmp(dComIfGp_getStartStageName(), kOrdonVillageStageName) != 0;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
