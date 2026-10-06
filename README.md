@@ -139,6 +139,16 @@ archery duel, where she rides alone) is never touched or duplicated.
 > story cutscene afterward kept silently reusing that same stale "excluded" answer and stayed unaffected by the
 > toggle -- i.e. Zelda kept showing up in scenes she shouldn't, for the rest of that play session.
 >
+> That reset has to run on every tick the category check itself isn't called at all, too -- not just every tick it's
+> called and finds `checkHorseDemoMode()` false. Riding the horse into a dungeon or building despawns the horse actor
+> entirely, and `mod_update()` has its own separate early return for that case (there's no horse actor left to even
+> pass the category check); that early return used to skip resetting the latch completely, leaving it frozen at
+> whatever it last was for however long the horse stayed despawned. The moment the horse reappeared, that stale
+> verdict got wrongly reused for the next `checkHorseDemoMode()` event -- which, by then, is almost always a
+> completely different, unrelated cutscene -- rather than being freshly classified from scratch. This is the same
+> underlying mistake as the short-circuit bug just above, surfacing through a second, separate gap in when the reset
+> actually ran.
+>
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an
 > actor (`fopAcM_create`) isn't safe immediately around a cutscene boundary. Instead, she's now hidden in place: a

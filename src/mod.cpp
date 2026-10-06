@@ -173,6 +173,24 @@ static bool poll_area_transition() {
 static bool s_currentEventIsExcludedCategory = false;
 static bool s_wasHorseDemoModeActive = false;
 
+// Resets the excluded-category latch above, as if no `checkHorseDemoMode()` event were in
+// progress. Must be called on every tick the latch's own owning function,
+// `poll_excluded_cutscene_category()`, *isn't* called -- i.e. every tick there's no horse actor to
+// even pass it, not just every tick that function itself observes `checkHorseDemoMode()` as false
+// -- or the exact same stale-latch bug described in that function's comment resurfaces through this
+// other gap: riding into a dungeon/building despawns the horse actor entirely (see `mod_update()`'s
+// `horse == nullptr` branch), which used to return early without ever calling
+// `poll_excluded_cutscene_category()` at all, silently skipping this same reset for however long
+// the horse stays unloaded. Any excluded/non-excluded verdict latched from whatever cutscene was
+// last active before the horse despawned would then survive completely untouched across that entire
+// stretch, and get wrongly treated as still describing the very next `checkHorseDemoMode()` event
+// once the horse reappears -- even though that event has nothing to do with the one the latch
+// actually came from.
+static void reset_excluded_cutscene_latch() {
+    s_currentEventIsExcludedCategory = false;
+    s_wasHorseDemoModeActive = false;
+}
+
 // Whether the scripted event currently puppeting Epona (if any, i.e. whenever
 // `daHorse_c::checkHorseDemoMode()` is true) belongs to one of the categories that should always
 // keep this mod's Zelda visible regardless of the "Show Zelda during cutscenes" toggle: the
@@ -218,8 +236,7 @@ static bool s_wasHorseDemoModeActive = false;
 static bool poll_excluded_cutscene_category(daHorse_c* horse, bool i_areaTransitionActive) {
     bool horseDemoModeActive = horse->checkHorseDemoMode();
     if (!horseDemoModeActive) {
-        s_currentEventIsExcludedCategory = false;
-        s_wasHorseDemoModeActive = false;
+        reset_excluded_cutscene_latch();
         return false;
     }
 
@@ -1502,6 +1519,15 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // forever, orphaned from any horse. That leaked actor is a likely cause of the
         // "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn
         // a second HoZelda while the first, orphaned one is still alive and animating.
+        //
+        // This also has to reset the excluded-cutscene-category latch exactly as if
+        // `poll_excluded_cutscene_category()` itself had been called and found `checkHorseDemoMode()`
+        // false -- which it can't be, since there's no horse actor here to even ask. Returning early
+        // without this reset would leave the latch's state frozen at whatever it last was before the
+        // horse despawned, for however long it stays despawned, and have it wrongly reused as the
+        // verdict for a later, likely completely unrelated cutscene the moment the horse reappears.
+        // See `reset_excluded_cutscene_latch()`'s own comment for the full reasoning.
+        reset_excluded_cutscene_latch();
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
         return MOD_OK;
