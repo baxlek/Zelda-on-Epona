@@ -580,13 +580,27 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
-    // While she's hidden (shrunk to an imperceptible size) for a cutscene, she shouldn't keep
-    // drawing her bow and firing Light Arrows at anything -- the player can't even see her doing
-    // it, but nearby enemies (and NPCs, e.g. during an otherwise unrelated conversation with
-    // Midna) could still visibly react to arrows seemingly coming from nowhere. Treated exactly
-    // like the toggle being off: drop whatever target we'd previously picked so the function
-    // below naturally falls back to doing nothing, the same as if she'd never found anyone.
-    if (auto_target_enemies_enabled() && !s_hideSpawnedZeldaInCutscene) {
+    // While a scripted cutscene is puppeting Epona (`checkHorseDemoMode()`, the same check
+    // `mod_update()` uses to decide whether to hide this mod's own Zelda at all -- see
+    // `inScriptedCutscene` there), she shouldn't keep drawing her bow and firing Light Arrows at
+    // anything, whether she's currently visible or hidden (shrunk to an imperceptible size) for
+    // that same cutscene. Visible, her firing arrows mid-cutscene would be a jarring, obviously
+    // unscripted interruption the player never asked for; hidden, the player can't even see her
+    // doing it, but nearby enemies (and NPCs, e.g. during an otherwise unrelated conversation with
+    // Midna) could still visibly react to arrows seemingly coming from nowhere. Both cases are
+    // treated exactly like the toggle being off: drop whatever target we'd previously picked so the
+    // function below naturally falls back to doing nothing, the same as if she'd never found
+    // anyone.
+    //
+    // The opening title screen is deliberately excluded from this check (`!is_title_screen()`,
+    // mirroring `mod_update()`'s own exclusion): it drives Epona through the exact same
+    // `checkHorseDemoMode()` machinery as a real cutscene, but this mod's Zelda is always shown
+    // there regardless of the "Show Zelda during cutscenes" toggle, so there's no reason to
+    // suppress her combat behavior there either.
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
+
+    if (auto_target_enemies_enabled() && !inCutscene) {
         zelda->mGndAcKeep.setData(find_nearest_enemy(zelda));
     } else {
         zelda->mGndAcKeep.clearData();
