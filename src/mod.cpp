@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -10,6 +11,7 @@
 // Game includes
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
+#include "d/actor/d_a_demo00.h"
 #include "d/actor/d_a_e_sh.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
@@ -644,6 +646,68 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         horse->setZeldaActor(nullptr);
     }
     horse->setReinPosNormal();
+}
+
+// --- Hiding the vanilla firewood-bundle prop that clashes with our spawned Zelda ---------------
+//
+// `Demo01_01`/`Demo01_02` (the very first cutscenes, right after meeting Epona in Ordon) are among
+// the `daDemo00_c` ("generic-kun") cutscene-prop actors driven entirely by the event data: Epona
+// is shown carrying a few bundles of firewood (model `demo01_fwood_cut00_gp_1.bmd`, one of several
+// sibling props -- "moi", "grein", "msaya" -- attached the same way) strapped to her back for this
+// errand, sharing the same saddle space our own spawned Zelda rides in whenever "Show Zelda during
+// cutscenes" is on. The result is the firewood prop visibly clipping through/overlapping her model
+// for the cutscene's duration.
+//
+// Rather than trying to reposition or delete the prop actor outright (its lifetime, like Epona's
+// own puppeting, is entirely owned by the scripted demo data, and `daDemo00_c` is a shared generic
+// actor class used by every ordinary cutscene prop throughout the game -- deleting or fighting
+// over its actor state risks the same kind of crash earlier attempts at patching individual
+// cutscenes kept running into, see the overview comment near `g_cvarShowInCutscenes` above), this
+// takes the same approach already used to hide our own spawned Zelda: shrink the prop's model down
+// to `kHiddenScale` every frame, imperceptible regardless of camera distance, leaving the actor
+// itself completely untouched and still ticking normally.
+DEFINE_HOOK(&daDemo00_c::setBaseMtx, Demo00SetBaseMtx);
+
+// The BMD's resource index within the archive differs per cutscene archive (and isn't guaranteed
+// to stay the same across game versions/regions), so rather than hardcoding it, this looks it up
+// by the model's own file name every time, the same spirit as the dynamic Light Arrow particle
+// bank lookup above (`on_particle_get_rm_id_replace`) replacing an earlier hardcoded ID allowlist.
+static const char* kHiddenCutsceneDemoArchives[] = {"Demo01_01", "Demo01_02"};
+static const char* kFirewoodPropModelName = "demo01_fwood_cut00_gp_1.bmd";
+
+static bool is_hidden_firewood_prop_cutscene() {
+    const char* arcName = dStage_roomControl_c::getDemoArcName();
+    if (arcName == nullptr) {
+        return false;
+    }
+    for (const char* excluded : kHiddenCutsceneDemoArchives) {
+        if (strcmp(arcName, excluded) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
+    daDemo00_c* demoAc = mods::arg<daDemo00_c*>(args, 0);
+    if (demoAc == nullptr || demoAc->mModel.field_0x5d4 == nullptr) {
+        return;
+    }
+
+    // Only while Zelda is actually visible on Epona during these two cutscenes does the firewood
+    // prop have anything to clash with; leave it completely alone otherwise (including the default
+    // "hidden in cutscenes" state, where our own Zelda is already shrunk down the same way).
+    if (!show_zelda_in_cutscenes() || !is_hidden_firewood_prop_cutscene()) {
+        return;
+    }
+
+    const char* arcName = dStage_roomControl_c::getDemoArcName();
+    int firewoodIndex = dComIfG_getObjctResName2Index(arcName, kFirewoodPropModelName);
+    if (firewoodIndex == -1 || demoAc->mModel.mID.mShapeID != (u32)firewoodIndex) {
+        return;
+    }
+
+    demoAc->mModel.field_0x5d4->setBaseScale(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
 }
 
 // Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow
@@ -1417,6 +1481,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, arrows just won't be re-aimed at the target.
     }
 
+    result = mods::hook::add_post<Demo00SetBaseMtx>(on_demo00_set_base_mtx_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook generic cutscene prop matrix, the firewood bundle prop may clip "
+            "through Zelda during Demo01_01/Demo01_02 when shown in cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, the firewood prop just won't be hidden.
+    }
+
     result = mods::hook::add_pre<CcAtCheck>(on_cc_at_check_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1617,6 +1690,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
+    mods::hook::uninstall<Demo00SetBaseMtx>();
     return MOD_OK;
 }
 }
