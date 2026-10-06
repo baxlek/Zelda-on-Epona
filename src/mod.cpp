@@ -520,12 +520,15 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
-    if (auto_target_enemies_enabled()) {
+    // While she's hidden (shrunk to an imperceptible size) for a cutscene, she shouldn't keep
+    // drawing her bow and firing Light Arrows at anything -- the player can't even see her doing
+    // it, but nearby enemies (and NPCs, e.g. during an otherwise unrelated conversation with
+    // Midna) could still visibly react to arrows seemingly coming from nowhere. Treated exactly
+    // like the toggle being off: drop whatever target we'd previously picked so the function
+    // below naturally falls back to doing nothing, the same as if she'd never found anyone.
+    if (auto_target_enemies_enabled() && !s_hideSpawnedZeldaInCutscene) {
         zelda->mGndAcKeep.setData(find_nearest_enemy(zelda));
     } else {
-        // Toggled off (possibly mid-ride): drop whatever target we'd previously picked so the
-        // function below naturally falls back to doing nothing, the same as if she'd never found
-        // anyone.
         zelda->mGndAcKeep.clearData();
     }
     return HOOK_CONTINUE;
