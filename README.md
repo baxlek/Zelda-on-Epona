@@ -110,6 +110,18 @@ archery duel, where she rides alone) is never touched or duplicated.
 > position, avoids that: her seated position (and the reins' attachment point) never moves, she's just rendered too
 > small to make out.
 >
+> Scaling her down alone wasn't quite enough on its own, though: shrinking collapses her hand joint down toward her
+> own seated position rather than moving it away to nothing, so the reins — still attached to that joint every tick
+> regardless of whether she's hidden — ended up visibly anchored right where she's sitting instead of following her
+> actual (collapsed) hand, just as conspicuous as not hiding the reins at all. A second hook, right after
+> `daHoZelda_c::execute()` finishes each tick, now re-derives the reins' position from
+> `daHorse_c::setReinPosNormal()` instead whenever she's hidden — the same saddle-anchored position the reins
+> already default to whenever nobody is riding solo. That function normally refuses to do anything while she's
+> attached and riding solo (deferring to the hand-based logic by design), so she's briefly detached
+> (`setZeldaActor(nullptr)`) around this one call to force it to recompute — with no lasting effect, since
+> `execute()` unconditionally reattaches her at the very start of next tick regardless, the same trick already used
+> for the grass-whistle fix above.
+>
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
 > off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor
