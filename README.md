@@ -93,22 +93,24 @@ archery duel, where she rides alone) is never touched or duplicated.
 > has anything to do with the horse at all — so several further cases always show her regardless of the toggle,
 > since none of them are really the kind of story cutscene this default is meant to hide her for:
 >
-> - The horse call/grass whistle, even though it briefly reuses some of the same demo-mode plumbing for its own
->   unrelated "gallop back to the player" behavior (excluded via `daHorse_c::checkOriginalDemo()`, which stays true
->   for the entire call/whistle sequence — an earlier version of this exclusion only checked the single-frame
->   `FLG0_CALL_HORSE` flag the call sets and the game clears again the very next tick, which missed virtually the
->   entire gallop-back).
+> - The horse call/grass whistle, including any camera work (an "establishing shot" of Epona running back) that
+>   plays alongside it. The call briefly reuses some of the same demo-mode plumbing for its own unrelated "gallop
+>   back to the player" behavior, but that plumbing (`field_0x16b8`, `daHorse_c::checkOriginalDemo()`) only stays
+>   set for a single tick, and any concurrent camera cutscene independently keeps `checkHorseDemoMode()` true for the
+>   gallop-back's whole duration anyway — so neither one can be used to recognize this sequence. It's excluded
+>   instead via `daHorse_c::FLG0_UNK_10000000`, the one flag the game sets for exactly as long as Epona is actually
+>   running back in response to the call and nothing else.
 > - Any NPC conversation, since simply talking to an NPC anywhere near Epona otherwise flags the horse as "in demo
 >   mode" for the conversation's entire duration despite having nothing to do with the horse (excluded via
 >   `dComIfGp_event_getTalkPartner()`, non-null from the moment a conversation starts until it ends).
 > - The opening title screen (Link/Epona galloping across Hyrule Field), which drives Epona the same way a cutscene
 >   does but should always show her.
-> - Area/scene transitions, including each area's own one-time "first time here" introductory cutscene. These are
->   excluded via `dComIfGp_isEnableNextStage()` (true from the moment a stage/room change is requested until the new
->   scene finishes loading) plus a short grace period afterward, since that flag only covers the loading screen
->   itself — both the ordinary camera pan the game plays while riding between areas and an area's first-visit
->   cutscene actually start a little after loading finishes, while the new scene is still fading in, and the engine
->   doesn't expose a dedicated signal for either one.
+> - Area/scene transitions, including each area's own one-time "first time here" introductory cutscene and any
+>   standalone "establishing shot" cutscene that plays right after loading. These are excluded via
+>   `dComIfGp_isEnableNextStage()` (true from the moment a stage/room change is requested until the new scene
+>   finishes loading) plus a short grace period afterward, since that flag only covers the loading screen itself —
+>   those cutscenes actually start a little after loading finishes, while the new scene is still fading in, and the
+>   engine doesn't expose a dedicated signal for them.
 
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct

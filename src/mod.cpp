@@ -1451,13 +1451,20 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // like a plain NPC conversation that happens to take place while Zelda's riding along. Several
     // cases always need to stay visible regardless of the "Show Zelda during cutscenes" toggle:
     //
-    //  - The horse-call/grass-whistle gallop-back, which repurposes some of the same demo-mode
-    //    plumbing for its own unrelated "run to player" behavior. `changeOriginalDemo()` is the
-    //    one place that sets this specific mode (`field_0x16b8 == 3`, i.e. `checkOriginalDemo()`),
-    //    for as long as the call/whistle sequence lasts; an earlier version of this exclusion only
-    //    checked the single-frame `FLG0_CALL_HORSE` flag the call sets and `checkDemoAction()`
-    //    immediately clears again the very next tick, which missed virtually the entire gallop-back
-    //    and let Zelda still be hidden for most of it.
+    //  - The horse-call/grass-whistle gallop-back. `checkDemoAction()` clears `field_0x16b8` back
+    //    to 0 (and `FLG0_CALL_HORSE` with it) again within the very same tick `callHorseSubstance()`
+    //    set it, so `checkOriginalDemo()`/`checkHorseDemoMode()` are true for at most one frame and
+    //    can't be used to recognize the gallop-back at all -- an earlier version of this exclusion
+    //    relied on `checkOriginalDemo()` believing it covered the whole sequence, which it never
+    //    actually did. Worse, whatever concurrent camera work plays alongside the gallop-back (an
+    //    "establishing shot" of Epona running back) keeps a real `dComIfGp` event active the whole
+    //    time, which independently keeps `checkHorseDemoMode()` true (via `field_0x16b8 == 2`) for
+    //    the gallop-back's entire duration -- so without a further exclusion, Zelda is hidden for
+    //    virtually all of it regardless. The actual, unique flag for this sequence is
+    //    `FLG0_UNK_10000000`, which `checkDemoAction()` sets the moment it clears `FLG0_CALL_HORSE`
+    //    and which `procMove()` only clears again once the gallop-back truly ends (arrival,
+    //    timeout, or a wall hit) -- nothing else in the engine sets or clears this flag, making it
+    //    the correct signal to track for this entire sequence.
     //  - Any NPC conversation (`dComIfGp_event_getTalkPartner()` is non-null from the moment a
     //    conversation starts until it ends), since -- per the above -- simply talking to an NPC
     //    anywhere near Epona otherwise flags the horse as "in demo mode" for its entire duration
@@ -1467,8 +1474,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     //  - Scene/room transitions, including each area's own one-time "first time here" cutscene
     //    (`poll_area_transition()`, true from the moment a stage/room change is requested through a
     //    grace period after the new scene finishes loading -- see its comment for why a grace
-    //    period is needed rather than just `dComIfGp_isEnableNextStage()` on its own).
-    bool inScriptedCutscene = horse->checkHorseDemoMode() && !horse->checkOriginalDemo() &&
+    //    period is needed rather than just `dComIfGp_isEnableNextStage()` on its own). This also
+    //    covers the standalone "establishing shot" cutscenes that play on their own (not tied to a
+    //    horse-call) right after a stage/room change, since those are driven by the same
+    //    `dComIfGp_isEnableNextStage()`/event plumbing.
+    bool inScriptedCutscene = horse->checkHorseDemoMode() &&
+                              !horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000) &&
                               dComIfGp_event_getTalkPartner() == nullptr && !is_title_screen() &&
                               !poll_area_transition();
 
