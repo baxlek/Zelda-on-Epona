@@ -185,6 +185,14 @@ static const char* const kAlwaysExcludeDemoArchives[] = {
 // stage reload that may never come. Before the cutscene has started at all (e.g. `Demo01_01`'s
 // initial dialogue, before Epona is puppeted or `event_runCheck()` turns true), exclusion still
 // applies unconditionally, exactly as before.
+//
+// Critically, `kEnded` is terminal for as long as the (sticky) archive name stays the same: once
+// the excluded cutscene has genuinely ended, any *later*, unrelated event that happens to run in
+// the same room/area (e.g. an ordinary NPC conversation, which also makes `liveCutsceneActive`
+// true) must not re-arm the latch back to `kActive` and hide Zelda again -- only
+// `inScriptedCutscene`'s own toggleable handling should apply to that later event, same as it
+// would anywhere else. The latch only resets back to `kNotStarted` (ready to exclude again) once
+// the archive name itself actually changes away from the excluded list.
 enum class ExcludedCutsceneState { kNotStarted, kActive, kEnded };
 static ExcludedCutsceneState s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
 
@@ -210,10 +218,14 @@ static bool always_exclude_spawned_zelda(bool liveCutsceneActive) {
         return false;
     }
 
-    if (liveCutsceneActive) {
-        s_excludedCutsceneState = ExcludedCutsceneState::kActive;
-    } else if (s_excludedCutsceneState == ExcludedCutsceneState::kActive) {
-        s_excludedCutsceneState = ExcludedCutsceneState::kEnded;
+    // Once `kEnded`, stay there: see the comment above for why a later unrelated event must not
+    // re-arm this back to `kActive`.
+    if (s_excludedCutsceneState != ExcludedCutsceneState::kEnded) {
+        if (liveCutsceneActive) {
+            s_excludedCutsceneState = ExcludedCutsceneState::kActive;
+        } else if (s_excludedCutsceneState == ExcludedCutsceneState::kActive) {
+            s_excludedCutsceneState = ExcludedCutsceneState::kEnded;
+        }
     }
 
     return s_excludedCutsceneState != ExcludedCutsceneState::kEnded;
