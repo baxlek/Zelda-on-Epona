@@ -252,14 +252,16 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
 // than snapping.
 //
 // Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda already works
-// correctly as-is, so it's left untouched to avoid any risk of regressing it. Scoped to the solo
-// seat only (no Link riding): the dual-ride (rear) seat already works correctly via vanilla's own
-// computation and was never part of this bug.
+// correctly as-is, so it's left untouched to avoid any risk of regressing it. The rear-blend fix
+// above is additionally scoped to the solo seat only (no Link riding): the dual-ride (rear) seat
+// already works correctly via vanilla's own computation outside of cutscenes and was never part of
+// that particular clipping/floating bug.
 //
-// This same post-hook also fixes a separate rotation-mismatch bug during scripted cutscenes while
-// riding solo: see the `inCutscene` branch further down in the hook's body for why a plain
-// `shape_angle = horse->shape_angle` copy (vanilla's own, unconditional, already-correct technique
-// for ordinary gameplay) isn't actually enough there, and what's done differently instead.
+// This same post-hook also fixes a separate rotation-mismatch bug during scripted cutscenes, for
+// both the solo seat AND the dual-ride (Link also riding) seat: see the `inCutscene` branch further
+// down in the hook's body for why a plain `shape_angle = horse->shape_angle` copy (vanilla's own,
+// unconditional, already-correct technique for ordinary gameplay) isn't actually enough there, and
+// what's done differently instead.
 DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);
 
 // How small a scale to shrink this mod's own spawned Zelda's rendered model to while she should
@@ -316,12 +318,10 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    // Dual-ride (Link also on Epona) already works correctly via vanilla's own computation; only
-    // the solo seat (no Link riding) is in scope for this fix.
-    if (daPy_getLinkPlayerActorClass()->checkHorseRide()) {
-        s_turnStandBlend = 0.0f;
-        return;
-    }
+    // Dual-ride (Link also on Epona) is still in scope for the cutscene rotation fix further down
+    // (see `inCutscene` below), just not for the rear-blend fix right above: that one addresses a
+    // solo-seat-only clipping/floating bug that vanilla's own dual-ride computation never had.
+    bool dualRide = daPy_getLinkPlayerActorClass()->checkHorseRide();
 
     daHorse_c* horse = dComIfGp_getHorseActor();
     if (horse == nullptr || zelda->model == nullptr) {
@@ -331,16 +331,22 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
 
     // Eases toward 1 while rearing, back toward 0 once the rear ends; 1/8th per frame fully blends
     // in about 8 frames (roughly a tenth of a second at 60 FPS), fast enough to not be noticeable as
-    // its own separate motion, but slow enough to erase the one-frame snap.
-    cLib_chaseF(&s_turnStandBlend, horse->checkTurnStand() ? 1.0f : 0.0f, 1.0f / 8.0f);
+    // its own separate motion, but slow enough to erase the one-frame snap. Only chased while riding
+    // solo -- see the comment on `dualRide` above.
+    if (dualRide) {
+        s_turnStandBlend = 0.0f;
+    } else {
+        cLib_chaseF(&s_turnStandBlend, horse->checkTurnStand() ? 1.0f : 0.0f, 1.0f / 8.0f);
+    }
 
     // Whether a scripted cutscene (as opposed to ordinary player-driven riding) is currently
     // puppeting Epona.
     bool inCutscene = horse->checkHorseDemoMode();
 
     // Fully settled outside of a rear and outside of a cutscene: vanilla's own computation (already
-    // run by the time this post-hook fires) is left completely untouched.
-    if (s_turnStandBlend <= 0.0f && !inCutscene) {
+    // run by the time this post-hook fires) is left completely untouched. For the dual-ride seat,
+    // that's simply "outside of a cutscene" (the rear-blend fix never applies to it at all).
+    if (!inCutscene && (dualRide || s_turnStandBlend <= 0.0f)) {
         return;
     }
 
@@ -356,8 +362,13 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     // the offset Link's own riding position already proves doesn't clip or float during a rear.
     static const Vec kLinkHorseRidePos = {-68.208984f, 41.609924f, 0.883789f};
 
-    Vec localPos = kZeldaFrontHorseRidePos;
-    if (s_turnStandBlend > 0.0f) {
+    // Vanilla's own dual-ride (Link also riding) local offset (`localHorseRidePos` in
+    // `d_a_hozelda.cpp`) -- the rear seat behind Link, used only to rebuild the cutscene-rotation
+    // matrix below; never blended, since the rear-blend fix doesn't apply to this seat.
+    static const Vec kZeldaDualRidePos = {-5.894f, 52.61f, 4.079f};
+
+    Vec localPos = dualRide ? kZeldaDualRidePos : kZeldaFrontHorseRidePos;
+    if (!dualRide && s_turnStandBlend > 0.0f) {
         localPos.x += (kLinkHorseRidePos.x - kZeldaFrontHorseRidePos.x) * s_turnStandBlend;
         localPos.y += (kLinkHorseRidePos.y - kZeldaFrontHorseRidePos.y) * s_turnStandBlend;
         localPos.z += (kLinkHorseRidePos.z - kZeldaFrontHorseRidePos.z) * s_turnStandBlend;
