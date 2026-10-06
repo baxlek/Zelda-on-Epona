@@ -166,19 +166,57 @@ static bool always_show_spawned_zelda() {
 static const char* const kAlwaysExcludeDemoArchives[] = {
     "Demo01_01", "Demo01_02", "Demo36_00", "Demo90_00"};
 
-static bool always_exclude_spawned_zelda() {
+// `dStage_roomControl_c::getDemoArcName()` is a one-shot *resource-preload* hint, not a live
+// "is this cutscene still playing" flag: `loadDemoArchive()` (`d_s_room.cpp`) sets it exactly once
+// per room load (guarded by "only if not already set") so the archive's assets can be paged in
+// ahead of time, and it's only ever cleared again by a fresh `dStage_Create()` -- i.e. an actual
+// stage/room reload. For `Demo01_01`/`Demo01_02` that coincides with the cutscene's own end (it
+// spans three separate stage loads, the last of which clears it), but nothing guarantees that for
+// every entry in `kAlwaysExcludeDemoArchives`: if a cutscene's archive stays resident in the same
+// room the player keeps occupying afterward (no reload happens), the archive-name match alone
+// would stay true -- and this mod's Zelda would stay excluded/hidden -- indefinitely, long after
+// the cutscene has actually finished and control has returned to the player.
+//
+// `liveCutsceneActive` (`inScriptedCutscene`'s own live signal, `checkHorseDemoMode() ||
+// dComIfGp_event_runCheck()`) is used to latch onto *this specific* cutscene's actual lifetime:
+// once it's been observed true while inside one of these archives (confirming a cutscene is really
+// running, as opposed to just having its assets preloaded), exclusion is released again the moment
+// it goes false -- even though the archive name itself is still sticky -- rather than waiting on a
+// stage reload that may never come. Before the cutscene has started at all (e.g. `Demo01_01`'s
+// initial dialogue, before Epona is puppeted or `event_runCheck()` turns true), exclusion still
+// applies unconditionally, exactly as before.
+enum class ExcludedCutsceneState { kNotStarted, kActive, kEnded };
+static ExcludedCutsceneState s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
+
+static bool always_exclude_spawned_zelda(bool liveCutsceneActive) {
     if (always_show_spawned_zelda()) {
+        s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
         return false;
     }
 
     const char* demoArchive = (const char*)dStage_roomControl_c::getDemoArcName();
+    bool inExcludedArchive = false;
     for (const char* archive : kAlwaysExcludeDemoArchives) {
         if (strcmp(demoArchive, archive) == 0) {
-            return true;
+            inExcludedArchive = true;
+            break;
         }
     }
 
-    return false;
+    if (!inExcludedArchive) {
+        // Reset the latch so re-entering an excluded archive later (if that's ever possible)
+        // starts over from "not started" rather than remembering a stale "ended" state.
+        s_excludedCutsceneState = ExcludedCutsceneState::kNotStarted;
+        return false;
+    }
+
+    if (liveCutsceneActive) {
+        s_excludedCutsceneState = ExcludedCutsceneState::kActive;
+    } else if (s_excludedCutsceneState == ExcludedCutsceneState::kActive) {
+        s_excludedCutsceneState = ExcludedCutsceneState::kEnded;
+    }
+
+    return s_excludedCutsceneState != ExcludedCutsceneState::kEnded;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1627,8 +1665,13 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // cutscene does -- see that function's own comment). Every other scripted-demo/event --
     // including the horse-call/grass-whistle gallop-back, NPC conversations, and area/scene
     // transitions -- is treated the same as any other story cutscene and hidden by default.
-    bool inScriptedCutscene =
-        (horse->checkHorseDemoMode() || dComIfGp_event_runCheck()) && !always_show_spawned_zelda();
+    //
+    // Also fed into `always_exclude_spawned_zelda()` below (before the `!always_show_spawned_zelda()`
+    // qualifier is applied) as its own "is a cutscene actually running right now" signal -- see that
+    // function's own comment for why its demo-archive check alone can't tell a cutscene apart from
+    // merely having once loaded into the same room.
+    bool liveCutsceneActive = horse->checkHorseDemoMode() || dComIfGp_event_runCheck();
+    bool inScriptedCutscene = liveCutsceneActive && !always_show_spawned_zelda();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
@@ -1646,7 +1689,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // outright, with no toggle override -- rather than folding it into `inScriptedCutscene` below,
     // since that check's `checkHorseDemoMode()` isn't reliably true for the opening cutscene's
     // entire duration.
-    if (storyHoZeldaActive || always_exclude_spawned_zelda()) {
+    if (storyHoZeldaActive || always_exclude_spawned_zelda(liveCutsceneActive)) {
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
     } else if (inScriptedCutscene) {
