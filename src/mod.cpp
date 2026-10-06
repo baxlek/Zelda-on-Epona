@@ -1670,7 +1670,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // qualifier is applied) as its own "is a cutscene actually running right now" signal -- see that
     // function's own comment for why its demo-archive check alone can't tell a cutscene apart from
     // merely having once loaded into the same room.
-    bool liveCutsceneActive = horse->checkHorseDemoMode() || dComIfGp_event_runCheck();
+    bool liveCutsceneActive = horse->checkHorseDemoMode() && dComIfGp_event_runCheck();
     bool inScriptedCutscene = liveCutsceneActive && !always_show_spawned_zelda();
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
