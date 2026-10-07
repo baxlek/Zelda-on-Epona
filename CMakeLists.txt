@@ -7,7 +7,7 @@ if (NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED ENV{CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type")
 endif ()
 
-project(zelda_on_epona VERSION 1.2.4 LANGUAGES CXX)
+project(zelda_on_epona VERSION 1.2.3 LANGUAGES CXX)
 
 # The Dusklight version to build against: a release tag (e.g. "v2.0.0") or a commit SHA.
 if (NOT DUSKLIGHT_VERSION)
