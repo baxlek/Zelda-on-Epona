@@ -200,10 +200,13 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
-// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
-// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
-// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+// A handful of story cutscenes (currently "Demo01_01", "Demo01_02" and "Demo90_00") have their
+// own staging/camera work built around Epona *not* visibly carrying a second rider, so this
+// mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda during
+// cutscenes" toggle is set to. Every other cutscene still respects that toggle normally. Demo36
+// is handled separately -- see `update_demo36_bracket()` below -- since it needs to stay hidden
+// across a whole bracket of sub-cuts and ordinary gameplay in between, not just a single matched
+// event or archive name.
 //
 // One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`,
 // the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()`
@@ -267,8 +270,6 @@ static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
-        "Demo36_01",
-        "Demo36_02",
         "Demo90_00",
     };
     const char* eventName = dComIfGp_getEventManager().getRunEventName();
@@ -277,33 +278,55 @@ static bool is_always_hidden_cutscene() {
             return true;
         }
     }
-
-    // Demo36's two sub-cuts ("demo36_01"/"demo36_02" above) are separated by a stretch of
-    // ordinary, non-cutscene-named gameplay (NPC dialogue, walking around) that is still being
-    // driven as part of the same overall scripted sequence -- `getRunEventName()` reports "NO
-    // DATA"/other unrelated staff-ZEV event names for that whole stretch (so it's never caught by
-    // the list above), but per a captured diagnostics log of a full Demo36 playthrough,
-    // `dStage_roomControl_c::getDemoArcName()` stays fixed on "Demo36_00" continuously from the
-    // moment "demo36_01" starts until the player finally leaves that room, including across both
-    // sub-cuts and the entire gap between them, only clearing back to "" once the room actually
-    // changes. Matching against it here (in addition to the event-name check above, which still
-    // covers every other cutscene) hides Zelda through that whole bracket, not just its two named
-    // sub-cuts, while staying scoped to this one confirmed case: `is_always_hidden_cutscene()` is
-    // only ever consulted from `mod_update()`'s own `inScriptedCutscene` branch, i.e. only while
-    // `daHorse_c::checkHorseDemoMode()` already reports Epona is being puppeted by something other
-    // than the player, so this can't bleed into ordinary free-roam gameplay even if some other,
-    // unrelated room were to reuse this same cached archive name later (see the historical note
-    // above on why matching `getDemoArcName()` alone, outside of that context, was rejected before).
-    static const char* const kAlwaysHiddenDemoArcNames[] = {
-        "Demo36_00",
-    };
-    const char* arcName = dStage_roomControl_c::getDemoArcName();
-    for (const char* name : kAlwaysHiddenDemoArcNames) {
-        if (names_equal_case_insensitive(arcName, name)) {
-            return true;
-        }
-    }
     return false;
+}
+
+// Sticky bracket tracking for the Demo36 sequence: hide Zelda from the moment "demo36_01" starts
+// running until "demo36_02" concludes, covering the whole gameplay gap (NPC dialogue, walking
+// around) in between regardless of whether `daHorse_c::checkHorseDemoMode()` is true at any
+// given moment during that gap.
+//
+// This replaces an earlier version that matched `dStage_roomControl_c::getDemoArcName() ==
+// "Demo36_00"` (the name of the currently-loaded cutscene demo *resource archive*) from inside
+// `is_always_hidden_cutscene()` above. That approach had two confirmed problems, both found via
+// a captured dusklight diagnostics log (res/dusklight-20261007-133141.log, since removed):
+//
+// 1. `is_always_hidden_cutscene()` is only ever consulted from `mod_update()`'s own
+//    `inScriptedCutscene` branch, i.e. only while `checkHorseDemoMode()` reports Epona is
+//    actively being puppeted. Most of the gap between "demo36_01" and "demo36_02" is ordinary
+//    gameplay with `checkHorseDemoMode()` false, so that check never actually fired for most of
+//    the gap -- confirmed in the log by rows where `demoArc='Demo36_00'` and
+//    `alwaysHiddenCutscene=true`, yet `horseDemoMode=false` and `hideSpawnedZelda=false`.
+// 2. The archive name doesn't clear until the *room* changes, which happens well after
+//    "demo36_02" itself concludes -- so it stayed matched (and kept Zelda wrongly hidden) through
+//    an unrelated Midna "MHINT_TALK" dialogue that fires shortly after demo36_02, confirmed in
+//    the same log at `event='MHINT_TALK' demoArc='Demo36_00' hideSpawnedZelda=true`.
+//
+// Tracking this bracket off of `getRunEventName()`'s own real per-sub-cut names instead (opening
+// on the first tick "demo36_01" is seen running, closing on the first tick after "demo36_02" is
+// confirmed to have run and then stopped running) avoids both problems: the same log confirms
+// "demo36_02" stops running several ticks before "MHINT_TALK" ever starts (avoiding problem 2),
+// and this bracket is updated unconditionally every tick from `mod_update()`, not gated behind
+// `inScriptedCutscene` (avoiding problem 1).
+static bool s_inDemo36Bracket = false;
+static bool s_seenDemo36_02 = false;
+
+static void update_demo36_bracket() {
+    const char* eventName = dComIfGp_getEventManager().getRunEventName();
+    bool isDemo36_01 = names_equal_case_insensitive(eventName, "demo36_01");
+    bool isDemo36_02 = names_equal_case_insensitive(eventName, "demo36_02");
+
+    if (isDemo36_01) {
+        s_inDemo36Bracket = true;
+        s_seenDemo36_02 = false;
+    }
+    if (isDemo36_02) {
+        s_seenDemo36_02 = true;
+    }
+    if (s_inDemo36Bracket && s_seenDemo36_02 && !isDemo36_02) {
+        s_inDemo36Bracket = false;
+        s_seenDemo36_02 = false;
+    }
 }
 
 // Snapshot of every signal `mod_update()` consults to decide whether this mod's own spawned
@@ -318,6 +341,7 @@ struct CutsceneDiagnosticsSnapshot {
     bool showInCutscenesToggle = false;
     bool hideSpawnedZelda = false;
     bool hasSpawnedZelda = false;
+    bool inDemo36Bracket = false;
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
@@ -332,7 +356,8 @@ struct CutsceneDiagnosticsSnapshot {
                alwaysHiddenCutscene == other.alwaysHiddenCutscene &&
                showInCutscenesToggle == other.showInCutscenesToggle &&
                hideSpawnedZelda == other.hideSpawnedZelda &&
-               hasSpawnedZelda == other.hasSpawnedZelda && demoStaffId == other.demoStaffId &&
+               hasSpawnedZelda == other.hasSpawnedZelda &&
+               inDemo36Bracket == other.inDemo36Bracket && demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
@@ -363,6 +388,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     snapshot.showInCutscenesToggle = show_zelda_in_cutscenes();
     snapshot.hideSpawnedZelda = s_hideSpawnedZeldaInCutscene;
     snapshot.hasSpawnedZelda = s_hasSpawnedZelda;
+    snapshot.inDemo36Bracket = s_inDemo36Bracket;
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
@@ -387,11 +413,12 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
         "cutscene diagnostics: event='{}' demoArc='{}' cutName='{}' demoStaffId={} room={} "
         "layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} inScriptedCutscene={} "
         "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={} "
-        "hasSpawnedZelda={}",
+        "hasSpawnedZelda={} inDemo36Bracket={}",
         snapshot.eventName, snapshot.demoArcName, snapshot.cutName, snapshot.demoStaffId,
         snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
         snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
-        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
+        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda,
+        snapshot.inDemo36Bracket);
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1834,6 +1861,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    // Tracked unconditionally, before any of the early `horse == nullptr`/`checkHorseCallWait()`
+    // returns below, so the Demo36 bracket (see `update_demo36_bracket()`'s own comment) is never
+    // skipped for a tick just because no horse actor happens to be loaded that tick.
+    update_demo36_bracket();
+
     daHorse_c* horse = dComIfGp_getHorseActor();
 
     if (horse == nullptr) {
@@ -1953,6 +1985,22 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (storyHoZeldaActive) {
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
+    } else if (s_inDemo36Bracket) {
+        // Force-hidden for the entire Demo36 bracket (see `update_demo36_bracket()`'s own
+        // comment), regardless of `inScriptedCutscene`/`checkHorseDemoMode()`, since most of the
+        // gap between "demo36_01" and "demo36_02" is ordinary gameplay with `checkHorseDemoMode()`
+        // false. The "Show Zelda during cutscenes" toggle does not apply here, same as the other
+        // always-hidden cutscenes in `is_always_hidden_cutscene()`.
+        s_hideSpawnedZeldaInCutscene = true;
+
+        // Same recovery-respawn reasoning (and same `s_zeldaLostInSameRoom` safety gate) as the
+        // `inScriptedCutscene` branch below: if the engine tore down and recreated the room's
+        // actors mid-bracket (e.g. between the two sub-cuts), she should come back rather than
+        // staying gone for the remainder of the bracket, but only for an in-place reload, never a
+        // cross-room loss.
+        if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda && s_zeldaLostInSameRoom) {
+            spawn_zelda_on_horse(horse);
+        }
     } else if (inScriptedCutscene) {
         // Default behavior: don't intrude on story cutscenes with our own spawned Zelda unless the
         // user opts in via the "Show Zelda during cutscenes" toggle. This only ever affects our
