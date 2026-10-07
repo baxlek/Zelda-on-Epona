@@ -370,6 +370,41 @@ static void remove_spawned_zelda() {
     s_hasSpawnedZelda = false;
 }
 
+// --- Diagnostics: detect engine-initiated deletion of our own spawned Zelda -------------------
+//
+// A captured diagnostics log (see `log_cutscene_diagnostics_if_changed()`) showed `hasSpawnedZelda`
+// flipping from true to false on the very tick the running event name changed from one
+// sub-cutscene to the next (e.g. "demo01_01" -> "demo01_02", both still the same room and layer),
+// while none of this mod's own four `remove_spawned_zelda()` call sites in `mod_update()` were
+// active that tick (`storyHoZeldaActive` stayed false throughout that log, the horse was never
+// null, and `horseDemoMode` never dropped) -- strong evidence that *something other than this
+// mod* deletes our spawned actor as part of switching from one cut to the next. Since
+// `mod_update()`'s respawn branch is deliberately gated to `!inScriptedCutscene` (recreating her
+// mid-cutscene isn't known to be safe, see `spawn_zelda_on_horse()`'s own comment), losing her
+// this way leaves her gone for the rest of that cutscene chain even though every hide/show flag
+// is computed correctly throughout.
+//
+// This hook doesn't change any behavior -- it only logs the exact moment (and surrounding engine
+// state) our own tracked actor is deleted through the engine's generic actor-deletion entry point
+// by anything other than this mod's own `remove_spawned_zelda()`, to pin down precisely which
+// caller is responsible before attempting a real fix.
+DEFINE_HOOK(static_cast<s32 (*)(fopAc_ac_c*)>(&fopAcM_delete), ActorDelete);
+
+static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (s_hasSpawnedZelda && actor != nullptr &&
+        (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId) {
+        daHorse_c* horse = dComIfGp_getHorseActor();
+        mods::log::warn(
+            "spawned HoZelda actor id {} is being deleted via fopAcM_delete; event='{}' "
+            "horseDemoMode={} room={} layer={}",
+            (int)s_spawnedZeldaId, dComIfGp_getEventManager().getRunEventName(),
+            horse != nullptr && horse->checkHorseDemoMode(), dComIfGp_roomControl_getStayNo(),
+            dComIfG_play_c::getLayerNo(0));
+    }
+    return HOOK_CONTINUE;
+}
+
 // `daHorse_c::callHorseSubstance()` (the grass-whistle horse call) special-cases *any* moment
 // where the current HoZelda passenger is riding alone (`checkSingleRide()`, true whenever Link
 // isn't mounted) by assuming the scripted final-duel reunion is underway: instead of the normal
@@ -1557,7 +1592,14 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
 
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
-    ModResult result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
+    ModResult result = mods::hook::add_pre<ActorDelete>(on_actor_delete_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook actor delete, deletion diagnostics will be unavailable: {}",
+                         (int)result);
+        // Not fatal: this hook is diagnostics-only.
+    }
+
+    result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
     if (result != MOD_OK) {
         mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
                          (int)result);
@@ -1863,6 +1905,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
+    mods::hook::uninstall<ActorDelete>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaExecute>();
