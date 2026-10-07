@@ -377,17 +377,20 @@ static void remove_spawned_zelda() {
 // sub-cutscene to the next (e.g. "demo01_01" -> "demo01_02", both still the same room and layer),
 // while none of this mod's own four `remove_spawned_zelda()` call sites in `mod_update()` were
 // active that tick (`storyHoZeldaActive` stayed false throughout that log, the horse was never
-// null, and `horseDemoMode` never dropped) -- strong evidence that *something other than this
-// mod* deletes our spawned actor as part of switching from one cut to the next. Since
-// `mod_update()`'s respawn branch is deliberately gated to `!inScriptedCutscene` (recreating her
-// mid-cutscene isn't known to be safe, see `spawn_zelda_on_horse()`'s own comment), losing her
-// this way leaves her gone for the rest of that cutscene chain even though every hide/show flag
-// is computed correctly throughout.
+// null, and `horseDemoMode` never dropped). A follow-up raw dusklight engine log confirmed the
+// actual mechanism: switching to the next sub-cut recreates the entire room's actor list from
+// scratch (visible as a fresh `fpcBs_Create` for both `fpcNm_HORSE_e` and our own
+// `fpcNm_HOZELDA_e` right at the transition) -- and this hook never fires for her during that
+// reload, meaning the bulk teardown that precedes it doesn't go through this particular
+// `fopAcM_delete` overload at all (our own later `remove_spawned_zelda()` cleanup call for the
+// already-gone old actor is what the dusklight engine's own actor service logs as "doesn't exist",
+// not this hook). `mod_update()`'s `inScriptedCutscene` branch now has a recovery respawn for this
+// exact case.
 //
-// This hook doesn't change any behavior -- it only logs the exact moment (and surrounding engine
-// state) our own tracked actor is deleted through the engine's generic actor-deletion entry point
-// by anything other than this mod's own `remove_spawned_zelda()`, to pin down precisely which
-// caller is responsible before attempting a real fix.
+// This hook is kept as a no-behavior-change diagnostic safety net: it logs the exact moment (and
+// surrounding engine state) our own tracked actor is deleted through this specific generic
+// actor-deletion entry point by anything other than this mod's own `remove_spawned_zelda()`, in
+// case some other, not-yet-observed code path does go through it.
 DEFINE_HOOK(static_cast<s32 (*)(fopAc_ac_c*)>(&fopAcM_delete), ActorDelete);
 
 static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
@@ -1782,14 +1785,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // from under us by the engine itself (its own comment: "e.g. deleted on a room change"),
     // rather than by our own `remove_spawned_zelda()` calls below, which only ever run before
     // this point in the frame via the early `horse == nullptr`/`checkHorseCallWait()` returns
-    // above. If that happens while `checkHorseDemoMode()` is still true, she can never be
-    // respawned for the rest of that cutscene: the respawn branch further down is deliberately
-    // gated to `!inScriptedCutscene` (recreating her mid-cutscene isn't safe, see
-    // `spawn_zelda_on_horse()`'s own comment), so losing her mid-cutscene this way would explain
-    // "Zelda stays invisible for an entire cutscene" even though every hide/show flag for that
-    // cutscene is computed correctly. Logged unconditionally (not gated behind the usual
-    // diagnostics toggle) since it should never normally happen and is cheap to log on the rare
-    // tick it does.
+    // above. A captured dusklight engine log confirmed this happens when switching between two
+    // sub-cuts of the same cutscene chain (e.g. "demo01_01" -> "demo01_02"), which reloads the
+    // entire room's actor list including Epona herself. The `inScriptedCutscene` branch further
+    // down now has a recovery respawn for exactly this case, but logging it here unconditionally
+    // (not gated behind the usual diagnostics toggle) is still useful since it should never
+    // normally happen and is cheap to log on the rare tick it does.
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
         mods::log::warn(
             "spawned HoZelda actor id {} was deleted by the engine (not by this mod) while "
@@ -1861,6 +1862,35 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // regardless of the toggle -- she's un-hidden again the instant the cutscene ends, same
         // as any other cutscene, since this whole branch only runs while `inScriptedCutscene`.
         s_hideSpawnedZeldaInCutscene = !show_zelda_in_cutscenes() || is_always_hidden_cutscene();
+
+        // Recovery for the "stays hidden for the rest of a multi-part cutscene" bug: a captured
+        // dusklight engine log showed that switching between two sub-cuts of the same cutscene
+        // chain (e.g. "demo01_01" -> "demo01_02", observed with the room/layer unchanged) tears
+        // down and recreates the entire room's actor list -- including both `daHorse_c` itself
+        // (visible in that log as a fresh `fpcBs_Create` for `fpcNm_HORSE_e` right at the
+        // transition) and our own spawned Zelda riding it -- as part of loading that next sub-cut's
+        // demo data. Our own cleanup call for the old, already-destroyed actor runs afterwards and
+        // harmlessly no-ops (the engine's own actor service logs "doesn't exist" for it), but
+        // because the respawn branch below is gated to `!inScriptedCutscene`, and a chain like
+        // this one never leaves `inScriptedCutscene` between sub-cuts, she previously had no way to
+        // come back until the entire chain ended, even for sub-cuts that aren't supposed to hide
+        // her at all (`is_always_hidden_cutscene()` only covers the specific sub-cuts staged
+        // without a second rider -- every other sub-cut in the same chain should still show her
+        // once the toggle is on).
+        //
+        // This only fires once she's confirmed lost (`horse->getZeldaActor() == nullptr &&
+        // !s_hasSpawnedZelda`), never for a cutscene she simply never had her in to begin with, so
+        // it can't affect any cutscene already working correctly. Unlike the general
+        // "`fopAcM_create` isn't safe while being puppeted" concern that gates the branch below,
+        // `horse` here has, per the log above, just been freshly created from scratch by the very
+        // reload that lost her -- not a long-running puppet mid-animation -- but this is still a
+        // new, not-previously-validated code path for creating an actor while
+        // `checkHorseDemoMode()` is true, in an area with documented SIGABRT history (see
+        // `kHiddenScale`'s comment). If this reintroduces a crash, this block should be the first
+        // thing reverted.
+        if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
+            spawn_zelda_on_horse(horse);
+        }
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
         // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
