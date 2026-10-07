@@ -596,6 +596,8 @@ Precedes: `remove_spawned_zelda();`
 
 No horse actor is currently loaded (e.g. a different area, or before Epona is tamed). `daHoZelda_c` never deletes itself (it has no `is_delete` method), so if we don't explicitly delete the actor we spawned here it would keep existing and executing forever, orphaned from any horse. That leaked actor is a likely cause of the "two overlapping Zelda models" bug: once a new horse actor appears later, we'd spawn a second HoZelda while the first, orphaned one is still alive and animating.
 
+Also clear Link's `FLG2_HORSE_ZELDA` flag here unconditionally. The flag is normally cleared every tick further below, but only while `horse` is non-null (see the `offHorseZelda()` clearing block near the end of this function); since the real horseback duel can never be active while `horse == nullptr` (it always involves a horse), it's always safe to clear it in this branch too. Without this, if the flag happened to be set on the very last tick before Epona's own actor unloaded (e.g. the player leaving her area/entering a dungeon), it would stay stuck set indefinitely -- since this early return skips the usual clearing code entirely -- silently blocking the player from talking to/checking in with Midna (`daAlink_c::orderZTalk()`'s `checkHorseZelda()` gate) for as long as they stayed away from any area with a horse, even though Zelda (and the duel she only matters for) was nowhere nearby.
+
 ## Lines 1795-1814
 
 Precedes: `bool horseModelNotDrawn = horse->checkHorseCallWait();`
