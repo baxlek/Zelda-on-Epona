@@ -991,7 +991,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (horse == nullptr) {
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
-        daPy_getLinkPlayerActorClass()->offHorseZelda();
+        daPy_py_c* link = daPy_getLinkPlayerActorClass();
+        if (link != nullptr) {
+            link->offHorseZelda();
+        }
         return MOD_OK;
     }
 
