@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
@@ -156,10 +157,11 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
-// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
-// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
-// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo01_03", "Demo36_00" and
+// "Demo90_00") have their own staging/camera work built around Epona *not* visibly carrying a
+// second rider, so this mod's own spawned Zelda must stay hidden through them no matter what the
+// "Show Zelda during cutscenes" toggle is set to. Every other cutscene still respects that toggle
+// normally.
 //
 // One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`,
 // the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()`
@@ -182,16 +184,39 @@ static bool is_title_screen() {
 // this purpose: it already returns "NO DATA"/"NOT RUNNING" sentinel strings, neither of which
 // collide with any real cutscene name below, for the "nothing is running" and "between cuts"
 // cases respectively instead of requiring extra null-checks here).
+//
+// A captured diagnostics log (see `log_cutscene_diagnostics_if_changed()`) from an actual
+// playthrough of the Demo01 sequence showed `getRunEventName()` returning all-lowercase event
+// names at runtime -- "demo01_01", "demo01_02", "demo01_03", and (for the title screen's own
+// cutscene-like event) "demo38_01" -- while this list was written with the capitalized demo
+// *archive*/file naming convention ("Demo01_01", "Demo01_02"). Because the comparison below used
+// to be case-sensitive, none of these names ever actually matched anything, silently making this
+// entire forced-hide list dead code; the comparison is now case-insensitive so it matches
+// regardless of which convention a given event name happens to use. That same log also showed
+// "Demo01_03" is a third cutscene in the same staged, no-second-rider sequence as "Demo01_01" and
+// "Demo01_02" but was missing from this list entirely -- added below.
+static bool names_equal_case_insensitive(const char* a, const char* b) {
+    while (*a != '\0' && *b != '\0') {
+        if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
+        "Demo01_03",
         "Demo36_00",
         "Demo90_00",
     };
     const char* eventName = dComIfGp_getEventManager().getRunEventName();
     for (const char* name : kAlwaysHiddenDemoNames) {
-        if (std::strcmp(eventName, name) == 0) {
+        if (names_equal_case_insensitive(eventName, name)) {
             return true;
         }
     }
