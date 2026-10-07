@@ -124,6 +124,24 @@ static bool is_spawned_zelda(const fopAc_ac_c* actor) {
 // hiding her in place -- instead of deleting and later recreating the actor -- is necessary.
 static bool s_hideSpawnedZeldaInCutscene = false;
 
+// Whether `mod_update()` saw a scripted cutscene driving Epona (`inScriptedCutscene` there) on the
+// previous tick, used to detect the exact moment one concludes. See `is_always_hidden_cutscene()`'s
+// comment for why that edge matters.
+static bool s_wasInScriptedCutscene = false;
+
+// Tracks `inScriptedCutscene` across ticks and clears `dStage_roomControl_c`'s demo-archive name
+// the instant a scripted cutscene ends (the falling edge), so `is_always_hidden_cutscene()` never
+// matches a stale name left over from a cutscene that has already concluded. Called with `false`
+// from every `mod_update()` path that isn't actually mid-cutscene (including the early-outs below
+// where no horse is even loaded), not just the main cutscene-handling branch, so the name is
+// cleared no matter which tick the cutscene happens to end on.
+static void note_scripted_cutscene_state(bool inScriptedCutscene) {
+    if (s_wasInScriptedCutscene && !inScriptedCutscene) {
+        *dStage_roomControl_c::getDemoArcName() = '\0';
+    }
+    s_wasInScriptedCutscene = inScriptedCutscene;
+}
+
 // The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same
 // `dScnPly_c` gameplay scene class as ordinary play, just requested under a different proc name
 // (`fpcNm_OPENING_SCENE_e` instead of `fpcNm_PLAY_SCENE_e`, see `dComIfG_changeOpeningScene()` in
@@ -143,9 +161,15 @@ static bool is_title_screen() {
 //
 // `dStage_roomControl_c::getDemoArcName()` holds the name of the currently-loaded cutscene demo
 // archive (e.g. "Demo01_01"), formatted as `"Demo%02d_%02d"` from the room's layer bank/bank2
-// entry in `loadDemoArchive()`, and reset back to an empty string once the stage/room that loaded
-// it is torn down -- so checking it here naturally also stops forcing the hide the moment the
-// cutscene's room is gone.
+// entry in `loadDemoArchive()`. It is *not* reset back to an empty string once the cutscene itself
+// concludes -- only a full `dStage_Create()` (i.e. loading an entirely new stage) clears it, via
+// `*dStage_roomControl_c::getDemoArcName() = 0;`. Any later event that puppets Epona through the
+// same `checkHorseDemoMode()` machinery without itself loading a new demo archive -- NPC
+// conversations, scene transitions, calling Epona, anything that triggers the camera's letterbox
+// bars (`mTrimHeight`) -- would otherwise still see the previous cutscene's stale name here and
+// incorrectly keep forcing the hide for the rest of the stage. `mod_update()` clears this name
+// itself the instant it detects the actual cutscene has ended, so this check only ever matches
+// while one of these specific cutscenes is actually playing.
 static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
@@ -1537,6 +1561,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // a second HoZelda while the first, orphaned one is still alive and animating.
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
+        note_scripted_cutscene_state(false);
         return MOD_OK;
     }
 
@@ -1554,6 +1579,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // case above.
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
+        note_scripted_cutscene_state(false);
         return MOD_OK;
     }
 
@@ -1590,6 +1616,16 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // horse-call/grass-whistle gallop-back, NPC conversations, and area/scene transitions -- is
     // treated the same as any other story cutscene and hidden by default.
     bool inScriptedCutscene = horse->checkHorseDemoMode() && !is_title_screen();
+
+    // `dStage_roomControl_c`'s demo-archive name (read by `is_always_hidden_cutscene()`) is only
+    // ever cleared by a full `dStage_Create()` (an entirely new stage load), never when a cutscene
+    // itself concludes. Left alone, it would keep naming whichever always-hidden cutscene played
+    // last for the rest of the current stage, wrongly forcing every later `inScriptedCutscene`
+    // event -- NPC conversations, scene transitions, calling Epona, anything else that puppets
+    // Epona the same way -- to also hide this mod's Zelda. `note_scripted_cutscene_state()` clears
+    // it ourselves the instant this cutscene ends, keeping the always-hidden check scoped to only
+    // the cutscene that actually set it.
+    note_scripted_cutscene_state(inScriptedCutscene);
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
