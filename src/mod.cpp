@@ -200,10 +200,11 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
-// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
-// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
-// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_01"/"Demo36_02" and
+// "demo90") have their own staging/camera work built around Epona *not* visibly carrying a second
+// rider, so this mod's own spawned Zelda must stay hidden through them no matter what the "Show
+// Zelda during cutscenes" toggle is set to. Every other cutscene still respects that toggle
+// normally.
 //
 // One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`,
 // the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()`
@@ -249,9 +250,9 @@ static bool is_title_screen() {
 // `demoArc` archive name, which this list is not compared against) -- so this entry was dead code
 // exactly like the Demo01 names used to be, and Zelda stayed visible for the user's entire Demo36
 // playthrough despite the toggle being off. Replaced with the two real sub-event names confirmed
-// by that log. "Demo90_00" has not yet been similarly confirmed against a real log and may well
-// have the same problem (its real running sub-event name(s) are unknown), but is left as-is
-// pending that confirmation rather than guessed at.
+// by that log. "Demo90_00" had the exact same archive-name-vs-running-event-name mismatch:
+// confirmed its real running event name is "demo90" (singular, no "_00" sub-cut suffix), so it
+// was replaced with that name below.
 static bool names_equal_case_insensitive(const char* a, const char* b) {
     while (*a != '\0' && *b != '\0') {
         if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) {
@@ -269,7 +270,7 @@ static bool is_always_hidden_cutscene() {
         "Demo01_02",
         "Demo36_01",
         "Demo36_02",
-        "Demo90_00",
+        "demo90",
     };
     const char* eventName = dComIfGp_getEventManager().getRunEventName();
     for (const char* name : kAlwaysHiddenDemoNames) {
