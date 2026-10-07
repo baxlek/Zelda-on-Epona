@@ -1510,6 +1510,23 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         return MOD_OK;
     }
 
+    if (horse->checkHorseCallWait()) {
+        // Right after loading a save made in a different area than Epona was left in,
+        // `daHorse_c::create()` sets `FLG0_NO_DRAW_WAIT` on her instead of restoring her saved
+        // position (see that function's own stage/room-name comparison against
+        // `dComIfGs_getHorseRestartStageName()`/`...RoomNo()`), and both `draw()` and `execute()`
+        // return immediately while it's set -- vanilla Epona is loaded but neither drawn nor
+        // given a chance to update her physics/collision. She stays that way until the player
+        // calls her with the grass whistle (`callHorseSubstance()` clears the flag the moment
+        // it's set). Without this check, this mod would still spawn/keep its own Zelda riding a
+        // horse that is itself invisible and intangible, leaving Zelda floating there on her own
+        // with no visible Epona underneath her. Treat this exactly like the "no horse loaded"
+        // case above.
+        remove_spawned_zelda();
+        s_hideSpawnedZeldaInCutscene = false;
+        return MOD_OK;
+    }
+
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
     fopAc_ac_c* trackedZelda = find_spawned_zelda();
