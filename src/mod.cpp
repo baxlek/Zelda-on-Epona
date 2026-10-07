@@ -336,27 +336,31 @@ static void hide_zelda_visually(daHoZelda_c* zelda) {
 // itself instead, the same scale-based technique as `hide_zelda_visually()` above: shrink its
 // rendered model down to an imperceptible size without moving or deleting the actor.
 //
-// `field_0x588.mShapeID` is the event-driven shape resource index `daDemo00_c::execute()` reads
+// `field_0x588.mShapeID` is the event-driven shape resource *ID* `daDemo00_c::execute()` reads
 // from its demo-script data every tick (`actor->getShapeId()`) -- a plain integer, not a string or
 // path, so there's nothing here to redirect the way the Light Arrow particle IDs were (see that
-// hook's own comment further below); instead this matches it directly against the firewood
-// model's own resource-index constant for each cutscene's demo archive --
-// `dRes_INDEX_DEMO01_01_BMD_DEMO01_FWOOD_CUT00_GP_1_e` (0x44) and
-// `dRes_INDEX_DEMO01_02_BMD_DEMO01_FWOOD_CUT00_GP_1_e` (0x29) respectively, confirmed identical
-// across every regional/version asset tree in the Dusklight source tree (NTSC-U/E/J, PAL,
-// GameCube and Wii). Scoped to each cutscene's own demo archive name (`getDemoArcName()`) since
-// that same index space is reused by unrelated models (Link, Epona, Midna, ...) in every other
-// cutscene.
+// hook's own comment further below). Critically, it's fed straight into `dComIfG_getObjectIDRes()`
+// (see `daDemo00_c::create()`), which resolves it via `dRes_control_c::getIDRes()` ->
+// `mDoExt_resIDToIndex()` -> `JKRArchive::findIdResource()` -- i.e. the archive's separate, stable
+// per-file resource *ID* field, not the file's raw position in the archive. That position is a
+// *different* number, exposed by the asset headers as a *separate* `dRes_INDEX_*` constant for the
+// same file -- a first attempt at this match used that INDEX constant by mistake (0x44/0x29),
+// which never matched anything at runtime since `mShapeID` is never an archive index. The correct
+// match is each file's own `dRes_ID_DEMO01_0{1,2}_BMD_DEMO01_FWOOD_CUT00_GP_1_e` constant -- 0x2D
+// for "Demo01_01" and 0x15 for "Demo01_02" -- confirmed identical across every regional/version
+// asset tree in the Dusklight source tree (NTSC-U/E/J, PAL, GameCube and Wii). Scoped to each
+// cutscene's own demo archive name (`getDemoArcName()`) since that same ID space is reused by
+// unrelated models (Link, Epona, Midna, ...) in every other cutscene.
 static bool is_hidden_cutscene_firewood_prop(daDemo00_c* demo) {
     const char* demoArcName = dStage_roomControl_c::getDemoArcName();
     if (demoArcName == nullptr) {
         return false;
     }
     if (std::strcmp(demoArcName, "Demo01_01") == 0) {
-        return demo->field_0x588.mShapeID == 0x44;
+        return demo->field_0x588.mShapeID == 0x2D;
     }
     if (std::strcmp(demoArcName, "Demo01_02") == 0) {
-        return demo->field_0x588.mShapeID == 0x29;
+        return demo->field_0x588.mShapeID == 0x15;
     }
     return false;
 }
