@@ -746,7 +746,7 @@ static const u8 kLightArrowResMgrId = 2;
 static bool s_lightArrowJpcReady = false;
 static JPAResourceManager* s_lightArrowResMgr = nullptr;
 
-static const u32 kLightArrowHeapSize = 0x200000;
+static const u32 kLightArrowHeapSize = 0x100000;
 
 static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
