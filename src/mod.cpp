@@ -312,6 +312,11 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
+    daPy_py_c* link = daPy_getLinkPlayerActorClass();
+    if (link != nullptr) {
+        link->offHorseZelda();
+    }
+
     if (s_hideSpawnedZeldaInCutscene) {
         if (zelda->model != nullptr) {
             hide_zelda_visually(zelda);
@@ -1055,10 +1060,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         spawn_zelda_on_horse(horse);
     } else {
         s_hideSpawnedZeldaInCutscene = false;
-    }
-
-    if (is_spawned_zelda_attached(horse)) {
-        daPy_getLinkPlayerActorClass()->offHorseZelda();
     }
 
     log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
