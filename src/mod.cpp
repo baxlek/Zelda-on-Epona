@@ -236,6 +236,7 @@ struct CutsceneDiagnosticsSnapshot {
     bool alwaysHiddenCutscene = false;
     bool showInCutscenesToggle = false;
     bool hideSpawnedZelda = false;
+    bool hasSpawnedZelda = false;
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
@@ -249,7 +250,8 @@ struct CutsceneDiagnosticsSnapshot {
                inScriptedCutscene == other.inScriptedCutscene &&
                alwaysHiddenCutscene == other.alwaysHiddenCutscene &&
                showInCutscenesToggle == other.showInCutscenesToggle &&
-               hideSpawnedZelda == other.hideSpawnedZelda && demoStaffId == other.demoStaffId &&
+               hideSpawnedZelda == other.hideSpawnedZelda &&
+               hasSpawnedZelda == other.hasSpawnedZelda && demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
@@ -279,6 +281,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     snapshot.alwaysHiddenCutscene = is_always_hidden_cutscene();
     snapshot.showInCutscenesToggle = show_zelda_in_cutscenes();
     snapshot.hideSpawnedZelda = s_hideSpawnedZeldaInCutscene;
+    snapshot.hasSpawnedZelda = s_hasSpawnedZelda;
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
@@ -302,11 +305,12 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     mods::log::info(
         "cutscene diagnostics: event='{}' demoArc='{}' cutName='{}' demoStaffId={} room={} "
         "layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} inScriptedCutscene={} "
-        "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={}",
+        "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={} "
+        "hasSpawnedZelda={}",
         snapshot.eventName, snapshot.demoArcName, snapshot.cutName, snapshot.demoStaffId,
         snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
         snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
-        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda);
+        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1729,7 +1733,29 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
+    bool hadSpawnedZeldaBeforeRefresh = s_hasSpawnedZelda;
     fopAc_ac_c* trackedZelda = find_spawned_zelda();
+
+    // Diagnostic: `find_spawned_zelda()` just discovered the actor we spawned was deleted out
+    // from under us by the engine itself (its own comment: "e.g. deleted on a room change"),
+    // rather than by our own `remove_spawned_zelda()` calls below, which only ever run before
+    // this point in the frame via the early `horse == nullptr`/`checkHorseCallWait()` returns
+    // above. If that happens while `checkHorseDemoMode()` is still true, she can never be
+    // respawned for the rest of that cutscene: the respawn branch further down is deliberately
+    // gated to `!inScriptedCutscene` (recreating her mid-cutscene isn't safe, see
+    // `spawn_zelda_on_horse()`'s own comment), so losing her mid-cutscene this way would explain
+    // "Zelda stays invisible for an entire cutscene" even though every hide/show flag for that
+    // cutscene is computed correctly. Logged unconditionally (not gated behind the usual
+    // diagnostics toggle) since it should never normally happen and is cheap to log on the rare
+    // tick it does.
+    if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
+        mods::log::warn(
+            "spawned HoZelda actor id {} was deleted by the engine (not by this mod) while "
+            "horseDemoMode={}, event='{}', room={}, layer={}",
+            (int)s_spawnedZeldaId, horse->checkHorseDemoMode(),
+            dComIfGp_getEventManager().getRunEventName(), dComIfGp_roomControl_getStayNo(),
+            dComIfG_play_c::getLayerNo(0));
+    }
 
     // Diagnostic: if our tracked actor is still alive but isn't the one currently attached to the
     // horse, something else (the story, or another spawn we lost track of) has its own HoZelda
