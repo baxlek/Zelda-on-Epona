@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -133,6 +134,35 @@ static bool s_hideSpawnedZeldaInCutscene = false;
 static bool is_title_screen() {
     scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
+}
+
+// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
+// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
+// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
+// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+//
+// `dStage_roomControl_c::getDemoArcName()` holds the name of the currently-loaded cutscene demo
+// archive (e.g. "Demo01_01"), formatted as `"Demo%02d_%02d"` from the room's layer bank/bank2
+// entry in `loadDemoArchive()`, and reset back to an empty string once the stage/room that loaded
+// it is torn down -- so checking it here naturally also stops forcing the hide the moment the
+// cutscene's room is gone.
+static bool is_always_hidden_cutscene() {
+    static const char* const kAlwaysHiddenDemoNames[] = {
+        "Demo01_01",
+        "Demo01_02",
+        "Demo36_00",
+        "Demo90_00",
+    };
+    const char* demoArcName = dStage_roomControl_c::getDemoArcName();
+    if (demoArcName == nullptr || *demoArcName == '\0') {
+        return false;
+    }
+    for (const char* name : kAlwaysHiddenDemoNames) {
+        if (std::strcmp(demoArcName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1587,7 +1617,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // time a cutscene starts, she simply stays unspawned for its duration (see below) rather
         // than being created mid-cutscene, which isn't safe (see `spawn_zelda_on_horse()`'s
         // callers' comments).
-        s_hideSpawnedZeldaInCutscene = !show_zelda_in_cutscenes();
+        //
+        // A few specific cutscenes (`is_always_hidden_cutscene()`) are staged around Epona not
+        // visibly carrying a second rider at all, so this mod's Zelda stays hidden through those
+        // regardless of the toggle -- she's un-hidden again the instant the cutscene ends, same
+        // as any other cutscene, since this whole branch only runs while `inScriptedCutscene`.
+        s_hideSpawnedZeldaInCutscene = !show_zelda_in_cutscenes() || is_always_hidden_cutscene();
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
         // Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link
         // dismounts: if nobody (neither the story nor this mod) currently has her attached to the
