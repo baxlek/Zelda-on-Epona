@@ -103,6 +103,13 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// The room number our spawned Zelda was last confirmed alive in, and whether the most recent
+// engine-initiated loss of her (if any) happened without the room changing. Both are updated by
+// `mod_update()` and consumed by the `inScriptedCutscene` branch's recovery respawn below -- see
+// that branch's own comment for why the recovery respawn must never fire on a cross-room loss.
+static s32 s_lastKnownZeldaRoomNo = -1;
+static bool s_zeldaLostInSameRoom = false;
+
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -198,6 +205,17 @@ static bool is_title_screen() {
 // same room -- but per direct confirmation, only "Demo01_01" and "Demo01_02" are actually staged
 // without a second rider; "Demo01_03" should respect the "Show Zelda during cutscenes" toggle
 // like any ordinary cutscene, so it does not belong in this forced-hide list.
+//
+// "Demo36_00" had the exact same kind of naming mismatch as the case-sensitivity bug above, just
+// one level deeper: a captured diagnostics log from an actual Demo36 playthrough showed
+// `getRunEventName()` only ever returning "demo36_01" and "demo36_02" for Demo36's own two actual
+// cutscene segments -- "demo36_00" never appears as a *running event* name at all (only as the
+// `demoArc` archive name, which this list is not compared against) -- so this entry was dead code
+// exactly like the Demo01 names used to be, and Zelda stayed visible for the user's entire Demo36
+// playthrough despite the toggle being off. Replaced with the two real sub-event names confirmed
+// by that log. "Demo90_00" has not yet been similarly confirmed against a real log and may well
+// have the same problem (its real running sub-event name(s) are unknown), but is left as-is
+// pending that confirmation rather than guessed at.
 static bool names_equal_case_insensitive(const char* a, const char* b) {
     while (*a != '\0' && *b != '\0') {
         if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) {
@@ -213,7 +231,8 @@ static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
-        "Demo36_00",
+        "Demo36_01",
+        "Demo36_02",
         "Demo90_00",
     };
     const char* eventName = dComIfGp_getEventManager().getRunEventName();
@@ -1779,25 +1798,40 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
     bool hadSpawnedZeldaBeforeRefresh = s_hasSpawnedZelda;
+    s32 roomNo = dComIfGp_roomControl_getStayNo();
     fopAc_ac_c* trackedZelda = find_spawned_zelda();
 
     // Diagnostic: `find_spawned_zelda()` just discovered the actor we spawned was deleted out
     // from under us by the engine itself (its own comment: "e.g. deleted on a room change"),
     // rather than by our own `remove_spawned_zelda()` calls below, which only ever run before
     // this point in the frame via the early `horse == nullptr`/`checkHorseCallWait()` returns
-    // above. A captured dusklight engine log confirmed this happens when switching between two
-    // sub-cuts of the same cutscene chain (e.g. "demo01_01" -> "demo01_02"), which reloads the
-    // entire room's actor list including Epona herself. The `inScriptedCutscene` branch further
-    // down now has a recovery respawn for exactly this case, but logging it here unconditionally
-    // (not gated behind the usual diagnostics toggle) is still useful since it should never
-    // normally happen and is cheap to log on the rare tick it does.
+    // above. A captured dusklight engine log confirmed one specific cause: switching between two
+    // sub-cuts of the same cutscene chain (e.g. "demo01_01" -> "demo01_02") reloads the entire
+    // room's actor list including Epona herself, without the room number ever changing. The
+    // `inScriptedCutscene` branch further down has a recovery respawn for exactly that case, but
+    // -- per a second captured log, this time of a SIGABRT -- blindly respawning her any time she's
+    // merely found missing is unsafe: using the horse-call grass whistle to summon Epona across
+    // areas goes through the exact same "actor is gone, horseDemoMode is true" shape as the safe
+    // sub-cut case, but is a full cross-room teleport, not an in-place reload, and attempting
+    // `fopAcM_create` against the old, about-to-be-torn-down room's horse during that transition
+    // crashed outright. `s_zeldaLostInSameRoom`, computed here by comparing the room she's lost in
+    // against the room she was last confirmed alive in, distinguishes the two: true only for an
+    // in-place reload (room unchanged), false for a cross-room loss like the horse-call teleport.
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
+        s_zeldaLostInSameRoom = (roomNo == s_lastKnownZeldaRoomNo);
         mods::log::warn(
             "spawned HoZelda actor id {} was deleted by the engine (not by this mod) while "
-            "horseDemoMode={}, event='{}', room={}, layer={}",
+            "horseDemoMode={}, event='{}', room={}, layer={}, sameRoomAsBefore={}",
             (int)s_spawnedZeldaId, horse->checkHorseDemoMode(),
-            dComIfGp_getEventManager().getRunEventName(), dComIfGp_roomControl_getStayNo(),
-            dComIfG_play_c::getLayerNo(0));
+            dComIfGp_getEventManager().getRunEventName(), roomNo, dComIfG_play_c::getLayerNo(0),
+            s_zeldaLostInSameRoom);
+    }
+
+    // Keep tracking the room she's actually in for as long as she's alive, so the comparison
+    // above always reflects the room she was in immediately before her most recent loss, not a
+    // stale value from further back.
+    if (s_hasSpawnedZelda) {
+        s_lastKnownZeldaRoomNo = roomNo;
     }
 
     // Diagnostic: if our tracked actor is still alive but isn't the one currently attached to the
@@ -1878,17 +1912,17 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // without a second rider -- every other sub-cut in the same chain should still show her
         // once the toggle is on).
         //
-        // This only fires once she's confirmed lost (`horse->getZeldaActor() == nullptr &&
-        // !s_hasSpawnedZelda`), never for a cutscene she simply never had her in to begin with, so
-        // it can't affect any cutscene already working correctly. Unlike the general
-        // "`fopAcM_create` isn't safe while being puppeted" concern that gates the branch below,
-        // `horse` here has, per the log above, just been freshly created from scratch by the very
-        // reload that lost her -- not a long-running puppet mid-animation -- but this is still a
-        // new, not-previously-validated code path for creating an actor while
-        // `checkHorseDemoMode()` is true, in an area with documented SIGABRT history (see
-        // `kHiddenScale`'s comment). If this reintroduces a crash, this block should be the first
-        // thing reverted.
-        if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
+        // A second captured log (this time ending in a SIGABRT) showed this straightforward-looking
+        // fix is NOT safe to apply unconditionally: using the horse-call grass whistle to summon
+        // Epona from a different area she'd been left in produces the exact same observable shape
+        // here (`horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda` while
+        // `checkHorseDemoMode()` is true for the horse-call's own gallop-back sequence), but is a
+        // full cross-room teleport tearing down and rebuilding an entirely different room, not an
+        // in-place same-room reload -- and `spawn_zelda_on_horse()` against the stale, about-to-be-
+        // destroyed old room's horse crashed outright. `s_zeldaLostInSameRoom` (computed above,
+        // right where her loss is first detected) tells the two apart: only a same-room loss is
+        // safe to recover from here, matching the one case this was actually confirmed safe for.
+        if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda && s_zeldaLostInSameRoom) {
             spawn_zelda_on_horse(horse);
         }
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
