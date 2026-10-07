@@ -18,7 +18,6 @@
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
-#include "d/d_event.h"
 #include "d/d_event_manager.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
@@ -143,32 +142,27 @@ static bool is_title_screen() {
 // so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
 // during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
 //
-// Two earlier versions of this check matched against
-// `dStage_roomControl_c::getDemoArcName()`, the name of the currently-loaded cutscene demo
-// *resource archive* -- but that turned out to be the wrong signal to key off of at all, not just
-// one that needed staleness-tracking. `loadDemoArchive()` only ever loads a new archive into an
-// empty name slot (`if (*getDemoArcName() == 0) { ... }`) as part of a *room* being created, and
-// deliberately leaves it alone afterwards so that any number of distinct scripted events sharing
-// that room can reuse its one cached archive without reloading it -- so e.g. "Demo01_02" and
-// "Demo01_03" can perfectly well be two separate, back-to-back *events* that both happen to pull
-// their assets from one shared archive, in which case `getDemoArcName()` never names the second
-// one at all, no matter how its value is tracked.
+// One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`,
+// the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()`
+// only ever loads a new archive into an empty name slot as part of a *room* being created, and
+// deliberately leaves it alone afterwards so any number of distinct cutscenes sharing that room
+// can reuse its one cached archive without reloading it, so it never updates again once a later,
+// different cutscene starts sharing that same room.
 //
-// The event each individual cutscene actually *is* -- as opposed to the archive its assets happen
-// to come from -- is tracked completely separately, and without any of that caching: whichever
-// scripted event is currently running (ordered via `dEvt_control_c::order()`/`compulsory()`) is
-// named by `dComIfGp_getEventManager().getEventData(dComIfGp_getEvent()->mEventId)->getName()`,
-// which the engine reassigns to a new event's own name (e.g. "Demo01_03") the instant that next
-// event actually starts -- precisely the moment this check needs to notice. (This is also how the
-// engine's own debug event-start logging identifies "which event is this" -- see
-// `dEvt_control_c::entry()` in `d_event.cpp`.)
+// A second version instead matched `dComIfGp_getEvent()->mEventId` (via `dEvDtEvent_c::getName()`
+// off of `dEvent_manager_c::getEventData()`) -- `dEvt_control_c::mEventId` only gets assigned by
+// that class's own `setParam()`, called from its `demoCheck()`/`talkCheck()`/etc. "order accepted"
+// paths, so any cutscene instead ordered directly against `dEvent_manager_c::order()` (e.g. via a
+// map-tool-triggered event, bypassing `dEvt_control_c` entirely) leaves `mEventId` stuck on
+// whatever the last `dEvt_control_c`-routed event happened to be -- which is exactly backwards
+// from a real signal and why that version hid the wrong cutscenes and showed the right one.
 //
-// Not every `checkHorseDemoMode()` moment has a named event behind it, though: NPC conversations,
-// scene transitions, and calling Epona (the grass whistle) all puppet her through the same
-// mechanism without ever calling `dEvt_control_c::order()`, leaving `mEventId == -1` the whole
-// time. Those simply find no event name to match here and fall through to `false`, correctly
-// leaving them to respect the "Show Zelda during cutscenes" toggle normally instead of being
-// force-hidden.
+// `dEvent_manager_c` tracks the event it is *itself* actually running completely independently of
+// `dEvt_control_c`, in its own `mCurrentEvId` member -- set by its own `order()` regardless of
+// which caller invoked it -- and exposes it pre-built via `getRunEventName()` (named exactly for
+// this purpose: it already returns "NO DATA"/"NOT RUNNING" sentinel strings, neither of which
+// collide with any real cutscene name below, for the "nothing is running" and "between cuts"
+// cases respectively instead of requiring extra null-checks here).
 static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
@@ -176,15 +170,7 @@ static bool is_always_hidden_cutscene() {
         "Demo36_00",
         "Demo90_00",
     };
-    dEvt_control_c* event = dComIfGp_getEvent();
-    if (event == nullptr) {
-        return false;
-    }
-    dEvDtEvent_c* eventData = dComIfGp_getEventManager().getEventData(event->mEventId);
-    if (eventData == nullptr) {
-        return false;
-    }
-    const char* eventName = eventData->getName();
+    const char* eventName = dComIfGp_getEventManager().getRunEventName();
     for (const char* name : kAlwaysHiddenDemoNames) {
         if (std::strcmp(eventName, name) == 0) {
             return true;
