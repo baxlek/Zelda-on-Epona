@@ -157,11 +157,10 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo01_03", "Demo36_00" and
-// "Demo90_00") have their own staging/camera work built around Epona *not* visibly carrying a
-// second rider, so this mod's own spawned Zelda must stay hidden through them no matter what the
-// "Show Zelda during cutscenes" toggle is set to. Every other cutscene still respects that toggle
-// normally.
+// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
+// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
+// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
+// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
 //
 // One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`,
 // the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()`
@@ -192,9 +191,13 @@ static bool is_title_screen() {
 // *archive*/file naming convention ("Demo01_01", "Demo01_02"). Because the comparison below used
 // to be case-sensitive, none of these names ever actually matched anything, silently making this
 // entire forced-hide list dead code; the comparison is now case-insensitive so it matches
-// regardless of which convention a given event name happens to use. That same log also showed
-// "Demo01_03" is a third cutscene in the same staged, no-second-rider sequence as "Demo01_01" and
-// "Demo01_02" but was missing from this list entirely -- added below.
+// regardless of which convention a given event name happens to use.
+//
+// "Demo01_03" was briefly added here on the (incorrect) assumption that it was staged the same
+// way as "Demo01_01"/"Demo01_02" just because it's part of the same numbered sequence sharing the
+// same room -- but per direct confirmation, only "Demo01_01" and "Demo01_02" are actually staged
+// without a second rider; "Demo01_03" should respect the "Show Zelda during cutscenes" toggle
+// like any ordinary cutscene, so it does not belong in this forced-hide list.
 static bool names_equal_case_insensitive(const char* a, const char* b) {
     while (*a != '\0' && *b != '\0') {
         if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) {
@@ -210,7 +213,6 @@ static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
-        "Demo01_03",
         "Demo36_00",
         "Demo90_00",
     };
