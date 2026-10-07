@@ -21,6 +21,7 @@
 #include "d/d_event_manager.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
+#include "helpers/string.hpp"
 #include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
@@ -68,6 +69,24 @@ static bool auto_target_enemies_enabled() {
     bool value = false;
     if (g_cvarAutoTargetEnemies == 0 ||
         svc_config->get_bool(mod_ctx, g_cvarAutoTargetEnemies, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
+// Whether `mod_update()` should log a snapshot of every signal that feeds into the cutscene
+// hide/show decision (see `log_cutscene_diagnostics_if_changed()` below) any time one of them
+// changes. Off by default: after several guess-based fixes for "Zelda stays hidden after certain
+// cutscenes" each turned out to be wrong about what the engine was actually reporting at runtime,
+// this toggle exists so a real playthrough can capture the actual values involved (event name,
+// demo cut name, room/layer, etc.) instead of relying on reading the engine's source again.
+// Exposed as a toggle in the mod's panel in the host Mods window, same as the others above.
+static ConfigVarHandle g_cvarLogCutsceneDiagnostics = 0;
+
+static bool log_cutscene_diagnostics_enabled() {
+    bool value = false;
+    if (g_cvarLogCutsceneDiagnostics == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarLogCutsceneDiagnostics, &value) != MOD_OK) {
         return false;
     }
     return value;
@@ -177,6 +196,90 @@ static bool is_always_hidden_cutscene() {
         }
     }
     return false;
+}
+
+// Snapshot of every signal `mod_update()` consults to decide whether this mod's own spawned
+// Zelda should be hidden this tick. Kept as a plain struct (rather than just a block of local
+// variables) so it can be compared whole against the previous tick's snapshot below.
+struct CutsceneDiagnosticsSnapshot {
+    bool horseDemoMode = false;
+    bool titleScreen = false;
+    bool storyHoZeldaActive = false;
+    bool inScriptedCutscene = false;
+    bool alwaysHiddenCutscene = false;
+    bool showInCutscenesToggle = false;
+    bool hideSpawnedZelda = false;
+    int demoStaffId = -1;
+    int roomNo = -1;
+    int layerNo = -1;
+    char eventName[64] = {0};
+    char demoArcName[64] = {0};
+    char cutName[64] = {0};
+
+    bool operator==(const CutsceneDiagnosticsSnapshot& other) const {
+        return horseDemoMode == other.horseDemoMode && titleScreen == other.titleScreen &&
+               storyHoZeldaActive == other.storyHoZeldaActive &&
+               inScriptedCutscene == other.inScriptedCutscene &&
+               alwaysHiddenCutscene == other.alwaysHiddenCutscene &&
+               showInCutscenesToggle == other.showInCutscenesToggle &&
+               hideSpawnedZelda == other.hideSpawnedZelda && demoStaffId == other.demoStaffId &&
+               roomNo == other.roomNo && layerNo == other.layerNo &&
+               std::strcmp(eventName, other.eventName) == 0 &&
+               std::strcmp(demoArcName, other.demoArcName) == 0 &&
+               std::strcmp(cutName, other.cutName) == 0;
+    }
+    bool operator!=(const CutsceneDiagnosticsSnapshot& other) const { return !(*this == other); }
+};
+
+// Logs every signal feeding into the cutscene hide/show decision above, but only the instant any
+// of them actually changes from the previous tick -- logging unconditionally every tick would
+// flood the log with hundreds of identical lines per second during ordinary gameplay. Gated
+// behind the "Log cutscene diagnostics" toggle (off by default) so it never runs unless someone
+// is actively trying to capture real data for this bug, per `log_cutscene_diagnostics_enabled()`
+// above.
+static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScreen,
+                                                 bool inScriptedCutscene,
+                                                 bool storyHoZeldaActive) {
+    if (!log_cutscene_diagnostics_enabled()) {
+        return;
+    }
+
+    CutsceneDiagnosticsSnapshot snapshot;
+    snapshot.horseDemoMode = horse->checkHorseDemoMode();
+    snapshot.titleScreen = titleScreen;
+    snapshot.storyHoZeldaActive = storyHoZeldaActive;
+    snapshot.inScriptedCutscene = inScriptedCutscene;
+    snapshot.alwaysHiddenCutscene = is_always_hidden_cutscene();
+    snapshot.showInCutscenesToggle = show_zelda_in_cutscenes();
+    snapshot.hideSpawnedZelda = s_hideSpawnedZeldaInCutscene;
+    snapshot.demoStaffId = horse->m_demoStaffId;
+    snapshot.roomNo = dComIfGp_roomControl_getStayNo();
+    snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
+    SafeStringCopyTruncate(snapshot.eventName, dComIfGp_getEventManager().getRunEventName());
+    SafeStringCopyTruncate(snapshot.demoArcName, dStage_roomControl_c::getDemoArcName());
+    if (snapshot.demoStaffId >= 0) {
+        char* cutName = dComIfGp_getEventManager().getMyNowCutNameStr(snapshot.demoStaffId);
+        if (cutName != nullptr) {
+            SafeStringCopyTruncate(snapshot.cutName, cutName);
+        }
+    }
+
+    static CutsceneDiagnosticsSnapshot s_lastLoggedSnapshot;
+    static bool s_hasLoggedOnce = false;
+    if (s_hasLoggedOnce && snapshot == s_lastLoggedSnapshot) {
+        return;
+    }
+    s_hasLoggedOnce = true;
+    s_lastLoggedSnapshot = snapshot;
+
+    mods::log::info(
+        "cutscene diagnostics: event='{}' demoArc='{}' cutName='{}' demoStaffId={} room={} "
+        "layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} inScriptedCutscene={} "
+        "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={}",
+        snapshot.eventName, snapshot.demoArcName, snapshot.cutName, snapshot.demoStaffId,
+        snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
+        snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
+        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda);
 }
 
 // `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other
@@ -1406,6 +1509,18 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
+
+    UiControlDesc diagnosticsControl = UI_CONTROL_DESC_INIT;
+    diagnosticsControl.kind = UI_CONTROL_TOGGLE;
+    diagnosticsControl.label = "Log cutscene diagnostics";
+    diagnosticsControl.help_rml = "When on, logs the event name, cutscene name, room/layer, and "
+                                   "every other signal this mod uses to decide whether to hide "
+                                   "Zelda during a cutscene, any time one of them changes. Off "
+                                   "by default -- only useful for reporting bugs with the "
+                                   "cutscene hide/show behavior above.";
+    diagnosticsControl.binding = UI_BINDING_CONFIG_VAR;
+    diagnosticsControl.config_var = g_cvarLogCutsceneDiagnostics;
+    svc_ui->pane_add_control(mod_ctx, panel, &diagnosticsControl, nullptr);
     return MOD_OK;
 }
 
@@ -1523,6 +1638,20 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
         // Not fatal: `auto_target_enemies_enabled()` already falls back to "off" when the var
         // isn't registered.
+    }
+
+    ConfigVarDesc diagnosticsCvarDesc = CONFIG_VAR_DESC_INIT;
+    diagnosticsCvarDesc.name = "logCutsceneDiagnostics";
+    diagnosticsCvarDesc.type = CONFIG_VAR_BOOL;
+    diagnosticsCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &diagnosticsCvarDesc, &g_cvarLogCutsceneDiagnostics);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register logCutsceneDiagnostics option, diagnostics logging will stay "
+            "off: {}",
+            (int)result);
+        // Not fatal: `log_cutscene_diagnostics_enabled()` already falls back to "off" when the
+        // var isn't registered.
     }
 
     UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
@@ -1672,6 +1801,9 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         (ActorId)fopAcM_GetID(currentZelda) == s_spawnedZeldaId) {
         daPy_getLinkPlayerActorClass()->offHorseZelda();
     }
+
+    log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
+                                         storyHoZeldaActive);
 
     return MOD_OK;
 }
