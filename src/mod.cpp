@@ -130,11 +130,12 @@ static bool s_hideSpawnedZeldaInCutscene = false;
 // matters.
 static bool s_wasInScriptedCutscene = false;
 
-// The room `dStage_roomControl_c::getDemoArcName()` was last paired with, and the name itself, as
-// last observed by `is_always_hidden_cutscene()`. Together with `s_demoArcNameStale` below, these
-// let that function notice when the name can no longer be trusted to identify the *current*
-// cutscene -- see its own comment for the two specific ways that happens.
+// The room and layer number `dStage_roomControl_c::getDemoArcName()` was last paired with, and the
+// name itself, as last observed by `is_always_hidden_cutscene()`. Together with `s_demoArcNameStale`
+// below, these let that function notice when the name can no longer be trusted to identify the
+// *current* cutscene -- see its own comment for the specific ways that happens.
 static int s_demoArcRoomNo = -1;
+static int s_demoArcLayerNo = -1;
 static char s_demoArcCachedName[10] = "";
 
 // Set whenever `is_always_hidden_cutscene()` has reason to believe `getDemoArcName()` is carrying
@@ -187,17 +188,21 @@ static bool is_title_screen() {
 // (`dComIfG_deleteObjectResMain(demoArcName)`) when the name is still non-empty at that point --
 // clearing it early would leak that archive's memory for the rest of the play session instead.
 //
-// So instead of trusting the name outright, this tracks (room number, name) pairs it has already
-// seen, read-only, to notice the two ways a surviving name stops actually describing the current
-// cutscene:
+// So instead of trusting the name outright, this tracks (room number, layer number, name) it has
+// already seen, read-only, to notice the ways a surviving name stops actually describing the
+// current cutscene:
 //  1. `note_scripted_cutscene_state()`'s falling edge: once a scripted cutscene ends, any *later*
 //     re-entry into cutscene mode (another story beat, an NPC conversation, calling Epona, ...)
 //     that doesn't itself load a new demo archive must not inherit the old one's name.
-//  2. A genuinely new per-room cutscene archive silently failing to load for the reason above:
-//     Epona can be continuously puppeted (`checkHorseDemoMode()` never dropping) across several
-//     consecutive rooms, each meant to play its own distinct demo archive (e.g. "Demo01_02" then
-//     "Demo01_03" back to back) -- if the name never actually changes once the room does, it's
-//     pointing at the previous room's cutscene, not the current one.
+//  2. A genuinely new cutscene archive silently failing to load for the reason above, while Epona
+//     stays continuously puppeted (`checkHorseDemoMode()` never dropping) across the switch, e.g.
+//     a room transition to one meant to play its own distinct archive (room number changes), or a
+//     bank/layer switch within the *same* room meant to do the same thing -- `loadDemoArchive()`
+//     indexes its room's layer-bank table by `dComIfG_play_c::getLayerNo()`, so two back-to-back
+//     cutscenes (e.g. "Demo01_02" then "Demo01_03") can perfectly well share one room while still
+//     being distinct archives selected by a layer change (game-progress flags), not a room change.
+//     Either the room number or the layer number changing while the name stays the same is proof
+//     the name belongs to whichever of those played first, not the current one.
 // Either way, the name is only trusted again once it's observed to actually change to something
 // new, which happens naturally the next time a fresh archive does load successfully.
 static bool is_always_hidden_cutscene() {
@@ -211,19 +216,23 @@ static bool is_always_hidden_cutscene() {
     if (demoArcName == nullptr || *demoArcName == '\0') {
         s_demoArcCachedName[0] = '\0';
         s_demoArcRoomNo = -1;
+        s_demoArcLayerNo = -1;
         return false;
     }
 
     int roomNo = dComIfGp_roomControl_getStayNo();
+    int layerNo = dComIfG_play_c::getLayerNo(0);
     if (std::strcmp(demoArcName, s_demoArcCachedName) != 0) {
         // A fresh name: a new demo archive actually loaded, so trust it again.
         std::strncpy(s_demoArcCachedName, demoArcName, sizeof(s_demoArcCachedName) - 1);
         s_demoArcCachedName[sizeof(s_demoArcCachedName) - 1] = '\0';
         s_demoArcRoomNo = roomNo;
+        s_demoArcLayerNo = layerNo;
         s_demoArcNameStale = false;
-    } else if (roomNo != s_demoArcRoomNo) {
-        // Same name, but the room has changed since it was set (case 2 above).
+    } else if (roomNo != s_demoArcRoomNo || layerNo != s_demoArcLayerNo) {
+        // Same name, but the room or layer has changed since it was set (case 2 above).
         s_demoArcRoomNo = roomNo;
+        s_demoArcLayerNo = layerNo;
         s_demoArcNameStale = true;
     }
 
