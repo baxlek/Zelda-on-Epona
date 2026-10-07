@@ -18,6 +18,8 @@
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_event.h"
+#include "d/d_event_manager.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
@@ -124,38 +126,6 @@ static bool is_spawned_zelda(const fopAc_ac_c* actor) {
 // hiding her in place -- instead of deleting and later recreating the actor -- is necessary.
 static bool s_hideSpawnedZeldaInCutscene = false;
 
-// Whether `mod_update()` saw a scripted cutscene driving Epona (`inScriptedCutscene` there) on the
-// previous tick. Used by `is_always_hidden_cutscene()` (via `note_scripted_cutscene_state()`) to
-// detect the exact moment one concludes -- see that function's own comment for why that edge
-// matters.
-static bool s_wasInScriptedCutscene = false;
-
-// The room and layer number `dStage_roomControl_c::getDemoArcName()` was last paired with, and the
-// name itself, as last observed by `is_always_hidden_cutscene()`. Together with `s_demoArcNameStale`
-// below, these let that function notice when the name can no longer be trusted to identify the
-// *current* cutscene -- see its own comment for the specific ways that happens.
-static int s_demoArcRoomNo = -1;
-static int s_demoArcLayerNo = -1;
-static char s_demoArcCachedName[10] = "";
-
-// Set whenever `is_always_hidden_cutscene()` has reason to believe `getDemoArcName()` is carrying
-// over a previous cutscene's name rather than naming the one actually playing now. See that
-// function's own comment for the two cases that set it, and the "// A fresh name" branch below for
-// where it is cleared again.
-static bool s_demoArcNameStale = false;
-
-// Tracks `inScriptedCutscene` across ticks so `is_always_hidden_cutscene()` can tell when a
-// scripted cutscene has just ended (the falling edge): called with `false` from every
-// `mod_update()` path that isn't actually mid-cutscene (including the early-outs below where no
-// horse is even loaded), not just the main cutscene-handling branch, so the edge is never missed
-// regardless of which tick the cutscene happens to end on.
-static void note_scripted_cutscene_state(bool inScriptedCutscene) {
-    if (s_wasInScriptedCutscene && !inScriptedCutscene) {
-        s_demoArcNameStale = true;
-    }
-    s_wasInScriptedCutscene = inScriptedCutscene;
-}
-
 // The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same
 // `dScnPly_c` gameplay scene class as ordinary play, just requested under a different proc name
 // (`fpcNm_OPENING_SCENE_e` instead of `fpcNm_PLAY_SCENE_e`, see `dComIfG_changeOpeningScene()` in
@@ -173,38 +143,32 @@ static bool is_title_screen() {
 // so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
 // during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
 //
-// `dStage_roomControl_c::getDemoArcName()` holds the name of the currently-loaded cutscene demo
-// archive (e.g. "Demo01_01"), formatted as `"Demo%02d_%02d"` from the room's layer bank/bank2
-// entry in `loadDemoArchive()`. That function only ever writes a *new* name there while the
-// existing one is empty (`if (*getDemoArcName() == 0) { ... SAFE_SPRINTF(...); ... }`), and the
-// only place that ever resets it back to empty is a full `dStage_Create()` (i.e. loading an
-// entirely new stage) -- so within one continuous stage, once any demo archive name is set, it
-// can be carried over completely unchanged across any number of *later* events that never
-// themselves needed a demo archive at all: NPC conversations, scene transitions, calling Epona,
-// anything else that triggers the camera's letterbox bars (`mTrimHeight`). Deliberately mutating
-// `getDemoArcName()`'s buffer ourselves to "unstick" it isn't safe either: it's read everywhere
-// cutscene actors fetch their models/animations from (`d_a_demo00.cpp`, `d_a_alink_demo.inc`,
-// `d_a_midna.cpp`, `d_demo.cpp`), and `dStage_Delete()` only frees the archive's resource
-// (`dComIfG_deleteObjectResMain(demoArcName)`) when the name is still non-empty at that point --
-// clearing it early would leak that archive's memory for the rest of the play session instead.
+// Two earlier versions of this check matched against
+// `dStage_roomControl_c::getDemoArcName()`, the name of the currently-loaded cutscene demo
+// *resource archive* -- but that turned out to be the wrong signal to key off of at all, not just
+// one that needed staleness-tracking. `loadDemoArchive()` only ever loads a new archive into an
+// empty name slot (`if (*getDemoArcName() == 0) { ... }`) as part of a *room* being created, and
+// deliberately leaves it alone afterwards so that any number of distinct scripted events sharing
+// that room can reuse its one cached archive without reloading it -- so e.g. "Demo01_02" and
+// "Demo01_03" can perfectly well be two separate, back-to-back *events* that both happen to pull
+// their assets from one shared archive, in which case `getDemoArcName()` never names the second
+// one at all, no matter how its value is tracked.
 //
-// So instead of trusting the name outright, this tracks (room number, layer number, name) it has
-// already seen, read-only, to notice the ways a surviving name stops actually describing the
-// current cutscene:
-//  1. `note_scripted_cutscene_state()`'s falling edge: once a scripted cutscene ends, any *later*
-//     re-entry into cutscene mode (another story beat, an NPC conversation, calling Epona, ...)
-//     that doesn't itself load a new demo archive must not inherit the old one's name.
-//  2. A genuinely new cutscene archive silently failing to load for the reason above, while Epona
-//     stays continuously puppeted (`checkHorseDemoMode()` never dropping) across the switch, e.g.
-//     a room transition to one meant to play its own distinct archive (room number changes), or a
-//     bank/layer switch within the *same* room meant to do the same thing -- `loadDemoArchive()`
-//     indexes its room's layer-bank table by `dComIfG_play_c::getLayerNo()`, so two back-to-back
-//     cutscenes (e.g. "Demo01_02" then "Demo01_03") can perfectly well share one room while still
-//     being distinct archives selected by a layer change (game-progress flags), not a room change.
-//     Either the room number or the layer number changing while the name stays the same is proof
-//     the name belongs to whichever of those played first, not the current one.
-// Either way, the name is only trusted again once it's observed to actually change to something
-// new, which happens naturally the next time a fresh archive does load successfully.
+// The event each individual cutscene actually *is* -- as opposed to the archive its assets happen
+// to come from -- is tracked completely separately, and without any of that caching: whichever
+// scripted event is currently running (ordered via `dEvt_control_c::order()`/`compulsory()`) is
+// named by `dComIfGp_getEventManager().getEventData(dComIfGp_getEvent()->mEventId)->getName()`,
+// which the engine reassigns to a new event's own name (e.g. "Demo01_03") the instant that next
+// event actually starts -- precisely the moment this check needs to notice. (This is also how the
+// engine's own debug event-start logging identifies "which event is this" -- see
+// `dEvt_control_c::entry()` in `d_event.cpp`.)
+//
+// Not every `checkHorseDemoMode()` moment has a named event behind it, though: NPC conversations,
+// scene transitions, and calling Epona (the grass whistle) all puppet her through the same
+// mechanism without ever calling `dEvt_control_c::order()`, leaving `mEventId == -1` the whole
+// time. Those simply find no event name to match here and fall through to `false`, correctly
+// leaving them to respect the "Show Zelda during cutscenes" toggle normally instead of being
+// force-hidden.
 static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
@@ -212,35 +176,17 @@ static bool is_always_hidden_cutscene() {
         "Demo36_00",
         "Demo90_00",
     };
-    const char* demoArcName = dStage_roomControl_c::getDemoArcName();
-    if (demoArcName == nullptr || *demoArcName == '\0') {
-        s_demoArcCachedName[0] = '\0';
-        s_demoArcRoomNo = -1;
-        s_demoArcLayerNo = -1;
+    dEvt_control_c* event = dComIfGp_getEvent();
+    if (event == nullptr) {
         return false;
     }
-
-    int roomNo = dComIfGp_roomControl_getStayNo();
-    int layerNo = dComIfG_play_c::getLayerNo(0);
-    if (std::strcmp(demoArcName, s_demoArcCachedName) != 0) {
-        // A fresh name: a new demo archive actually loaded, so trust it again.
-        std::strncpy(s_demoArcCachedName, demoArcName, sizeof(s_demoArcCachedName) - 1);
-        s_demoArcCachedName[sizeof(s_demoArcCachedName) - 1] = '\0';
-        s_demoArcRoomNo = roomNo;
-        s_demoArcLayerNo = layerNo;
-        s_demoArcNameStale = false;
-    } else if (roomNo != s_demoArcRoomNo || layerNo != s_demoArcLayerNo) {
-        // Same name, but the room or layer has changed since it was set (case 2 above).
-        s_demoArcRoomNo = roomNo;
-        s_demoArcLayerNo = layerNo;
-        s_demoArcNameStale = true;
-    }
-
-    if (s_demoArcNameStale) {
+    dEvDtEvent_c* eventData = dComIfGp_getEventManager().getEventData(event->mEventId);
+    if (eventData == nullptr) {
         return false;
     }
+    const char* eventName = eventData->getName();
     for (const char* name : kAlwaysHiddenDemoNames) {
-        if (std::strcmp(demoArcName, name) == 0) {
+        if (std::strcmp(eventName, name) == 0) {
             return true;
         }
     }
@@ -1619,7 +1565,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // a second HoZelda while the first, orphaned one is still alive and animating.
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
-        note_scripted_cutscene_state(false);
         return MOD_OK;
     }
 
@@ -1637,7 +1582,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         // case above.
         remove_spawned_zelda();
         s_hideSpawnedZeldaInCutscene = false;
-        note_scripted_cutscene_state(false);
         return MOD_OK;
     }
 
@@ -1674,10 +1618,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // horse-call/grass-whistle gallop-back, NPC conversations, and area/scene transitions -- is
     // treated the same as any other story cutscene and hidden by default.
     bool inScriptedCutscene = horse->checkHorseDemoMode() && !is_title_screen();
-
-    // Lets `is_always_hidden_cutscene()` notice the falling edge of this same cutscene state --
-    // see that function's own comment for why a stale `getDemoArcName()` needs that signal.
-    note_scripted_cutscene_state(inScriptedCutscene);
 
     // Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g.
     // the real horseback archery duel against Ganondorf, where the game itself places and drives
