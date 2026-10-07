@@ -100,8 +100,8 @@ archery duel, where she rides alone) is never touched or duplicated.
 > "Demo01_01" and "Demo01_02" (the two cutscenes mentioned above with the firewood bundle) used to stay on this
 > forced-hidden list too, regardless of the toggle, specifically because of that overlap. That's now fixed at the
 > source instead: the firewood prop itself is hidden the same way Zelda is (shrunk to an imperceptible size, never
-> deleted or moved), so both cutscenes were taken off the forced-hidden list and now respect the toggle like any
-> other.
+> deleted or moved) *and* its draw call is skipped outright as a second, independent safeguard, so both cutscenes
+> were taken off the forced-hidden list and now respect the toggle like any other.
 >
 > Hiding her is no longer done by deleting and later recreating the actor. That approach — and a more direct
 > "just unload/reload her resources" one before it — both caused a SIGABRT, almost certainly because recreating an

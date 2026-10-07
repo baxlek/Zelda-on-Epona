@@ -376,6 +376,25 @@ static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+// Belt-and-suspenders on top of the scale override above: shrinking the model down to
+// `kHiddenScale` should already make it imperceptible by the time `daDemo00_c::draw()` submits its
+// display list, but that depends on `setBaseScale()`'s effect actually reaching the draw matrix
+// through several layers of `J3DModel`/`J3DMtxBuffer` plumbing this mod doesn't control. Skipping
+// `draw()` entirely whenever the same condition holds is a second, independent way to make sure
+// the firewood prop never actually gets submitted for rendering, regardless of whether the scale
+// trick alone is enough on its own. `execute()`/`setBaseMtx()` above are left to run every tick
+// exactly as before -- only the display-list submission itself is skipped -- so the actor, its
+// position, and its animation state are completely unaffected; it simply never gets drawn.
+DEFINE_HOOK(&daDemo00_c::draw, Demo00Draw);
+
+static HookAction on_demo00_draw_pre(ModContext*, void* args, void*, void*) {
+    daDemo00_c* demo = mods::arg<daDemo00_c*>(args, 0);
+    if (demo->mModel.field_0x5d4 != nullptr && is_hidden_cutscene_firewood_prop(demo)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     // How much of a rear's local-offset blend (0 = fully vanilla, 1 = fully Link's offset) has
     // eased in so far; chased every frame toward 0 or 1 depending on `checkTurnStand()` so the
@@ -1474,6 +1493,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, just without the firewood-prop-hiding fix.
     }
 
+    result = mods::hook::add_pre<Demo00Draw>(on_demo00_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook cutscene prop draw, the firewood prop may overlap Zelda during the "
+            "Demo01_01/Demo01_02 cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the firewood-prop-hiding fix.
+    }
+
     result = mods::hook::add_pre<HoZeldaExecute>(on_hozelda_execute_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1729,6 +1757,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<Demo00SetBaseMtx>();
+    mods::hook::uninstall<Demo00Draw>();
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
