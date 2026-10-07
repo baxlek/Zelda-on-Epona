@@ -1822,22 +1822,27 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         return MOD_OK;
     }
 
-    if (horse->checkHorseCallWait()) {
-        // Right after loading a save made in a different area than Epona was left in,
-        // `daHorse_c::create()` sets `FLG0_NO_DRAW_WAIT` on her instead of restoring her saved
-        // position (see that function's own stage/room-name comparison against
-        // `dComIfGs_getHorseRestartStageName()`/`...RoomNo()`), and both `draw()` and `execute()`
-        // return immediately while it's set -- vanilla Epona is loaded but neither drawn nor
-        // given a chance to update her physics/collision. She stays that way until the player
-        // calls her with the grass whistle (`callHorseSubstance()` clears the flag the moment
-        // it's set). Without this check, this mod would still spawn/keep its own Zelda riding a
-        // horse that is itself invisible and intangible, leaving Zelda floating there on her own
-        // with no visible Epona underneath her. Treat this exactly like the "no horse loaded"
-        // case above.
-        remove_spawned_zelda();
-        s_hideSpawnedZeldaInCutscene = false;
-        return MOD_OK;
-    }
+    // Right after loading a save made in a different area than Epona was left in,
+    // `daHorse_c::create()` sets `FLG0_NO_DRAW_WAIT` on her instead of restoring her saved
+    // position (see that function's own stage/room-name comparison against
+    // `dComIfGs_getHorseRestartStageName()`/`...RoomNo()`), and both `draw()` and `execute()`
+    // return immediately while it's set -- `horse` itself is a fully created, valid actor the
+    // whole time (its fields, including `current.pos`/`getRootMtx()`, already hold valid values
+    // from `create()`/the model's initial pose, not garbage), it's only her own model/collision
+    // that stay undrawn/intangible until the player calls her with the grass whistle
+    // (`callHorseSubstance()` clears the flag the moment it's set).
+    //
+    // This mod previously deleted (`remove_spawned_zelda()`) and later recreated its own HoZelda
+    // actor for the entire duration of this state, exactly like the "no horse loaded" case above.
+    // That churn -- tearing down and recreating a `HoZelda` actor purely because Epona's *model*
+    // isn't being drawn, even though her actor data is fully loaded the whole time -- is suspected
+    // of being a contributing cause of persisting SIGABRTs elsewhere in `HoZelda`'s loading path.
+    // Since the horse actor is valid throughout, there's no need to delete our own Zelda here at
+    // all: instead keep her loaded (spawning her once, same as ordinary gameplay, if she isn't
+    // already) and simply hide her in place via the same scale-based mechanism already used for
+    // scripted cutscenes (`HoZeldaSetMatrix`'s `s_hideSpawnedZeldaInCutscene` branch), so she
+    // never has to be recreated once the whistle call clears the flag.
+    bool horseModelNotDrawn = horse->checkHorseCallWait();
 
     // Refresh whether the actor we previously spawned is still alive (it may have been deleted
     // by the game for reasons outside our control, e.g. a scene change).
@@ -1848,8 +1853,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // Diagnostic: `find_spawned_zelda()` just discovered the actor we spawned was deleted out
     // from under us by the engine itself (its own comment: "e.g. deleted on a room change"),
     // rather than by our own `remove_spawned_zelda()` calls below, which only ever run before
-    // this point in the frame via the early `horse == nullptr`/`checkHorseCallWait()` returns
-    // above. A captured dusklight engine log confirmed one specific cause: switching between two
+    // this point in the frame via the early `horse == nullptr` return above (`checkHorseCallWait()`
+    // no longer deletes her at all). A captured dusklight engine log confirmed one specific cause: switching between two
     // sub-cuts of the same cutscene chain (e.g. "demo01_01" -> "demo01_02") reloads the entire
     // room's actor list including Epona herself, without the room number ever changing. The
     // `inScriptedCutscene` branch further down has a recovery respawn for exactly that case, but
@@ -1981,6 +1986,18 @@ MOD_EXPORT ModResult mod_update(ModError*) {
             names_equal_case_insensitive(dComIfGp_getEventManager().getRunEventName(), "demo01_03");
         if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda && s_zeldaLostInSameRoom &&
             isDemo01_03) {
+            spawn_zelda_on_horse(horse);
+        }
+    } else if (horseModelNotDrawn) {
+        // Epona's own model/collision aren't drawn/tangible yet (see `horseModelNotDrawn`'s own
+        // comment above), but `horse` itself is already a fully valid, loaded actor -- so keep our
+        // own Zelda loaded here too instead of leaving her unspawned, exactly like the ordinary
+        // gameplay case just below, just hidden in place via the same scale-based mechanism used
+        // for scripted cutscenes rather than shown. She's already attached to a horse that is
+        // itself hidden, so she'll be back at Epona's side the instant the player calls her with
+        // the grass whistle and `horseModelNotDrawn` clears, with no recreation needed.
+        s_hideSpawnedZeldaInCutscene = true;
+        if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
             spawn_zelda_on_horse(horse);
         }
     } else if (horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda) {
