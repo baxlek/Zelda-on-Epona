@@ -11,6 +11,7 @@
 // Game includes
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
+#include "d/actor/d_a_demo00.h"
 #include "d/actor/d_a_e_sh.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
@@ -136,10 +137,17 @@ static bool is_title_screen() {
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
 }
 
-// A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_00" and "Demo90_00")
-// have their own staging/camera work built around Epona *not* visibly carrying a second rider,
-// so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda
-// during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+// A handful of story cutscenes (currently "Demo36_00" and "Demo90_00") have their own
+// staging/camera work built around Epona *not* visibly carrying a second rider, so this mod's own
+// spawned Zelda must stay hidden through them no matter what the "Show Zelda during cutscenes"
+// toggle is set to. Every other cutscene still respects that toggle normally.
+//
+// "Demo01_01" and "Demo01_02" used to be on this list too, for the same reason: both stage a
+// bundle-of-firewood prop riding on Epona's saddle, which visibly overlapped any rider placed
+// there. That's now fixed at the source instead -- see `is_hidden_cutscene_firewood_prop()` and
+// the `Demo00SetBaseMtx` hook below, which hide the firewood prop itself rather than withholding
+// Zelda -- so both cutscenes were removed from this list and now respect the toggle like any
+// other.
 //
 // `dStage_roomControl_c::getDemoArcName()` holds the name of the currently-loaded cutscene demo
 // archive (e.g. "Demo01_01"), formatted as `"Demo%02d_%02d"` from the room's layer bank/bank2
@@ -148,8 +156,6 @@ static bool is_title_screen() {
 // cutscene's room is gone.
 static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
-        "Demo01_01",
-        "Demo01_02",
         "Demo36_00",
         "Demo90_00",
     };
@@ -321,6 +327,53 @@ static void hide_zelda_visually(daHoZelda_c* zelda) {
     mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
     mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
     zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
+// `daDemo00_c` is the generic cutscene-prop actor driving the bundle-of-firewood model riding on
+// Epona's saddle in "Demo01_01" and "Demo01_02" (see `is_always_hidden_cutscene()`'s comment
+// above for why that prop forced this mod's own spawned Zelda to stay hidden through both
+// cutscenes up until now). Rather than keep withholding Zelda there, this hides the firewood prop
+// itself instead, the same scale-based technique as `hide_zelda_visually()` above: shrink its
+// rendered model down to an imperceptible size without moving or deleting the actor.
+//
+// `field_0x588.mShapeID` is the event-driven shape resource index `daDemo00_c::execute()` reads
+// from its demo-script data every tick (`actor->getShapeId()`) -- a plain integer, not a string or
+// path, so there's nothing here to redirect the way the Light Arrow particle IDs were (see that
+// hook's own comment further below); instead this matches it directly against the firewood
+// model's own resource-index constant for each cutscene's demo archive --
+// `dRes_INDEX_DEMO01_01_BMD_DEMO01_FWOOD_CUT00_GP_1_e` (0x44) and
+// `dRes_INDEX_DEMO01_02_BMD_DEMO01_FWOOD_CUT00_GP_1_e` (0x29) respectively, confirmed identical
+// across every regional/version asset tree in the Dusklight source tree (NTSC-U/E/J, PAL,
+// GameCube and Wii). Scoped to each cutscene's own demo archive name (`getDemoArcName()`) since
+// that same index space is reused by unrelated models (Link, Epona, Midna, ...) in every other
+// cutscene.
+static bool is_hidden_cutscene_firewood_prop(daDemo00_c* demo) {
+    const char* demoArcName = dStage_roomControl_c::getDemoArcName();
+    if (demoArcName == nullptr) {
+        return false;
+    }
+    if (std::strcmp(demoArcName, "Demo01_01") == 0) {
+        return demo->field_0x588.mShapeID == 0x44;
+    }
+    if (std::strcmp(demoArcName, "Demo01_02") == 0) {
+        return demo->field_0x588.mShapeID == 0x29;
+    }
+    return false;
+}
+
+// `daDemo00_c::setBaseMtx()` is called every tick its model exists (from both `actStandby()`, the
+// first tick the model is created, and `actPerformance()` every tick after), ending with
+// `mModel.field_0x5d4->setBaseScale(scale)` using the actor's own (normally 1.0) scale. This post
+// hook simply overrides that call's result back down to `kHiddenScale` whenever the model just set
+// is the firewood prop -- its position/rotation (set moments earlier in the same function) are
+// left completely untouched, so nothing else about the actor or its placement changes.
+DEFINE_HOOK(&daDemo00_c::setBaseMtx, Demo00SetBaseMtx);
+
+static void on_demo00_set_base_mtx_post(ModContext*, void* args, void*, void*) {
+    daDemo00_c* demo = mods::arg<daDemo00_c*>(args, 0);
+    if (demo->mModel.field_0x5d4 != nullptr && is_hidden_cutscene_firewood_prop(demo)) {
+        demo->mModel.field_0x5d4->setBaseScale(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
+    }
 }
 
 static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
@@ -1412,6 +1465,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         // Not fatal: the mod still works, just without the cutscene-orientation fix.
     }
 
+    result = mods::hook::add_post<Demo00SetBaseMtx>(on_demo00_set_base_mtx_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook cutscene prop matrix, the firewood prop may overlap Zelda during the "
+            "Demo01_01/Demo01_02 cutscenes: {}",
+            (int)result);
+        // Not fatal: the mod still works, just without the firewood-prop-hiding fix.
+    }
+
     result = mods::hook::add_pre<HoZeldaExecute>(on_hozelda_execute_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1666,6 +1728,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
+    mods::hook::uninstall<Demo00SetBaseMtx>();
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
