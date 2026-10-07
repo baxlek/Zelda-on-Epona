@@ -150,7 +150,7 @@ static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
-        "Demo38_00",
+        "Demo36_00",
         "Demo90_00",
     };
     const char* demoArcName = dStage_roomControl_c::getDemoArcName();
