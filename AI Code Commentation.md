@@ -90,7 +90,7 @@ The opening title screen (Link/Epona galloping across Hyrule Field) is driven th
 
 Precedes: `static bool names_equal_case_insensitive(const char* a, const char* b) {`
 
-A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "Demo36_01"/"Demo36_02" and "demo90") have their own staging/camera work built around Epona *not* visibly carrying a second rider, so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
+A handful of story cutscenes (currently "Demo01_01", "Demo01_02", "demo02", "Demo36_01"/"Demo36_02" and "demo90") have their own staging/camera work built around Epona *not* visibly carrying a second rider, so this mod's own spawned Zelda must stay hidden through them no matter what the "Show Zelda during cutscenes" toggle is set to. Every other cutscene still respects that toggle normally.
 
 One earlier version of this check matched against `dStage_roomControl_c::getDemoArcName()`, the name of the currently-loaded cutscene demo *resource archive* -- but `loadDemoArchive()` only ever loads a new archive into an empty name slot as part of a *room* being created, and deliberately leaves it alone afterwards so any number of distinct cutscenes sharing that room can reuse its one cached archive without reloading it, so it never updates again once a later, different cutscene starts sharing that same room.
 
