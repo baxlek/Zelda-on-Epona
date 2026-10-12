@@ -129,6 +129,7 @@ static bool is_always_hidden_cutscene() {
     static const char* const kAlwaysHiddenDemoNames[] = {
         "Demo01_01",
         "Demo01_02",
+        "demo02",
         "Demo36_01",
         "Demo36_02",
         "demo90",
