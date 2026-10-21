@@ -74,6 +74,16 @@ static bool s_hasSpawnedZelda = false;
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
 
+// Whether this mod is currently allowed to create/modify anything attached to Epona.
+// If the mod is enabled while Epona is already loaded (e.g. toggled on mid-session via
+// the mods menu), she wasn't just (re)created through her normal lifecycle, and
+// spawning our HoZelda actor on her immediately can crash the game. So instead, the
+// first time mod_update() runs we check whether Epona is already loaded; if she is, we
+// withhold all changes to her until she next unloads and reloads via a real scene
+// transition (the normal, known-safe path this mod already relies on elsewhere).
+static bool s_safeToModifyEpona = false;
+static bool s_observedInitialHorseState = false;
+
 static fopAc_ac_c* find_spawned_zelda() {
     if (!s_hasSpawnedZelda) {
         return nullptr;
@@ -993,6 +1003,24 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
 MOD_EXPORT ModResult mod_update(ModError*) {
     daHorse_c* horse = dComIfGp_getHorseActor();
+
+    if (!s_observedInitialHorseState) {
+        s_observedInitialHorseState = true;
+        // Nothing to defer if Epona isn't loaded yet -- the normal flow below only
+        // ever creates/modifies her HoZelda actor once Epona herself has (re)appeared.
+        // If she's already loaded on this very first tick, this mod was enabled
+        // mid-session, so hold off until she goes through a real scene transition.
+        s_safeToModifyEpona = (horse == nullptr);
+    }
+
+    if (!s_safeToModifyEpona) {
+        if (horse != nullptr) {
+            return MOD_OK;
+        }
+        // Epona just unloaded -- the next time she appears it will be through a
+        // normal scene transition, so it's safe to resume making changes to her.
+        s_safeToModifyEpona = true;
+    }
 
     if (horse == nullptr) {
         remove_spawned_zelda();
