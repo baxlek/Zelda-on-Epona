@@ -762,20 +762,18 @@ static const u32 kLightArrowHeapSize = 0x100000;
 static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
 
-DEFINE_HOOK(&JPAEmitterManager::entryResourceManager, ParticleEntryResourceManager);
-
-static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args, void*, void*) {
-    auto* mgr = mods::arg<JPAEmitterManager*>(args, 0);
-    u8 resMgrId = mods::arg<u8>(args, 2);
-    if (resMgrId != 0 || mgr->ridMax > kLightArrowResMgrId) {
-        return HOOK_CONTINUE;
+// Grows JPAEmitterManager::pResMgrAry/ridMax (hardcoded to 2 slots at engine boot) by one,
+// so bank kLightArrowResMgrId can be registered. No-op if the array is already big enough.
+static bool grow_particle_emitter_manager_for_light_arrow_bank(JPAEmitterManager* mgr) {
+    if (mgr->ridMax > kLightArrowResMgrId) {
+        return true;
     }
 
     u8 newRidMax = kLightArrowResMgrId + 1;
     JKRHeap* heap = g_dComIfG_gameInfo.play.getParticle()->getHeap();
     auto* newAry = JKR_NEW_ARRAY_ARGS(JPAResourceManager*, newRidMax, heap, 0);
     if (newAry == nullptr) {
-        return HOOK_CONTINUE;
+        return false;
     }
 
     for (u8 i = 0; i < newRidMax; i++) {
@@ -783,22 +781,32 @@ static HookAction on_particle_entry_resource_manager_pre(ModContext*, void* args
     }
     mgr->pResMgrAry = newAry;
     mgr->ridMax = newRidMax;
-    return HOOK_CONTINUE;
+    return true;
 }
 
-DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
-
-static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    s_lightArrowJpcReady = false;
-    s_lightArrowResMgr = nullptr;
-
-    if (s_lightArrowHeap != nullptr) {
-        s_lightArrowHeap->destroy();
-        s_lightArrowHeap = nullptr;
+// Loads Pscene181.jpc and registers it as resource bank kLightArrowResMgrId, growing the
+// emitter manager's resource array first if needed. Idempotent: no-ops immediately once
+// s_lightArrowJpcReady is true. Safe to call at any time after the mod is initialized --
+// whether that's during the normal boot sequence (via the ParticleCreateCommon post-hook)
+// or well after boot, if the mod is enabled mid-session once the particle system already
+// exists (via mod_initialize()).
+static void ensure_light_arrow_particles_loaded() {
+    if (s_lightArrowJpcReady) {
+        return;
     }
-    if (s_lightArrowHeapBacking != nullptr) {
-        std::free(s_lightArrowHeapBacking);
-        s_lightArrowHeapBacking = nullptr;
+
+    dPa_control_c* control = g_dComIfG_gameInfo.play.getParticle();
+    JPAEmitterManager* emitterMng = dPa_control_c::getEmitterManager();
+    if (control == nullptr || control->mCommonResMng == nullptr || emitterMng == nullptr) {
+        // The particle system hasn't finished dPa_control_c::createCommon() yet -- nothing
+        // to do yet. The ParticleCreateCommon post-hook will call this again once it has.
+        return;
+    }
+
+    if (!grow_particle_emitter_manager_for_light_arrow_bank(emitterMng)) {
+        mods::log::warn("failed to grow particle emitter manager resource array, Light Arrow "
+                         "particles outside the horseback duel will be unavailable");
+        return;
     }
 
     s_lightArrowHeapBacking = std::malloc(kLightArrowHeapSize);
@@ -836,12 +844,33 @@ static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
         return;
     }
 
-    dPa_control_c::getEmitterManager()->entryResourceManager(mgr, kLightArrowResMgrId);
+    emitterMng->entryResourceManager(mgr, kLightArrowResMgrId);
     s_lightArrowResMgr = mgr;
     s_lightArrowJpcReady = true;
 
     mods::log::info("Pscene181.jpc loaded as particle bank {}, resource heap has {} bytes free",
                      kLightArrowResMgrId, heap->getFreeSize());
+}
+
+DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
+
+static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
+    // createCommon() only ever runs once per process lifetime at boot, but reset defensively
+    // in case it's ever re-entered, since mCommonResMng (and therefore our readiness check in
+    // ensure_light_arrow_particles_loaded()) would otherwise look stale.
+    s_lightArrowJpcReady = false;
+    s_lightArrowResMgr = nullptr;
+
+    if (s_lightArrowHeap != nullptr) {
+        s_lightArrowHeap->destroy();
+        s_lightArrowHeap = nullptr;
+    }
+    if (s_lightArrowHeapBacking != nullptr) {
+        std::free(s_lightArrowHeapBacking);
+        s_lightArrowHeapBacking = nullptr;
+    }
+
+    ensure_light_arrow_particles_loaded();
 }
 
 DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);
@@ -943,14 +972,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
-    result = mods::hook::add_pre<ParticleEntryResourceManager>(on_particle_entry_resource_manager_pre);
-    if (result != MOD_OK) {
-        mods::log::warn(
-            "failed to hook particle emitter manager resource registration, Light Arrow particles "
-            "outside the horseback duel will be unavailable: {}",
-            (int)result);
-    }
-
     result = mods::hook::add_post<ParticleCreateCommon>(on_particle_create_common_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -996,6 +1017,13 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn("failed to register mods panel, the cutscene toggle won't be visible: {}",
                          (int)result);
     }
+
+    // Normally this is a no-op here -- the particle system hasn't booted yet, so this will
+    // actually load Pscene181.jpc once the ParticleCreateCommon post-hook above fires at the
+    // end of the boot logo/title scene. But if this mod is enabled mid-session (well after
+    // boot, with the particle system already up), that boot-time hook has already fired and
+    // will never fire again, so this call is what loads the Light Arrow particles instead.
+    ensure_light_arrow_particles_loaded();
 
     mods::log::info("zelda_on_epona initialized");
     return MOD_OK;
