@@ -386,6 +386,29 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+DEFINE_HOOK(&daHoZelda_c::setBowModel, HoZeldaSetBowModel);
+
+static void hide_bow_visually(daHoZelda_c* zelda) {
+    mDoMtx_stack_c::transS(zelda->current.pos);
+    mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
+    mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
+    zelda->mpBowModel->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
+static void on_hozelda_set_bow_model_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || zelda->mpBowModel == nullptr) {
+        return;
+    }
+
+    // When Zelda isn't hidden for a cutscene (that already shrinks her bow along with
+    // the rest of her body), shrink just the bow whenever the "Zelda active in combat"
+    // toggle is off, so it doesn't visibly float around on an otherwise unarmed Zelda.
+    if (!s_hideSpawnedZeldaInCutscene && !auto_target_enemies_enabled()) {
+        hide_bow_visually(zelda);
+    }
+}
+
 static const f32 kAutoTargetRange = 4000.0f;
 
 struct HoZeldaTargetSearch {
@@ -934,6 +957,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_post<HoZeldaSetBowModel>(on_hozelda_set_bow_model_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda setBowModel, her bow will stay visible with auto-targeting "
+            "disabled: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<HoZeldaExecute>(on_hozelda_execute_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1130,6 +1161,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<ActorDelete>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
+    mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
