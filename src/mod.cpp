@@ -393,6 +393,10 @@ static void hide_bow_visually(daHoZelda_c* zelda) {
     mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
     mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
     zelda->mpBowModel->setBaseTRMtx(mDoMtx_stack_c::get());
+    // setBowModel() already called calc() with the original (visible) base matrix before this
+    // post-hook runs, baking it into the model's joint matrices. Overriding the base matrix
+    // alone has no visible effect until calc() re-runs with the shrunk matrix.
+    zelda->mpBowModel->calc();
 }
 
 static void on_hozelda_set_bow_model_post(ModContext*, void* args, void*, void*) {
