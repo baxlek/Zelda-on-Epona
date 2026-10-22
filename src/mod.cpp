@@ -727,6 +727,19 @@ static void on_hozelda_set_anm_replace(ModContext*, void* args, void*, void*) {
     set_anm_auto_target(zelda);
 }
 
+// Zelda already knows Link is the hero in wolf form; she shouldn't stop him from
+// transforming back and forth just because she happens to be looking at him.
+DEFINE_HOOK_SYMBOL("daMidna_searchNpc", void*(fopAc_ac_c*, void*), MidnaSearchNpc);
+
+static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (is_spawned_zelda(actor)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
 
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
@@ -988,6 +1001,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook HoZelda setAnm, auto-targeting enemies will be unavailable: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<MidnaSearchNpc>(on_midna_search_npc_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Midna's NPC transform-block search, Zelda will act as a normal NPC "
+            "and may prevent transforming near her: {}",
             (int)result);
     }
 
