@@ -64,7 +64,7 @@ static bool auto_target_enemies_enabled() {
     return value;
 }
 
-static constexpr bool kDiagnosticLoggingEnabled = false;
+static constexpr bool kDiagnosticLoggingEnabled = true;
 
 static const char* kHoZeldaStageName = "HoZelda";
 
