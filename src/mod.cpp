@@ -931,6 +931,36 @@ static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, 
 
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
 
+// Belt-and-suspenders safety net: even though nothing in d_a_horse.cpp writes m_anmIdx[0] outside
+// setSingleAnime()/setDoubleAnime() (neither of which ever requests a "spooked" ID through
+// setDoubleAnime), hook execute() itself and correct her back to a neutral wait pose on any tick
+// she's still found holding one of the three "spooked" anims while suppressed -- in case some
+// still-unidentified path sets it directly, bypassing the setSingleAnime hook above entirely. This
+// only touches the animation playback (not m_proc/m_procID), so it can't interfere with her
+// movement/AI state machine the way forcing a full procWaitInit() would.
+DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
+
+static constexpr u16 kAnmHorseWait01 = 27;  // ANM_HS_WAIT_01: default idle pose
+
+static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    if (!epona_combat_reactions_suppressed(horse)) {
+        return;
+    }
+
+    u16 anmIdx = horse->getAnmIdx(0);
+    if (anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+        anmIdx == kAnmHorseExcitement2)
+    {
+        mods::log::warn(
+            "[epona-diag] execute() post-hook caught her still in spooked anmIdx={} despite "
+            "suppression -- forcing back to idle. This means something bypasses the "
+            "setSingleAnime hook entirely; please report this log line if seen.",
+            anmIdx);
+        horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 4.0f, 0);
+    }
+}
+
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
@@ -1263,6 +1293,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook Epona's animation setter, she may still rear up or spook while "
             "Zelda is riding solo and fighting: {}",
             (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the spooked-anim safety net: {}", (int)result);
     }
 
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
