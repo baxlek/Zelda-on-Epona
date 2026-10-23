@@ -787,22 +787,31 @@ static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
+// While Zelda is actively fighting from horseback (auto-target enabled), Epona reacting to the
+// fight at all -- rearing at a nearby enemy, or flinching from Zelda's own Light Arrows flying
+// close to her -- is counterproductive, so all of it is suppressed outright. Outside of that
+// feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident
+// should still see her react), since only Zelda's own combat is what's being worked around here.
+static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
+    if (!auto_target_enemies_enabled() || !is_spawned_zelda_attached(horse)) {
+        return false;
+    }
+
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    return zelda != nullptr && zelda->checkSingleRide();
+}
+
 // Epona's idle-state AI (daHorse_c::procWait) periodically scans for nearby ENEMY-group actors
 // via this judge function and, if one is found, spooks into a rearing "excitement" animation.
 // It has no notion of Zelda riding solo and defending herself -- so whenever her auto-targeted
 // Light Arrow combat brings an enemy within range, Epona rears up mid-fight as if under threat.
-// Skip the search entirely (judge functions return NULL for "no match") while she's solo-ridden
-// by the mod's own spawned Zelda, who can actually fight back.
+// Skip the search entirely (judge functions return NULL for "no match") while that reaction is
+// suppressed.
 DEFINE_HOOK_SYMBOL("daHorse_searchEnemy", void*(fopAc_ac_c*, void*), HorseSearchEnemy);
 
 static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
     daHorse_c* horse = dComIfGp_getHorseActor();
-    if (horse == nullptr || !is_spawned_zelda_attached(horse)) {
-        return HOOK_CONTINUE;
-    }
-
-    daHoZelda_c* zelda = horse->getZeldaActor();
-    if (zelda != nullptr && zelda->checkSingleRide()) {
+    if (horse != nullptr && epona_combat_reactions_suppressed(horse)) {
         return HOOK_SKIP_ORIGINAL;
     }
 
@@ -814,18 +823,20 @@ static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
 // whenever her own body collision cylinders (m_tgco_cyl/m_head_sph) register a hit -- which
 // happens whenever ANY attack collider physically touches her, including a Light Arrow's own
 // attack cylinder simply flying close enough to graze her hitbox on its way to its target, with
-// no regard for who's firing it or why. Skip this reaction too while she's solo-ridden by the
-// mod's own spawned Zelda.
-DEFINE_HOOK(&daHorse_c::checkTgHitTurn, HorseCheckTgHitTurn);
+// no regard for who's firing it or why.
+//
+// checkTgHitTurn() itself has only two, tiny, same-file call sites, which the compiler may
+// freely inline, making it an unreliable hook target in practice (its address may never actually
+// be called at runtime). Both of its call sites -- and the equivalent one reached via
+// daHorse_searchEnemy above -- funnel into daHorse_c::procTurnInit(1) to actually play the
+// rearing ANM_HS_STAND animation, so that shared, many-call-site function (unlikely to be
+// inlined away) is hooked directly instead, gated on its "was this a startled reaction" param.
+DEFINE_HOOK(&daHorse_c::procTurnInit, HorseProcTurnInit);
 
-static HookAction on_horse_check_tg_hit_turn_pre(ModContext*, void* args, void*, void*) {
+static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
-    if (!is_spawned_zelda_attached(horse)) {
-        return HOOK_CONTINUE;
-    }
-
-    daHoZelda_c* zelda = horse->getZeldaActor();
-    if (zelda != nullptr && zelda->checkSingleRide()) {
+    int isStartledTurn = mods::arg<int>(args, 1);
+    if (isStartledTurn != 0 && epona_combat_reactions_suppressed(horse)) {
         return HOOK_SKIP_ORIGINAL;
     }
 
@@ -1145,11 +1156,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
-    result = mods::hook::add_pre<HorseCheckTgHitTurn>(on_horse_check_tg_hit_turn_pre);
+    result = mods::hook::add_pre<HorseProcTurnInit>(on_horse_proc_turn_init_pre);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook Epona's body-collision turn reaction, she may rear up whenever a "
-            "Light Arrow flies close to her while Zelda is riding solo: {}",
+            "failed to hook Epona's startled-turn reaction, she may rear up whenever a Light "
+            "Arrow flies close to her while Zelda is riding solo and fighting: {}",
             (int)result);
     }
 
