@@ -130,6 +130,16 @@ archery duel, where she rides alone) is never touched or duplicated.
 > picked and leaves it empty for as long as she's hidden, exactly as if the combat toggle were off; the rest of her
 > bow-draw state machine already falls back to doing nothing on its own once her target is empty.
 >
+> With **Zelda active in combat** on, she originally only ever drew and fired her bow while sharing the saddle with
+> Link — `daHoZelda_c::setAnm()`'s bow-aiming branch only ever ran for the shared-ride idle poses (anim indices
+> `0xE`/`0x1C`); riding solo always overrides those to her own solo idle pose first, which fell straight through to
+> the plain "not aiming" branch instead, silently disabling targeting the moment Link dismounted (i.e. most of the
+> time under this mod). The bow-aiming branch is now also reachable while riding solo with an active target. Rather
+> than switching to the shared-ride's dedicated sit-and-aim pose (which is tailored to the rear, shared seat), her
+> already-computed solo idle pose is kept as the base anim so her seat and legs still look exactly like normal solo
+> riding; the draw/nock/fire animation plays on top of it as the same upper-body-only overlay anim the shared-ride
+> sequence already uses, so only her arms and torso aim and fire while everything else matches a normal solo ride.
+>
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
 > off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor

@@ -599,7 +599,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->field_0x6dd = 1;
     }
 
-    if ((anm_idx[0] != 0x1C && anm_idx[0] != 0xE) || player->checkHorseElecDamage()) {
+    // Normally only the two shared "riding together" idle anims (0xE/0x1C) are allowed into the
+    // bow-aiming branch below; solo riding always overrides anm_idx[0] to one of its own idle
+    // poses (0x17/0x11/0x1B) above, which would otherwise fall through to the plain "not aiming"
+    // branch here and silently disable auto-target while Zelda is alone on Epona. Let a solo ride
+    // with an active bow target through as well, so she can still draw and fire on her own.
+    bool soloBowMode = zelda->mIsSingleRide && zelda->mBowMode != 0;
+
+    if (((anm_idx[0] != 0x1C && anm_idx[0] != 0xE) && !soloBowMode) || player->checkHorseElecDamage()) {
         zelda->resetUpperAnime();
         if (zelda->field_0x6e4[0] != anm_idx[0]) {
             zelda->setSingleAnime(anm_idx[0], 1.0f, 0.0f, -1, horse->getMorfFrame());
@@ -617,7 +624,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->deleteArrow();
     } else if (zelda->mBowMode != 0) {
         BOOL anm_end = zelda->mFrameCtrl[2].checkAnmEnd();
-        anm_idx[0] = 0x1A;
+        // Riding double, the bow sequence has its own dedicated sit-and-aim base pose (0x1A).
+        // Riding solo there's no such pose, so keep her already-computed solo idle anim as the
+        // base instead; the bow draw/fire motion below is layered on top as an upper-body-only
+        // overlay anim (see setUpperAnime()'s joint-range blend), so her seated position and legs
+        // still match normal solo riding while just her arms/torso play the aiming animation.
+        if (!zelda->mIsSingleRide) {
+            anm_idx[0] = 0x1A;
+        }
         anm_idx[2] = 0xFFFF;
 
         if (zelda->mUpperAnmID == 9) {
