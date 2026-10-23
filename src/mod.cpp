@@ -771,6 +771,31 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     arrow->speed = dir * arrow->field_0x99c;
 }
 
+DEFINE_HOOK(&daArrow_c::execute, ArrowExecute);
+
+// daArrow_c::procWait() (run every tick while the arrow is still nocked, before release)
+// unconditionally re-arms a short draw-suppression timer (field_0x942) whenever the player's
+// camera has "attention status 2" set -- true first-person view, where the engine hides Link's
+// own body model to avoid clipping against the near camera. That check never looks at which
+// actor actually owns the arrow, so Zelda's own Light Arrow (o_zg_arow.bmd) goes invisible in
+// first person too, for as long as the status stays set. It only happens to become visible
+// again when the player also draws their own bow, since Link's bow-aim camera clears that same
+// status as a side effect (to keep his own arms/bow visible while aiming) -- nothing to do with
+// Zelda specifically. Force the timer back off for her own arrow every tick so it stays visible
+// regardless of the player's own bow state.
+static void on_arrow_execute_post(ModContext*, void* args, void*, void*) {
+    daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
+    if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT) {
+        return;
+    }
+
+    if (!is_spawned_zelda(arrow->field_0xa08.getActor())) {
+        return;
+    }
+
+    arrow->field_0x942 = 0;
+}
+
 DEFINE_HOOK(&cc_at_check, CcAtCheck);
 
 static HookAction on_cc_at_check_pre(ModContext*, void* args, void*, void*) {
@@ -1020,6 +1045,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_post<ArrowExecute>(on_arrow_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook arrow execution, Zelda's Light Arrows may be invisible while the "
+            "player is in first-person view and not drawing their own bow: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<CcAtCheck>(on_cc_at_check_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1190,6 +1223,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
+    mods::hook::uninstall<ArrowExecute>();
     return MOD_OK;
 }
 }
