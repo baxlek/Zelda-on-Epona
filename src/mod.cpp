@@ -71,6 +71,11 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// TEMPORARY diagnostics for the still-unidentified Light Arrow rearing trigger; see usage near
+// the setSingleAnime/arrowShooting hooks below. Remove once the trigger is confirmed and handled.
+static int s_arrowShotDiagFramesLeft = 0;
+static constexpr int kArrowShotDiagFrames = 180;  // ~3 seconds at 60fps
+
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
 
@@ -478,6 +483,12 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
+    // TEMPORARY: tick down the Light-Arrow-flight diagnostic window armed in
+    // on_arrow_shooting_post. Remove together with the rest of the epona-diag code.
+    if (s_arrowShotDiagFramesLeft > 0) {
+        s_arrowShotDiagFramesLeft--;
+    }
+
     daHorse_c* horse = dComIfGp_getHorseActor();
     bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
 
@@ -787,7 +798,168 @@ static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
+// While Zelda is actively fighting from horseback (auto-target enabled), Epona reacting to the
+// fight at all -- rearing at a nearby enemy, or flinching from Zelda's own Light Arrows flying
+// close to her -- is counterproductive, so all of it is suppressed outright. Outside of that
+// feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident
+// should still see her react), since only Zelda's own combat is what's being worked around here.
+static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
+    if (!auto_target_enemies_enabled() || !is_spawned_zelda_attached(horse)) {
+        return false;
+    }
+
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    return zelda != nullptr && zelda->checkSingleRide();
+}
+
+// Epona's idle-state AI (daHorse_c::procWait) periodically scans for nearby ENEMY-group actors
+// via this judge function and, if one is found, spooks into a rearing "excitement" animation.
+// It has no notion of Zelda riding solo and defending herself -- so whenever her auto-targeted
+// Light Arrow combat brings an enemy within range, Epona rears up mid-fight as if under threat.
+// Skip the search entirely (judge functions return NULL for "no match") while that reaction is
+// suppressed.
+DEFINE_HOOK_SYMBOL("daHorse_searchEnemy", void*(fopAc_ac_c*, void*), HorseSearchEnemy);
+
+static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse != nullptr && epona_combat_reactions_suppressed(horse)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
+// Separately, daHorse_c::checkTgHitTurn() (called every idle tick while unridden, the same
+// state Zelda's solo riding puts Epona in) spins her around into a rearing stand-up reaction
+// whenever her own body collision cylinders (m_tgco_cyl/m_head_sph) register a hit -- which
+// happens whenever ANY attack collider physically touches her, including a Light Arrow's own
+// attack cylinder simply flying close enough to graze her hitbox on its way to its target, with
+// no regard for who's firing it or why.
+//
+// checkTgHitTurn() itself has only two, tiny, same-file call sites, which the compiler may
+// freely inline, making it an unreliable hook target in practice (its address may never actually
+// be called at runtime). Both of its call sites -- and the equivalent one reached via
+// daHorse_searchEnemy above -- funnel into daHorse_c::procTurnInit(1) to actually play the
+// rearing ANM_HS_STAND animation, so that shared, many-call-site function (unlikely to be
+// inlined away) is hooked directly instead, gated on its "was this a startled reaction" param.
+DEFINE_HOOK(&daHorse_c::procTurnInit, HorseProcTurnInit);
+
+// TEMPORARY diagnostic helper: reports every "spooked" trigger this mod knows about to both the
+// log and an on-screen toast, regardless of whether it was actually suppressed, so a report of
+// Epona still rearing from a Light Arrow can be matched against what (if anything) fired here.
+// Remove once the Light Arrow rearing trigger is confirmed and handled.
+static void report_diag(const char* source, bool suppressed, bool autoTarget, bool zeldaAttached,
+    bool singleRide) {
+    mods::log::warn("[epona-diag] {} fired (suppressed={}, autoTarget={}, zeldaAttached={}, "
+                     "singleRide={})",
+        source, suppressed, autoTarget, zeldaAttached, singleRide);
+
+    UiToastDesc toast = UI_TOAST_DESC_INIT;
+    toast.type = suppressed ? "success" : "warning";
+    toast.title_rml = "Epona diag";
+    const auto body = fmt::format(
+        "<span>{} (suppressed={}, autoTarget={}, zeldaAttached={}, singleRide={})</span>", source,
+        suppressed, autoTarget, zeldaAttached, singleRide);
+    toast.body_rml = body.c_str();
+    toast.duration_ms = 6000;
+    svc_ui->push_toast(mod_ctx, &toast);
+}
+
+static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    int isStartledTurn = mods::arg<int>(args, 1);
+    if (isStartledTurn != 0) {
+        bool suppressed = epona_combat_reactions_suppressed(horse);
+        report_diag("procTurnInit(1)", suppressed, auto_target_enemies_enabled(),
+            is_spawned_zelda_attached(horse),
+            horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+        if (suppressed) {
+            return HOOK_SKIP_ORIGINAL;
+        }
+    }
+
+    return HOOK_CONTINUE;
+}
+
+// Neither of the two hooks above actually catches a Light Arrow flying near Epona: reports after
+// shipping both show her own sword-swing-style "hit" reaction (procTurnInit(1), via
+// checkTgHitTurn) is now suppressed correctly, but she still rears specifically from Light
+// Arrows -- meaning the arrow's attack collider must not register against her body colliders the
+// same way a sword does, and whatever *does* trigger from it hasn't been pinned down from source
+// alone. Rather than keep chasing individual internal trigger paths, hook the one place all of
+// them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to switch
+// her into any of the three "spooked" animations (rearing ANM_HS_STAND, or the ENEMY-group
+// excitement reaction ANM_HS_EXCITEMENT/ANM_HS_EXCITEMENT_2) while her combat reactions are
+// suppressed. This can't miss a trigger, known or not, since nothing can make her visibly react
+// without eventually calling this.
+DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);
+
+// daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
+// d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
+// d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
+static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
+static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
+static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
+
+// The window itself (s_arrowShotDiagFramesLeft/kArrowShotDiagFrames) is declared near the top of
+// this file alongside the other spawn-tracking statics, armed in on_arrow_shooting_post below and
+// ticked down in on_hozelda_execute_pre. For a few seconds after Zelda's own Light Arrow is
+// released (covering its full flight time), every daHorse_c::setSingleAnime() call is logged
+// regardless of which animation it requests, to catch the possibility that Epona's Light-Arrow
+// rearing uses some 4th, not-yet-identified animation index outside the three handled above.
+static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    u16 anmIdx = mods::arg<u16>(args, 1);
+    bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+                           anmIdx == kAnmHorseExcitement2;
+    if (isSpookedAnime) {
+        bool suppressed = epona_combat_reactions_suppressed(horse);
+        report_diag("setSingleAnime", suppressed, auto_target_enemies_enabled(),
+            is_spawned_zelda_attached(horse),
+            horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+        if (suppressed) {
+            return HOOK_SKIP_ORIGINAL;
+        }
+    } else if (s_arrowShotDiagFramesLeft > 0) {
+        mods::log::warn("[epona-diag] setSingleAnime anmIdx={} (not one of the known spooked IDs, "
+                         "frames left in arrow-shot window={})",
+            anmIdx, s_arrowShotDiagFramesLeft);
+    }
+
+    return HOOK_CONTINUE;
+}
+
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
+
+// Belt-and-suspenders safety net: even though nothing in d_a_horse.cpp writes m_anmIdx[0] outside
+// setSingleAnime()/setDoubleAnime() (neither of which ever requests a "spooked" ID through
+// setDoubleAnime), hook execute() itself and correct her back to a neutral wait pose on any tick
+// she's still found holding one of the three "spooked" anims while suppressed -- in case some
+// still-unidentified path sets it directly, bypassing the setSingleAnime hook above entirely. This
+// only touches the animation playback (not m_proc/m_procID), so it can't interfere with her
+// movement/AI state machine the way forcing a full procWaitInit() would.
+DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
+
+static constexpr u16 kAnmHorseWait01 = 27;  // ANM_HS_WAIT_01: default idle pose
+
+static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    if (!epona_combat_reactions_suppressed(horse)) {
+        return;
+    }
+
+    u16 anmIdx = horse->getAnmIdx(0);
+    if (anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+        anmIdx == kAnmHorseExcitement2)
+    {
+        mods::log::warn(
+            "[epona-diag] execute() post-hook caught her still in spooked anmIdx={} despite "
+            "suppression -- forcing back to idle. This means something bypasses the "
+            "setSingleAnime hook entirely; please report this log line if seen.",
+            anmIdx);
+        horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 4.0f, 0);
+    }
+}
 
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
@@ -799,6 +971,13 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     if (zelda == nullptr || fopAcM_GetName(zelda) != fpcNm_HOZELDA_e || !is_spawned_zelda(zelda)) {
         return;
     }
+
+    // TEMPORARY diagnostic: mark the start of a real Light Arrow release from the mod's Zelda so
+    // the setSingleAnime diagnostic above can watch for any horse animation change during its
+    // flight. Remove together with that diagnostic once the rearing trigger is confirmed.
+    s_arrowShotDiagFramesLeft = kArrowShotDiagFrames;
+    mods::log::warn("[epona-diag] Light Arrow released, starting {}-frame watch window",
+        kArrowShotDiagFrames);
 
     fopAc_ac_c* target = zelda->mGndAcKeep.getActor();
     if (target == nullptr) {
@@ -1090,6 +1269,36 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook Midna's NPC transform-block search, Zelda will act as a normal NPC "
             "and may prevent transforming near her: {}",
             (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSearchEnemy>(on_horse_search_enemy_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's nearby-enemy search, she may rear up in fear while Zelda is "
+            "riding solo and fighting nearby enemies: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseProcTurnInit>(on_horse_proc_turn_init_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's startled-turn reaction, she may rear up whenever a Light "
+            "Arrow flies close to her while Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSetSingleAnime>(on_horse_set_single_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's animation setter, she may still rear up or spook while "
+            "Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the spooked-anim safety net: {}", (int)result);
     }
 
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
