@@ -843,6 +843,38 @@ static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
+// Neither of the two hooks above actually catches a Light Arrow flying near Epona: reports after
+// shipping both show her own sword-swing-style "hit" reaction (procTurnInit(1), via
+// checkTgHitTurn) is now suppressed correctly, but she still rears specifically from Light
+// Arrows -- meaning the arrow's attack collider must not register against her body colliders the
+// same way a sword does, and whatever *does* trigger from it hasn't been pinned down from source
+// alone. Rather than keep chasing individual internal trigger paths, hook the one place all of
+// them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to switch
+// her into any of the three "spooked" animations (rearing ANM_HS_STAND, or the ENEMY-group
+// excitement reaction ANM_HS_EXCITEMENT/ANM_HS_EXCITEMENT_2) while her combat reactions are
+// suppressed. This can't miss a trigger, known or not, since nothing can make her visibly react
+// without eventually calling this.
+DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);
+
+// daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
+// d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
+// d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
+static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
+static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
+static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
+
+static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    u16 anmIdx = mods::arg<u16>(args, 1);
+    bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+                           anmIdx == kAnmHorseExcitement2;
+    if (isSpookedAnime && epona_combat_reactions_suppressed(horse)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
 
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
@@ -1161,6 +1193,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook Epona's startled-turn reaction, she may rear up whenever a Light "
             "Arrow flies close to her while Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSetSingleAnime>(on_horse_set_single_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's animation setter, she may still rear up or spook while "
+            "Zelda is riding solo and fighting: {}",
             (int)result);
     }
 
