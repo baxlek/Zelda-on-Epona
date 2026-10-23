@@ -140,6 +140,15 @@ archery duel, where she rides alone) is never touched or duplicated.
 > riding; the draw/nock/fire animation plays on top of it as the same upper-body-only overlay anim the shared-ride
 > sequence already uses, so only her arms and torso aim and fire while everything else matches a normal solo ride.
 >
+> While riding solo, Epona's reins normally follow Zelda's hand every tick regardless of what she's doing
+> (`daHoZelda_c::execute()` calls `daHorse_c::setReinPosHand()` unconditionally whenever she's riding alone), which
+> looked wrong once her hands were busy drawing and firing a bow instead of holding them. A new post-hook on
+> `daHoZelda_c::execute()` now forces the reins back to their default, saddle-anchored position for as long as the
+> bow sequence (draw/aim/fire) is active, using the same brief-detach trick already used for the cutscene-hiding fix
+> above (`daHorse_c::setReinPosNormal()` otherwise refuses to do anything while a single-riding Zelda is still
+> attached). She regrips the reins automatically the instant the sequence ends, since nothing further overrides
+> `execute()`'s own hand-following logic once `mBowMode` clears.
+>
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
 > off by default. Flipping it mid-cutscene only takes effect starting with the *next* cutscene: spawning an actor

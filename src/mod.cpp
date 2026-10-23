@@ -489,9 +489,22 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
+// Forces the reins back to their default, saddle-anchored position for this frame, even though
+// daHorse_c::setReinPosNormal() normally refuses to do anything while a single-riding Zelda is
+// still attached to the horse (deferring to her hand-following position by design). Briefly
+// detaching her around the call forces it through with no lasting effect, since execute()
+// unconditionally reattaches her at the very start of next tick regardless (the same trick used
+// for the grass-whistle and cutscene-hiding fixes elsewhere in this file).
+static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
+    if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {
+        horse->setZeldaActor(nullptr);
+    }
+    horse->setReinPosNormal();
+}
+
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+    if (!is_spawned_zelda(zelda)) {
         return;
     }
 
@@ -500,10 +513,19 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {
-        horse->setZeldaActor(nullptr);
+    if (s_hideSpawnedZeldaInCutscene) {
+        force_reins_to_normal_pos(zelda, horse);
+        return;
     }
-    horse->setReinPosNormal();
+
+    // While she's drawing, aiming, or firing her bow, her hands are occupied with the bow itself
+    // rather than gripping Epona's reins. execute() unconditionally re-anchors the reins to her
+    // hand joint every tick while she's riding solo, regardless of what she's doing, so undo that
+    // here for as long as the bow sequence is active. Riding double the reins are held by Link
+    // instead, so this is only needed for the solo seat.
+    if (zelda->mIsSingleRide && zelda->mBowMode != 0) {
+        force_reins_to_normal_pos(zelda, horse);
+    }
 }
 
 static constexpr u8 kArrowWaitFrames = 5;
