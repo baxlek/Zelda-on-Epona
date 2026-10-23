@@ -489,7 +489,7 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
-// Forces the reins back to their default, saddle-anchored position for this frame, even though
+// Forces the reins back to their default, saddle-anchored position, even though
 // daHorse_c::setReinPosNormal() normally refuses to do anything while a single-riding Zelda is
 // still attached to the horse (deferring to her hand-following position by design). Briefly
 // detaching her around the call forces it through with no lasting effect, since execute()
@@ -504,7 +504,7 @@ static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
 
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda)) {
+    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
         return;
     }
 
@@ -513,19 +513,30 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    if (s_hideSpawnedZeldaInCutscene) {
-        force_reins_to_normal_pos(zelda, horse);
-        return;
+    force_reins_to_normal_pos(zelda, horse);
+}
+
+// Riding solo, daHorse_c::execute() has Zelda's own daHoZelda_c::execute() call
+// horse->setReinPosHand() every tick, unconditionally re-anchoring the reins to her hand joint
+// regardless of what she's doing. setReinPosHandSubstance() is a rope-physics simulation (gravity
+// + inertia, not an instant snap): letting it run even once with a "hand" target and then
+// immediately overriding with setReinPosNormal() right after (as an execute() post-hook once did)
+// still leaves its spring/velocity state tainted by that one hand-aimed step every single frame,
+// which visibly kept the reins jittering during the whole bow sequence instead of settling into
+// the same still default position they'd have with nobody riding. Replacing the hand-tracking
+// call outright for the duration of the bow sequence, rather than patching up its result
+// afterwards, means only the normal/default physics step ever runs during that time.
+DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);
+
+static HookAction on_horse_set_rein_pos_hand_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    if (zelda == nullptr || !is_spawned_zelda(zelda) || zelda->mBowMode == 0) {
+        return HOOK_CONTINUE;
     }
 
-    // While she's drawing, aiming, or firing her bow, her hands are occupied with the bow itself
-    // rather than gripping Epona's reins. execute() unconditionally re-anchors the reins to her
-    // hand joint every tick while she's riding solo, regardless of what she's doing, so undo that
-    // here for as long as the bow sequence is active. Riding double the reins are held by Link
-    // instead, so this is only needed for the solo seat.
-    if (zelda->mIsSingleRide && zelda->mBowMode != 0) {
-        force_reins_to_normal_pos(zelda, horse);
-    }
+    force_reins_to_normal_pos(zelda, horse);
+    return HOOK_SKIP_ORIGINAL;
 }
 
 static constexpr u8 kArrowWaitFrames = 5;
@@ -1058,6 +1069,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_pre<HorseSetReinPosHandSubstance>(on_horse_set_rein_pos_hand_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook horse setReinPosHandSubstance, Epona's reins may keep following "
+            "Zelda's hand while she draws and fires her bow: {}",
+            (int)result);
+    }
+
     result = mods::hook::replace<HoZeldaSetAnm>(on_hozelda_set_anm_replace);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1257,6 +1276,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
+    mods::hook::uninstall<HorseSetReinPosHandSubstance>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();

@@ -142,12 +142,24 @@ archery duel, where she rides alone) is never touched or duplicated.
 >
 > While riding solo, Epona's reins normally follow Zelda's hand every tick regardless of what she's doing
 > (`daHoZelda_c::execute()` calls `daHorse_c::setReinPosHand()` unconditionally whenever she's riding alone), which
-> looked wrong once her hands were busy drawing and firing a bow instead of holding them. A new post-hook on
-> `daHoZelda_c::execute()` now forces the reins back to their default, saddle-anchored position for as long as the
-> bow sequence (draw/aim/fire) is active, using the same brief-detach trick already used for the cutscene-hiding fix
-> above (`daHorse_c::setReinPosNormal()` otherwise refuses to do anything while a single-riding Zelda is still
-> attached). She regrips the reins automatically the instant the sequence ends, since nothing further overrides
-> `execute()`'s own hand-following logic once `mBowMode` clears.
+> looked wrong once her hands were busy drawing and firing a bow instead of holding them. An initial fix patched the
+> reins back to their default position in a post-hook right after `execute()` finished each tick (the same
+> brief-detach trick already used for the cutscene-hiding fix above, since `daHorse_c::setReinPosNormal()` otherwise
+> refuses to do anything while a single-riding Zelda is still attached) — but the reins kept visibly jittering
+> through the whole bow sequence instead of settling down. `daHorseRein_c::setReinPos()` isn't an instant snap to a
+> target position: it's a gravity-and-inertia rope simulation that only takes one small physics step towards its
+> target per call, carrying real velocity state between calls. Letting `setReinPosHand()` take its own step towards
+> her hand every tick and then immediately patching the result with a second, different step towards the default
+> position left that velocity state fighting itself every frame, which is what kept the reins visibly moving instead
+> of settling into stillness.
+>
+> The fix now replaces the `setReinPosHand()` call outright instead of patching up its result afterwards: a pre-hook
+> on `daHorse_c::setReinPosHandSubstance()` (the function `setReinPosHand()` ultimately calls) checks whether the
+> horse's attached Zelda is this mod's own and her bow sequence is active, and if so skips the hand-tracking call
+> entirely and runs the same default-position override in its place — so only a single physics step ever runs per
+> frame during the bow sequence, letting the reins settle into exactly the same still position they'd have with
+> nobody riding, instead of two competing steps. She regrips the reins automatically the instant the sequence ends,
+> since nothing further overrides `setReinPosHand()` once `mBowMode` clears.
 >
 > If you'd rather see Zelda during story cutscenes too (with the orientation fix above still applying to her solo
 > seat), a **Show Zelda during cutscenes** toggle is available in this mod's panel in the in-game Mods window,
