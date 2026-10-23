@@ -787,6 +787,28 @@ static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
+// Epona's idle-state AI (daHorse_c::procWait) periodically scans for nearby ENEMY-group actors
+// via this judge function and, if one is found, spooks into a rearing "excitement" animation.
+// It has no notion of Zelda riding solo and defending herself -- so whenever her auto-targeted
+// Light Arrow combat brings an enemy within range, Epona rears up mid-fight as if under threat.
+// Skip the search entirely (judge functions return NULL for "no match") while she's solo-ridden
+// by the mod's own spawned Zelda, who can actually fight back.
+DEFINE_HOOK_SYMBOL("daHorse_searchEnemy", void*(fopAc_ac_c*, void*), HorseSearchEnemy);
+
+static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse == nullptr || !is_spawned_zelda_attached(horse)) {
+        return HOOK_CONTINUE;
+    }
+
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    if (zelda != nullptr && zelda->checkSingleRide()) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
 
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
@@ -1089,6 +1111,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook Midna's NPC transform-block search, Zelda will act as a normal NPC "
             "and may prevent transforming near her: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSearchEnemy>(on_horse_search_enemy_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's nearby-enemy search, she may rear up in fear while Zelda is "
+            "riding solo and fighting nearby enemies: {}",
             (int)result);
     }
 
