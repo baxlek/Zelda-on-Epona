@@ -489,6 +489,19 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
+// Forces the reins back to their default, saddle-anchored position, even though
+// daHorse_c::setReinPosNormal() normally refuses to do anything while a single-riding Zelda is
+// still attached to the horse (deferring to her hand-following position by design). Briefly
+// detaching her around the call forces it through with no lasting effect, since execute()
+// unconditionally reattaches her at the very start of next tick regardless (the same trick used
+// for the grass-whistle and cutscene-hiding fixes elsewhere in this file).
+static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
+    if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {
+        horse->setZeldaActor(nullptr);
+    }
+    horse->setReinPosNormal();
+}
+
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
@@ -500,10 +513,30 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {
-        horse->setZeldaActor(nullptr);
+    force_reins_to_normal_pos(zelda, horse);
+}
+
+// Riding solo, daHorse_c::execute() has Zelda's own daHoZelda_c::execute() call
+// horse->setReinPosHand() every tick, unconditionally re-anchoring the reins to her hand joint
+// regardless of what she's doing. setReinPosHandSubstance() is a rope-physics simulation (gravity
+// + inertia, not an instant snap): letting it run even once with a "hand" target and then
+// immediately overriding with setReinPosNormal() right after (as an execute() post-hook once did)
+// still leaves its spring/velocity state tainted by that one hand-aimed step every single frame,
+// which visibly kept the reins jittering during the whole bow sequence instead of settling into
+// the same still default position they'd have with nobody riding. Replacing the hand-tracking
+// call outright for the duration of the bow sequence, rather than patching up its result
+// afterwards, means only the normal/default physics step ever runs during that time.
+DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);
+
+static HookAction on_horse_set_rein_pos_hand_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    if (zelda == nullptr || !is_spawned_zelda(zelda) || zelda->mBowMode == 0) {
+        return HOOK_CONTINUE;
     }
-    horse->setReinPosNormal();
+
+    force_reins_to_normal_pos(zelda, horse);
+    return HOOK_SKIP_ORIGINAL;
 }
 
 static constexpr u8 kArrowWaitFrames = 5;
@@ -599,7 +632,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->field_0x6dd = 1;
     }
 
-    if ((anm_idx[0] != 0x1C && anm_idx[0] != 0xE) || player->checkHorseElecDamage()) {
+    // Normally only the two shared "riding together" idle anims (0xE/0x1C) are allowed into the
+    // bow-aiming branch below; solo riding always overrides anm_idx[0] to one of its own idle
+    // poses (0x17/0x11/0x1B) above, which would otherwise fall through to the plain "not aiming"
+    // branch here and silently disable auto-target while Zelda is alone on Epona. Let a solo ride
+    // with an active bow target through as well, so she can still draw and fire on her own.
+    bool soloBowMode = zelda->mIsSingleRide && zelda->mBowMode != 0;
+
+    if (((anm_idx[0] != 0x1C && anm_idx[0] != 0xE) && !soloBowMode) || player->checkHorseElecDamage()) {
         zelda->resetUpperAnime();
         if (zelda->field_0x6e4[0] != anm_idx[0]) {
             zelda->setSingleAnime(anm_idx[0], 1.0f, 0.0f, -1, horse->getMorfFrame());
@@ -617,7 +657,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->deleteArrow();
     } else if (zelda->mBowMode != 0) {
         BOOL anm_end = zelda->mFrameCtrl[2].checkAnmEnd();
-        anm_idx[0] = 0x1A;
+        // Riding double, the bow sequence has its own dedicated sit-and-aim base pose (0x1A).
+        // Riding solo there's no such pose, so keep her already-computed solo idle anim as the
+        // base instead; the bow draw/fire motion below is layered on top as an upper-body-only
+        // overlay anim (see setUpperAnime()'s joint-range blend), so her seated position and legs
+        // still match normal solo riding while just her arms/torso play the aiming animation.
+        if (!zelda->mIsSingleRide) {
+            anm_idx[0] = 0x1A;
+        }
         anm_idx[2] = 0xFFFF;
 
         if (zelda->mUpperAnmID == 9) {
@@ -1022,6 +1069,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_pre<HorseSetReinPosHandSubstance>(on_horse_set_rein_pos_hand_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook horse setReinPosHandSubstance, Epona's reins may keep following "
+            "Zelda's hand while she draws and fires her bow: {}",
+            (int)result);
+    }
+
     result = mods::hook::replace<HoZeldaSetAnm>(on_hozelda_set_anm_replace);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1221,6 +1276,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
+    mods::hook::uninstall<HorseSetReinPosHandSubstance>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
