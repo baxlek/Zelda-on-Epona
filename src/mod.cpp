@@ -1002,12 +1002,30 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     u16 anmIdx = horse->getAnmIdx(0);
     bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
                           anmIdx == kAnmHorseExcitement2;
-    if (!isSpookedAnime) {
+
+    // Beyond the anim index itself, also watch her top-level state machine directly:
+    // procTurnInit() (the function our HorseProcTurnInit hook targets) is a small, single-purpose
+    // function called from exactly two sites within the SAME translation unit as checkTgHitTurn()
+    // (itself already confirmed, per the ChkTgHit()-clearing fix, to be inlined away at its own
+    // call site inside procWait() -- see Cause 2). If procTurnInit() is similarly inlined at
+    // either call site, our function-level hook on it can never fire for those calls, since they
+    // never execute a real CALL instruction to its standalone address. setSingleAnime() is still a
+    // real, large, widely-called function unlikely to be inlined, so its own hook (Cause 4) should
+    // still block the visible anim switch to ANM_HS_STAND in that scenario -- but procTurnInit()
+    // ALSO unconditionally sets m_proc/m_procID to procTurn/PROC_TURN_e as plain field writes
+    // (not hookable function calls), so the state machine can silently flip into the turning state
+    // even while the anim itself stays blocked. The following tick, procTurn() would then run
+    // instead of procWait(), independently driving her body's turn-around regardless of anim
+    // state. Catching m_procID == PROC_TURN_e directly (on top of the anim-index check) closes
+    // this gap regardless of inlining.
+    bool inTurnState = horse->m_procID == daHorse_c::PROC_TURN_e;
+
+    if (!isSpookedAnime && !inTurnState) {
         return;
     }
 
     // Log unconditionally (even if epona_combat_reactions_suppressed() currently reads false)
-    // whenever she's found in a spooked anim, so a report of the FULL rearing animation playing
+    // whenever either condition is observed, so a report of the FULL rearing animation playing
     // out unimpeded (instead of a brief, corrected flash) can be checked against whether
     // suppression was actually active at that moment, or whether one of its three gating
     // conditions was itself false at the critical tick -- which would explain why none of the
@@ -1019,14 +1037,15 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     bool singleRide =
         horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide();
     mods::log::warn(
-        "[epona-diag] execute() post-hook found her in spooked anmIdx={} (suppressed={}, "
+        "[epona-diag] execute() post-hook found anmIdx={} inTurnState={} (suppressed={}, "
         "autoTarget={}, zeldaAttached={}, singleRide={})",
-        anmIdx, suppressed, autoTarget, zeldaAttached, singleRide);
+        anmIdx, inTurnState, suppressed, autoTarget, zeldaAttached, singleRide);
 
     if (suppressed) {
         mods::log::warn(
             "[epona-diag] -- resetting back to her wait state. This means something bypasses the "
-            "ChkTgHit()/setSingleAnime suppression entirely; please report this log line if seen.");
+            "ChkTgHit()/setSingleAnime/procTurnInit suppression entirely (possibly via inlining); "
+            "please report this log line if seen.");
         horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 0.0f, 0);
         horse->procWaitInit();
     }
