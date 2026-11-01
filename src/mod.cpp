@@ -893,6 +893,90 @@ static void on_hozelda_set_anm_replace(ModContext*, void* args, void*, void*) {
     set_anm_auto_target(zelda);
 }
 
+// Vanilla setNeckAngle() aims Zelda's neck/eyes at Link whenever he isn't riding Epona --
+// normally only true for a few story moments where he's approaching her on foot (e.g. right
+// before mounting up). Under this mod, "not riding" also describes virtually all of ordinary
+// solo-riding combat, since Zelda stays mounted alone while Link fights on foot nearby, so her
+// head and eyes kept locking onto Link's position the whole time instead of whatever enemy she
+// was actually drawing and firing her bow at. Reuse the same target her aiming/body-angle logic
+// already tracks (mGndAcKeep, populated every tick by on_hozelda_execute_pre's auto-target
+// search) whenever she's riding solo and one is in range, falling back to vanilla's own
+// player/Midna-attention-pos behavior otherwise -- e.g. with no target in range, auto-targeting
+// disabled, or actually riding double with Link.
+static void set_neck_angle_auto_target(daHoZelda_c* zelda) {
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    fopAc_ac_c* target = zelda->mGndAcKeep.getActor();
+    cXyz* var_r28 = NULL;
+    s16 angle_x_target = 0;
+    s16 angle_y_target = 0;
+    s16 var_r27 = 0;
+    s16 var_r26 = 0;
+
+    if (target != NULL && zelda->checkSingleRide()) {
+        var_r28 = &target->eyePos;
+    } else if (!player->checkHorseRide()) {
+        cXyz sp34 = player->current.pos - zelda->current.pos;
+        int sp18 = cLib_distanceAngleS(sp34.atan2sX_Z(), zelda->shape_angle.y);
+
+        f32 var_f31;
+        int sp14;
+        if (zelda->mNeckAngle.y != 0) {
+            sp14 = 0x5800;
+            var_f31 = 250000.0f;
+        } else {
+            sp14 = 0x5000;
+            var_f31 = 90000.0f;
+        }
+
+        if (sp18 <= 0x4000 || (sp18 <= sp14 && sp34.abs2XZ(player->current.pos) < var_f31)) {
+            var_r28 = &player->eyePos;
+        }
+    } else if (zelda->mBowMode == 0 && zelda->field_0x6da == 0 && player->checkMidnaAtnPos()) {
+        var_r28 = player->getMidnaAtnPos();
+    }
+
+    if (var_r28 != NULL) {
+        cXyz sp1C = *var_r28 - zelda->field_0x6f8;
+        s16 spE = sp1C.atan2sY_XZ();
+        s16 spC = sp1C.atan2sX_Z() - zelda->shape_angle.y;
+        s16 spA = spE;
+        s16 sp8 = spC;
+
+        angle_x_target = cLib_minMaxLimit<s16>((s16)spE, -10000, 8000);
+        angle_y_target = cLib_minMaxLimit<s16>((s16)spC, -20000, 20000);
+
+        var_r27 = angle_x_target >> 1;
+        var_r26 = angle_y_target >> 1;
+
+        angle_x_target = var_r27;
+        angle_y_target = var_r26;
+
+        var_r27 = (s16)(var_r27 + (spA - spE));
+        var_r26 = (s16)(var_r26 + (sp8 - spC));
+    }
+
+    daPy_addCalcShort(&zelda->mNeckAngle.x, angle_x_target, 3, 0x1000, 0x100);
+    daPy_addCalcShort(&zelda->mNeckAngle.y, angle_y_target, 3, 0x1000, 0x100);
+
+    if (zelda->field_0x6de != 0) {
+        zelda->clearEyeMove();
+    } else {
+        zelda->setEyeMove(var_r28, var_r27, var_r26);
+    }
+}
+
+DEFINE_HOOK(&daHoZelda_c::setNeckAngle, HoZeldaSetNeckAngle);
+
+static void on_hozelda_set_neck_angle_replace(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda)) {
+        HoZeldaSetNeckAngle::g_orig(zelda);
+        return;
+    }
+
+    set_neck_angle_auto_target(zelda);
+}
+
 // Zelda already knows Link is the hero in wolf form; she shouldn't stop him from
 // transforming back and forth just because she happens to be looking at him.
 DEFINE_HOOK_SYMBOL("daMidna_searchNpc", void*(fopAc_ac_c*, void*), MidnaSearchNpc);
@@ -1474,6 +1558,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::replace<HoZeldaSetNeckAngle>(on_hozelda_set_neck_angle_replace);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda setNeckAngle, Zelda will keep looking at Link instead of her "
+            "bow target while riding solo: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<MidnaSearchNpc>(on_midna_search_npc_pre);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1715,6 +1807,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HorseSetReinPosHandSubstance>();
     mods::hook::uninstall<HoZeldaSetAnm>();
+    mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
     return MOD_OK;
