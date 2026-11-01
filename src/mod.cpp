@@ -429,6 +429,7 @@ struct HoZeldaTargetSearch {
     const fopAc_ac_c* self;
     f32 maxDistSq;
     s16 maxAngle;
+    s16 refAngleY;
     bool behind;
     fopAc_ac_c* best;
     f32 bestDistSq;
@@ -440,6 +441,28 @@ struct HoZeldaTargetSearch {
 // forward targeting be reused to search for targets behind Zelda.
 static s32 mirror_seen_angle_behind(s32 seenAngleY) {
     return 0x8000 - seenAngleY;
+}
+
+// Measures how far i_targetPos sits (0..0x8000) from the i_refAngleY facing direction, as seen
+// from i_fromPos. Unlike fopAcM_seenActorAngleY(), the facing angle is passed in explicitly
+// instead of being read from an actor's own shape_angle.y -- this keeps targeting decisions based
+// on a stable reference even while Zelda's own shape_angle.y is snapped 180 degrees for backward
+// firing (reading her own, already-flipped shape_angle.y back as the "forward" direction would
+// make her flip-flop between facings every frame).
+static s32 seen_angle_from_yaw(const cXyz& i_fromPos, const cXyz& i_targetPos, s16 i_refAngleY) {
+    s16 targetAngle = cLib_targetAngleY(&i_fromPos, &i_targetPos);
+    targetAngle -= i_refAngleY;
+    return abs(targetAngle);
+}
+
+// The yaw Zelda's targeting should be measured against: the horse's facing while dual-riding
+// (stable, unaffected by her own backward-firing snap), or her own facing otherwise (e.g.
+// solo-riding, where she isn't necessarily aligned with the horse).
+static s16 zelda_targeting_reference_angle_y(const daHoZelda_c* zelda) {
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    bool dualRide = horse != nullptr && player != nullptr && player->checkHorseRide();
+    return dualRide ? horse->shape_angle.y : zelda->shape_angle.y;
 }
 
 static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
@@ -466,7 +489,8 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     }
 
     f32 distSq = search->self->current.pos.abs2XZ(i_actor->current.pos);
-    s32 seenAngleY = fopAcM_seenActorAngleY(search->self, i_actor);
+    s32 seenAngleY =
+        seen_angle_from_yaw(search->self->current.pos, i_actor->current.pos, search->refAngleY);
     if (search->behind) {
         seenAngleY = mirror_seen_angle_behind(seenAngleY);
     }
@@ -491,6 +515,7 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     search.maxDistSq = kAutoTargetRange * kAutoTargetRange;
     search.maxAngle = zelda->mpHIO->m.bow_end_angle;
     search.behind = i_behind;
+    search.refAngleY = zelda_targeting_reference_angle_y(zelda);
     fopAcIt_Judge((fopAcIt_JudgeFunc)judge_nearest_enemy, &search);
     return search.best;
 }
@@ -637,7 +662,8 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
 
     int target_seen_angleY = 0;
     if (target_actor != NULL) {
-        target_seen_angleY = fopAcM_seenActorAngleY(zelda, target_actor);
+        target_seen_angleY = seen_angle_from_yaw(zelda->current.pos, target_actor->current.pos,
+                                                  zelda_targeting_reference_angle_y(zelda));
     }
 
     // When the current target is behind Zelda, use the mirrored angle so the same cone-width
