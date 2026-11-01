@@ -881,19 +881,6 @@ static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, vo
     return HOOK_CONTINUE;
 }
 
-// Neither of the two hooks above actually catches a Light Arrow flying near Epona: reports after
-// shipping both show her own sword-swing-style "hit" reaction (procTurnInit(1), via
-// checkTgHitTurn) is now suppressed correctly, but she still rears specifically from Light
-// Arrows -- meaning the arrow's attack collider must not register against her body colliders the
-// same way a sword does, and whatever *does* trigger from it hasn't been pinned down from source
-// alone. Rather than keep chasing individual internal trigger paths, hook the one place all of
-// them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to switch
-// her into any of the three "spooked" animations (rearing ANM_HS_STAND, or the ENEMY-group
-// excitement reaction ANM_HS_EXCITEMENT/ANM_HS_EXCITEMENT_2) while her combat reactions are
-// suppressed. This can't miss a trigger, known or not, since nothing can make her visibly react
-// without eventually calling this.
-DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);
-
 // daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
 // d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
 // d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
@@ -901,12 +888,18 @@ static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand"
 static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
 static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
 
+// Rather than keep chasing individual internal trigger paths one at a time, hook the one place
+// all of them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to
+// switch her into any of the three "spooked" animations above while her combat reactions are
+// suppressed.
+DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);
+
 // The window itself (s_arrowShotDiagFramesLeft/kArrowShotDiagFrames) is declared near the top of
 // this file alongside the other spawn-tracking statics, armed in on_arrow_shooting_post below and
 // ticked down in on_hozelda_execute_pre. For a few seconds after Zelda's own Light Arrow is
 // released (covering its full flight time), every daHorse_c::setSingleAnime() call is logged
-// regardless of which animation it requests, to catch the possibility that Epona's Light-Arrow
-// rearing uses some 4th, not-yet-identified animation index outside the three handled above.
+// regardless of which animation it requests, in case some 4th, not-yet-identified animation index
+// is ever involved outside the three handled above.
 static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     u16 anmIdx = mods::arg<u16>(args, 1);
@@ -931,17 +924,48 @@ static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, 
 
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
 
-// Belt-and-suspenders safety net: even though nothing in d_a_horse.cpp writes m_anmIdx[0] outside
-// setSingleAnime()/setDoubleAnime() (neither of which ever requests a "spooked" ID through
-// setDoubleAnime), hook execute() itself and correct her back to a neutral wait pose on any tick
-// she's still found holding one of the three "spooked" anims while suppressed -- in case some
-// still-unidentified path sets it directly, bypassing the setSingleAnime hook above entirely. This
-// only touches the animation playback (not m_proc/m_procID), so it can't interfere with her
-// movement/AI state machine the way forcing a full procWaitInit() would.
+// A diagnostic log confirmed none of the hooks above actually catch Light Arrow rearing (neither
+// toast/log line ever fired), even though she really was found sitting in ANM_HS_STAND by the
+// execute() safety net further down. The root cause: daHorse_c::checkTgHitTurn() (reached from
+// procWait() while Zelda rides solo, since she's never registered as the vanilla "ridden" rider
+// the way Link is) spins Epona into procTurnInit(1) -- and so does its setSingleAnime(ANM_HS_STAND)
+// call -- whenever her own body collision cylinders (m_tgco_cyl/m_head_sph) carry a "target hit"
+// flag, regardless of who or what set it. checkTgHitTurn() is a single-statement, same-file,
+// two-call-site function tiny enough for the compiler to inline together with its tail call to
+// procTurnInit() at those call sites specifically, silently bypassing hooks on both procTurnInit
+// and setSingleAnime for exactly this trigger while still correctly intercepting other call sites
+// (e.g. a player's sword swing, confirmed fixed by the procTurnInit hook above).
+//
+// Rather than keep hooking functions the compiler is free to inline away, intercept the actual
+// stimulus instead: the "target hit" flag itself (ChkTgHit()) is a generic "something touched me"
+// bit set by the collision engine whenever any attack collider overlaps hers, with no regard for
+// who's attacking or why -- including a Light Arrow's own attack collider simply flying close
+// enough to graze her hitbox. Clear it ourselves, every tick, before any of daHorse_c's own
+// per-tick logic gets a chance to read it, pre-empting checkTgHitTurn() (and the equivalent check
+// further down in execute() itself, used while actually ridden) from ever observing a hit at all.
 DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
 
-static constexpr u16 kAnmHorseWait01 = 27;  // ANM_HS_WAIT_01: default idle pose
+static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    if (!epona_combat_reactions_suppressed(horse)) {
+        return HOOK_CONTINUE;
+    }
 
+    horse->m_tgco_cyl[0].ClrTgHit();
+    horse->m_tgco_cyl[1].ClrTgHit();
+    horse->m_tgco_cyl[2].ClrTgHit();
+    horse->m_head_sph.ClrTgHit();
+
+    return HOOK_CONTINUE;
+}
+
+// Belt-and-suspenders safety net, kept in case some other still-unidentified path sets her
+// animation directly, bypassing every hook above: correct her back to a clean idle wait on any
+// tick she's still found holding one of the three "spooked" anims while suppressed. Unlike a bare
+// setSingleAnime() override, procWaitInit() also resets m_proc/m_procID back to procWait -- doing
+// only the former while a startled turn's m_proc stayed on procTurn left the two fighting each
+// other every tick (reported in-game as Epona rocking back and forth in place), since procTurn()
+// kept expecting ANM_HS_STAND while this safety net forced her out of it right back out again.
 static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     if (!epona_combat_reactions_suppressed(horse)) {
@@ -954,10 +978,10 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     {
         mods::log::warn(
             "[epona-diag] execute() post-hook caught her still in spooked anmIdx={} despite "
-            "suppression -- forcing back to idle. This means something bypasses the "
-            "setSingleAnime hook entirely; please report this log line if seen.",
+            "suppression -- resetting back to her wait state. This means something bypasses the "
+            "ChkTgHit()/setSingleAnime suppression entirely; please report this log line if seen.",
             anmIdx);
-        horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 4.0f, 0);
+        horse->procWaitInit();
     }
 }
 
@@ -1292,6 +1316,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook Epona's animation setter, she may still rear up or spook while "
             "Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseExecute>(on_horse_execute_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() to clear her target-hit flags, she may still rear "
+            "up whenever a Light Arrow flies close to her while Zelda is riding solo and "
+            "fighting: {}",
             (int)result);
     }
 
