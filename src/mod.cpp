@@ -122,6 +122,25 @@ static bool is_spawned_zelda_attached(daHorse_c* horse) {
     return live != nullptr && live == attached;
 }
 
+// Whether the spawned Zelda actor is currently solo-riding the horse, checked via her own live
+// actor (found by ID, exactly like find_spawned_zelda()) rather than horse->getZeldaActor().
+//
+// on_horse_call_substance_pre() below intentionally nulls out horse->m_zeldaActorKeep every tick
+// (as part of the grass-whistle fix) and nothing ever restores it afterwards -- vanilla
+// daHorse_c::execute() only re-attaches her once, at the very start of its own next tick. Any
+// check reached after callHorseSubstance() runs within the same execute() call -- which includes
+// every later stage of execute() (procWait()/checkTgHitTurn()/procTurnInit()/setNeckAnime(), all
+// reached further down in the same function body), plus our own execute() post-hook -- was
+// therefore reading horse->getZeldaActor() == nullptr, making is_spawned_zelda_attached(horse)
+// (and anything gated on it, like epona_combat_reactions_suppressed()) silently and permanently
+// read false during exactly the combat window this mod needs to detect. This is the actual root
+// cause behind every "Epona still rears" report this session: none of the suppression hooks ever
+// activated, because the gate itself never read true in the first place.
+static bool is_spawned_zelda_riding_solo() {
+    fopAc_ac_c* actor = find_spawned_zelda();
+    return actor != nullptr && static_cast<daHoZelda_c*>(actor)->checkSingleRide();
+}
+
 static bool s_hideSpawnedZeldaInCutscene = false;
 
 static bool is_title_screen() {
@@ -560,12 +579,10 @@ static constexpr f32 kDrawAnimSpeedMultiplier = 2.0f;
 // feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident
 // should still see her react), since only Zelda's own combat is what's being worked around here.
 static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
-    if (!auto_target_enemies_enabled() || !is_spawned_zelda_attached(horse)) {
-        return false;
-    }
-
-    daHoZelda_c* zelda = horse->getZeldaActor();
-    return zelda != nullptr && zelda->checkSingleRide();
+    // horse is kept for call-site symmetry with the hooks that gate on it, but the live
+    // ride-state check below (unlike the old horse->getZeldaActor()-based one) doesn't need it.
+    (void)horse;
+    return auto_target_enemies_enabled() && is_spawned_zelda_riding_solo();
 }
 
 // daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
@@ -901,8 +918,7 @@ static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, vo
 
     if (isStartledTurn != 0) {
         report_diag("procTurnInit(1)", suppressed, auto_target_enemies_enabled(),
-            is_spawned_zelda_attached(horse),
-            horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+            find_spawned_zelda() != nullptr, is_spawned_zelda_riding_solo());
     }
 
     return HOOK_CONTINUE;
@@ -928,8 +944,7 @@ static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, 
     if (isSpookedAnime) {
         bool suppressed = epona_combat_reactions_suppressed(horse);
         report_diag("setSingleAnime", suppressed, auto_target_enemies_enabled(),
-            is_spawned_zelda_attached(horse),
-            horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+            find_spawned_zelda() != nullptr, is_spawned_zelda_riding_solo());
         if (suppressed) {
             return HOOK_SKIP_ORIGINAL;
         }
@@ -963,8 +978,7 @@ static HookAction on_horse_set_neck_anime_pre(ModContext*, void* args, void*, vo
 
     bool suppressed = epona_combat_reactions_suppressed(horse);
     report_diag("setNeckAnime(ANM_HS_LASH)", suppressed, auto_target_enemies_enabled(),
-        is_spawned_zelda_attached(horse),
-        horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+        find_spawned_zelda() != nullptr, is_spawned_zelda_riding_solo());
     if (suppressed) {
         return HOOK_SKIP_ORIGINAL;
     }
@@ -1064,9 +1078,8 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     // got a chance to engage in the first place.
     bool suppressed = epona_combat_reactions_suppressed(horse);
     bool autoTarget = auto_target_enemies_enabled();
-    bool zeldaAttached = is_spawned_zelda_attached(horse);
-    bool singleRide =
-        horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide();
+    bool zeldaAttached = find_spawned_zelda() != nullptr;
+    bool singleRide = is_spawned_zelda_riding_solo();
     mods::log::warn(
         "[epona-diag] execute() post-hook found anmIdx={} inTurnState={} (suppressed={}, "
         "autoTarget={}, zeldaAttached={}, singleRide={})",
