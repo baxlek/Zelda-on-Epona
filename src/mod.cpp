@@ -64,6 +64,23 @@ static bool auto_target_enemies_enabled() {
     return value;
 }
 
+static ConfigVarHandle g_cvarEponaFollowDismounted = 0;
+
+static bool epona_follow_dismounted_enabled() {
+    bool value = false;
+    if (g_cvarEponaFollowDismounted == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarEponaFollowDismounted, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
+// Follows "Zelda active in combat" so the two toggles move together: Epona stops following the
+// instant combat mode is turned off, even if the follow checkbox itself is still checked.
+static bool epona_follow_active() {
+    return auto_target_enemies_enabled() && epona_follow_dismounted_enabled();
+}
+
 static constexpr bool kDiagnosticLoggingEnabled = false;
 
 static const char* kHoZeldaStageName = "HoZelda";
@@ -1037,6 +1054,78 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+// Standoff distance Epona tries to hold while following Link on foot, and the extra range beyond
+// it over which her approach speed ramps up to a full walk/trot (loosely mirroring the 20/40/100
+// unit distance bands daHorse_c::setDemoMoveData() already uses for its own speed transitions).
+static constexpr f32 kEponaFollowDistance = 20.0f;
+static constexpr f32 kEponaFollowRampRange = 80.0f;
+
+// Per-tick turn-rate clamp used only to keep Epona facing Link while she's stopped within the
+// follow distance; turning while she's still approaching is handled natively via the stick angle
+// set below, the same as it is for real player input.
+static constexpr s16 kEponaFollowIdleTurnMax = 0x600;
+static constexpr s16 kEponaFollowIdleTurnMin = 0x40;
+
+static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
+    if (horse == nullptr || player == nullptr || !epona_follow_active()) {
+        return false;
+    }
+    if (player->checkHorseRide()) {
+        return false;  // Link is still mounted, nothing to follow
+    }
+    if (horse->checkHorseDemoMode() || horse->checkHorseCallWait() || dComIfGp_event_runCheck()) {
+        return false;  // don't interfere with cutscenes, the no-draw wait state, or other scripted events
+    }
+    if (horse->checkRodeoMode() || horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000)) {
+        return false;  // rodeo minigame, or already mid an in-progress whistle-call run
+    }
+    return true;
+}
+
+DEFINE_HOOK(&daHorse_c::setStickData, HorseSetStickData);
+
+// Feeds Epona the same "virtual stick input" real player steering or the whistle-call feature
+// would, so her approach reuses the native movement/turning/acceleration/animation/wall-collision
+// pipeline instead of fighting it with a hand-rolled position override.
+static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (!epona_follow_should_engage(horse, player)) {
+        return;
+    }
+
+    f32 distXZ = horse->current.pos.absXZ(player->current.pos);
+    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
+    if (magnitude <= 0.0f) {
+        horse->m_padStickValue = 0.0f;
+        return;
+    }
+
+    horse->m_padStickValue = magnitude > 1.0f ? 1.0f : magnitude;
+    horse->m_padStickAngleY = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+}
+
+// Once Epona is within the follow distance, the native stick-driven turning above stops engaging
+// (it only turns while actively moving), so keep nudging her to face Link while she's stopped.
+static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (!epona_follow_should_engage(horse, player)) {
+        return;
+    }
+
+    f32 distXZ = horse->current.pos.absXZ(player->current.pos);
+    if (distXZ > kEponaFollowDistance) {
+        return;
+    }
+
+    s16 facingAngle = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    cLib_addCalcAngleS(&horse->shape_angle.y, facingAngle, 5, kEponaFollowIdleTurnMax,
+                        kEponaFollowIdleTurnMin);
+    horse->current.angle.y = horse->shape_angle.y;
+    horse->initHorseMtx();
+}
+
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
@@ -1224,6 +1313,10 @@ static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval,
     }
 }
 
+static bool is_epona_follow_control_disabled(ModContext*, void*) {
+    return !auto_target_enemies_enabled();
+}
+
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_TOGGLE;
@@ -1249,6 +1342,17 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
+
+    UiControlDesc followControl = UI_CONTROL_DESC_INIT;
+    followControl.kind = UI_CONTROL_TOGGLE;
+    followControl.label = "Epona follows when dismounted";
+    followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
+                              "face him and keeping a distance of about 20 units. Requires "
+                              "\"Zelda active in combat\" to be on.";
+    followControl.binding = UI_BINDING_CONFIG_VAR;
+    followControl.config_var = g_cvarEponaFollowDismounted;
+    followControl.is_disabled = is_epona_follow_control_disabled;
+    svc_ui->pane_add_control(mod_ctx, panel, &followControl, nullptr);
     return MOD_OK;
 }
 
@@ -1374,6 +1478,21 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook Epona's execute() for the spooked-anim safety net: {}", (int)result);
     }
 
+    result = mods::hook::add_post<HorseSetStickData>(on_horse_set_stick_data_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's stick-data setter, she won't follow Link when he's "
+            "dismounted: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_follow_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the dismounted-follow facing correction: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1433,6 +1552,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to register autoTargetEnemies option, defaulting to auto-targeting off: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc followCvarDesc = CONFIG_VAR_DESC_INIT;
+    followCvarDesc.name = "eponaFollowDismounted";
+    followCvarDesc.type = CONFIG_VAR_BOOL;
+    followCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &followCvarDesc, &g_cvarEponaFollowDismounted);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register eponaFollowDismounted option, defaulting to following off: {}",
             (int)result);
     }
 

@@ -167,6 +167,15 @@ archery duel, where she rides alone) is never touched or duplicated.
 > while a cutscene is actively puppeting the horse from scripted demo data isn't safe (it crashed rather than just
 > appearing a frame late), so turning the toggle on while a cutscene is already playing doesn't spawn her into that
 > cutscene if she wasn't already present, it only applies going forward.
+>
+> An **Epona follows when dismounted** toggle lets Epona walk over and keep Link company on foot, instead of
+> waiting wherever he left her. While it's on, she turns to walk toward Link whenever he's more than about 20
+> units away, slowing to a stop once she closes to that distance, and keeps turning to face him even while
+> standing still. Since this only makes sense alongside her other combat behavior, it requires the **Zelda active
+> in combat** toggle above to also be on, and is dimmed out in the Mods window otherwise. Rather than driving her
+> position directly, the mod feeds her the same "virtual stick input" real player steering (and the horse-call
+> grass whistle) already use, so her walk/trot animation, acceleration, turning, and wall collision all come from
+> the game's own movement code instead of a hand-rolled override.
 
 > [!NOTE]
 > AI can get WORDY! 
