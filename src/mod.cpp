@@ -660,7 +660,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
     // scratch and making her seem to fire much faster than intended. Treat it as a no-op idle tick
     // instead, same as vanilla already does for ANM_HS_EXCITEMENT/EXCITEMENT_2 (8/9, which fall
     // through to the same default case below and were never a problem).
-    bool reactionsSuppressed = epona_combat_reactions_suppressed(horse);
+    //
+    // That said, when a dismounted player's hit is genuinely making Epona rear
+    // (s_allowRearForDismountedPlayerHit), ANM_HS_STAND is a real, full reaction -- not a stray
+    // glitch tick -- so Zelda should play her own normal "look alarmed" reaction (0x16) to it
+    // too, exactly like she would without this mod, rather than being held in the no-op idle pose
+    // and clipping through Epona as she rears.
+    bool reactionsSuppressed =
+        epona_combat_reactions_suppressed(horse) && !s_allowRearForDismountedPlayerHit;
 
     u16* anm_p = anm_idx;
     for (int i = 0; i < 3; i++, anm_p++) {
