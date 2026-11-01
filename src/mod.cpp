@@ -998,19 +998,35 @@ static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
 // (a harmless no-op blend) rather than from the spooked one.
 static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
-    if (!epona_combat_reactions_suppressed(horse)) {
+
+    u16 anmIdx = horse->getAnmIdx(0);
+    bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+                          anmIdx == kAnmHorseExcitement2;
+    if (!isSpookedAnime) {
         return;
     }
 
-    u16 anmIdx = horse->getAnmIdx(0);
-    if (anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
-        anmIdx == kAnmHorseExcitement2)
-    {
+    // Log unconditionally (even if epona_combat_reactions_suppressed() currently reads false)
+    // whenever she's found in a spooked anim, so a report of the FULL rearing animation playing
+    // out unimpeded (instead of a brief, corrected flash) can be checked against whether
+    // suppression was actually active at that moment, or whether one of its three gating
+    // conditions was itself false at the critical tick -- which would explain why none of the
+    // entry-blocking hooks (searchEnemy/procTurnInit/setSingleAnime) or the ChkTgHit() clear ever
+    // got a chance to engage in the first place.
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+    bool autoTarget = auto_target_enemies_enabled();
+    bool zeldaAttached = is_spawned_zelda_attached(horse);
+    bool singleRide =
+        horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide();
+    mods::log::warn(
+        "[epona-diag] execute() post-hook found her in spooked anmIdx={} (suppressed={}, "
+        "autoTarget={}, zeldaAttached={}, singleRide={})",
+        anmIdx, suppressed, autoTarget, zeldaAttached, singleRide);
+
+    if (suppressed) {
         mods::log::warn(
-            "[epona-diag] execute() post-hook caught her still in spooked anmIdx={} despite "
-            "suppression -- resetting back to her wait state. This means something bypasses the "
-            "ChkTgHit()/setSingleAnime suppression entirely; please report this log line if seen.",
-            anmIdx);
+            "[epona-diag] -- resetting back to her wait state. This means something bypasses the "
+            "ChkTgHit()/setSingleAnime suppression entirely; please report this log line if seen.");
         horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 0.0f, 0);
         horse->procWaitInit();
     }
