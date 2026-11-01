@@ -1062,17 +1062,26 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 static constexpr f32 kEponaFollowDistance = 1000.0f;
 static constexpr f32 kEponaFollowRampRange = 80.0f;
 
-// Extra distance beyond kEponaFollowDistance Link must put between himself and Epona before she
-// resumes approaching once stopped. Without this hysteresis, a bare "distXZ <= kEponaFollowDistance"
-// threshold flickers once she's close enough to physically touch Link: the collision push-back
-// that keeps the two actors from interpenetrating nudges distXZ back above the threshold for a
-// tick, re-engaging the approach and driving her straight back into him, over and over.
+// Extra distance beyond a stop threshold Link must put between himself and Epona before she
+// resumes an action (approaching, or facing him) once stopped. Without this hysteresis, a bare
+// "distXZ <= threshold" flickers once she's close enough to physically touch Link: the collision
+// push-back that keeps the two actors from interpenetrating nudges distXZ back above the
+// threshold for a tick, re-engaging the action and immediately undoing it, over and over.
 static constexpr f32 kEponaFollowResumeMargin = 60.0f;
+
+// Distance within which Epona holds completely still -- no walking, no turning -- so Link can
+// walk up and mount her without her fidgeting. Between this and kEponaFollowDistance she's still
+// close enough that walking isn't warranted, but she keeps turning to face him.
+static constexpr f32 kEponaFollowStillDistance = 500.0f;
 
 // Whether Epona is currently in her "approaching" phase, as opposed to stopped/settled within the
 // follow distance. See kEponaFollowResumeMargin above for why this needs to be sticky across
 // frames rather than recomputed from distance alone each tick.
 static bool s_eponaFollowApproaching = true;
+
+// Whether Epona is still actively correcting her facing toward Link, as opposed to fully settled
+// (holding still) within kEponaFollowStillDistance. Also sticky, for the same reason as above.
+static bool s_eponaFollowFacing = true;
 
 // Per-tick turn-rate clamp used to turn Epona in place to face Link: both while she's stopped
 // within the follow distance, and before she's allowed to start walking toward him (see
@@ -1090,11 +1099,14 @@ static constexpr s16 kEponaFollowAlignmentCone = 0x3000;
 
 static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
     if (horse == nullptr || player == nullptr || !epona_follow_active()) {
-        s_eponaFollowApproaching = true;  // reset so the next engagement starts by approaching
+        // Reset so the next engagement starts by approaching and actively facing Link.
+        s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
         return false;
     }
     if (player->checkHorseRide()) {
         s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
         return false;  // Link is still mounted, nothing to follow
     }
     if (horse->checkHorseDemoMode() || horse->checkHorseCallWait() || dComIfGp_event_runCheck()) {
@@ -1130,6 +1142,14 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
         s_eponaFollowApproaching = true;
     }
 
+    if (s_eponaFollowFacing) {
+        if (distXZ <= kEponaFollowStillDistance) {
+            s_eponaFollowFacing = false;
+        }
+    } else if (distXZ > kEponaFollowStillDistance + kEponaFollowResumeMargin) {
+        s_eponaFollowFacing = true;
+    }
+
     s16 facingError = bearing - horse->shape_angle.y;
     bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
                    (facingError >= -kEponaFollowAlignmentCone);
@@ -1150,10 +1170,11 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
     horse->onMoveAccept();
 }
 
-// Turns Epona in place to face Link before she's allowed to start walking toward him (the native
+// Turns Epona in place to face Link: before she's allowed to start walking toward him (the native
 // stick-driven turning in setSpeedAndAngle() only engages while forward stick magnitude is
 // nonzero, which we deliberately withhold above until she's already facing roughly the right
-// way). Once she's settled within the standoff distance, this does nothing at all -- she holds
+// way), and also while she's stopped walking but still further than kEponaFollowStillDistance
+// away. Once she's within kEponaFollowStillDistance, this does nothing at all -- she holds fully
 // still, including her facing, so Link can approach and mount her without her fidgeting.
 static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
@@ -1162,17 +1183,17 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
         return;
     }
 
-    // s_eponaFollowApproaching was already updated for this tick by on_horse_set_stick_data_post,
-    // which runs earlier within daHorse_c::execute().
-    if (!s_eponaFollowApproaching) {
-        return;  // settled within the standoff distance; hold still, don't even turn to face Link
+    // s_eponaFollowApproaching/s_eponaFollowFacing were already updated for this tick by
+    // on_horse_set_stick_data_post, which runs earlier within daHorse_c::execute().
+    if (!s_eponaFollowFacing) {
+        return;  // within the still distance; hold fully still, don't even turn to face Link
     }
 
     s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
     s16 facingError = bearing - horse->shape_angle.y;
     bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
                    (facingError >= -kEponaFollowAlignmentCone);
-    if (aligned) {
+    if (s_eponaFollowApproaching && aligned) {
         return;  // already aligned; native turning/movement handles this tick
     }
 
@@ -1403,8 +1424,10 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     followControl.kind = UI_CONTROL_TOGGLE;
     followControl.label = "Epona follows when dismounted";
     followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
-                              "face him and keeping a distance of about 1000 units (half the "
-                              "clawshot's maximum range). Requires "
+                              "face him and walking over once he's more than about 1000 units away "
+                              "(half the clawshot's maximum range), stopping at that distance. She "
+                              "keeps turning to face him down to 500 units, then holds completely "
+                              "still. Requires "
                               "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;
     followControl.config_var = g_cvarEponaFollowDismounted;

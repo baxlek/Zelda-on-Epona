@@ -170,14 +170,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 >
 > An **Epona follows when dismounted** toggle lets Epona walk over and keep Link company on foot, instead of
 > waiting wherever he left her. While it's on, and Link is more than about 1000 units away (half the
-> clawshot's maximum range), she first turns in
-> place to face him, then walks toward him once she's roughly facing his direction, stopping once she closes
-> to that distance. Once stopped she holds still -- she won't turn or fidget -- so Link can walk up and mount
-> her freely. Since this only makes sense alongside her other combat behavior, it requires the **Zelda active
-> in combat** toggle above to also be on, and is dimmed out in the Mods window otherwise. Rather than driving her
-> position directly, the mod feeds her the same "virtual stick input" real player steering (and the horse-call
-> grass whistle) already use, so her walk/trot animation, acceleration, turning, and wall collision all come from
-> the game's own movement code instead of a hand-rolled override.
+> clawshot's maximum range), she first turns in place to face him, then walks toward him once she's roughly
+> facing his direction, stopping once she closes to that distance. She keeps turning to face him down to 500
+> units, then holds completely still -- no walking, no turning -- so Link can walk up and mount her without
+> her fidgeting. Since this only makes sense alongside her other combat behavior, it requires the **Zelda
+> active in combat** toggle above to also be on, and is dimmed out in the Mods window otherwise. Rather than
+> driving her position directly, the mod feeds her the same "virtual stick input" real player steering (and
+> the horse-call grass whistle) already use, so her walk/trot animation, acceleration, turning, and wall
+> collision all come from the game's own movement code instead of a hand-rolled override.
 
 > [!NOTE]
 > AI can get WORDY! 
