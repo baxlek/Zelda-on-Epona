@@ -881,14 +881,27 @@ static void report_diag(const char* source, bool suppressed, bool autoTarget, bo
 static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     int isStartledTurn = mods::arg<int>(args, 1);
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+
+    // TEMPORARY, broader testing step: the narrower "only skip when isStartledTurn != 0" gating
+    // below didn't stop a full, multi-frame rearing animation from playing out in-game, so as a
+    // diagnostic experiment every procTurnInit() call (regardless of its param) is now logged and
+    // skipped while suppressed, to directly confirm whether this function is really the one
+    // responsible for what's being observed. This is intentionally broader than production-safe:
+    // it will also block Epona's normal directional turning while solo-ridden in combat mode.
+    // Narrow this back down (or replace it) once confirmed.
+    if (suppressed) {
+        mods::log::warn(
+            "[epona-diag] procTurnInit(isStartledTurn={}) fired while suppressed -- skipping "
+            "unconditionally for testing (current anmIdx={})",
+            isStartledTurn, horse->getAnmIdx(0));
+        return HOOK_SKIP_ORIGINAL;
+    }
+
     if (isStartledTurn != 0) {
-        bool suppressed = epona_combat_reactions_suppressed(horse);
         report_diag("procTurnInit(1)", suppressed, auto_target_enemies_enabled(),
             is_spawned_zelda_attached(horse),
             horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
-        if (suppressed) {
-            return HOOK_SKIP_ORIGINAL;
-        }
     }
 
     return HOOK_CONTINUE;
