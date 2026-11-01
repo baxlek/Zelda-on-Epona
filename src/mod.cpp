@@ -575,6 +575,7 @@ static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand"
 static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
 static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
 static constexpr u16 kAnmHorseWait01 = 27;      // ANM_HS_WAIT_01: normal idle pose
+static constexpr u16 kAnmHorseLash = 14;        // ANM_HS_LASH: neck-toss "startled" reaction
 
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
@@ -936,6 +937,36 @@ static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, 
         mods::log::warn("[epona-diag] setSingleAnime anmIdx={} (not one of the known spooked IDs, "
                          "frames left in arrow-shot window={})",
             anmIdx, s_arrowShotDiagFramesLeft);
+    }
+
+    return HOOK_CONTINUE;
+}
+
+// A fourth, separate reaction path lives directly in daHorse_c::execute() itself (not reached
+// through procWait() at all): whenever she's actively being ridden (FLG0_UNK_1) and her neck-anim
+// slot is free, she plays a neck-toss "startled" animation (ANM_HS_LASH) plus an alarmed voice
+// clip the instant any of her body collision cylinders carry a "target hit" flag -- the exact
+// same ChkTgHit() signal a nearby Light Arrow sets, gated by the exact same condition our
+// ChkTgHit()-clearing pre-hook already targets. In principle that clearing should already prevent
+// this from ever firing too, but it's a genuinely different call site (inside the large execute()
+// function itself, not procWait()), where the compiler's inlining decisions could differ. As a
+// direct, low-risk extra layer, block ANM_HS_LASH specifically (leaving her other legitimate idle
+// neck-toss variants untouched) whenever her combat reactions are suppressed.
+DEFINE_HOOK(&daHorse_c::setNeckAnime, HorseSetNeckAnime);
+
+static HookAction on_horse_set_neck_anime_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    u16 anmIdx = mods::arg<u16>(args, 1);
+    if (anmIdx != kAnmHorseLash) {
+        return HOOK_CONTINUE;
+    }
+
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+    report_diag("setNeckAnime(ANM_HS_LASH)", suppressed, auto_target_enemies_enabled(),
+        is_spawned_zelda_attached(horse),
+        horse->getZeldaActor() != nullptr && horse->getZeldaActor()->checkSingleRide());
+    if (suppressed) {
+        return HOOK_SKIP_ORIGINAL;
     }
 
     return HOOK_CONTINUE;
@@ -1382,6 +1413,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook Epona's animation setter, she may still rear up or spook while "
             "Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSetNeckAnime>(on_horse_set_neck_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's neck-animation setter, she may still toss her head in an "
+            "alarmed reaction while Zelda is riding solo and fighting: {}",
             (int)result);
     }
 
