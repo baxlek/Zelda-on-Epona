@@ -2,61 +2,67 @@
 
 This file preserves every explanatory code comment that used to live inline in `src/mod.cpp`, kept here instead so the source file stays focused on code while this context remains accessible. Entries are listed in the same order they appear in `src/mod.cpp`, each labeled with its original line range and a short snippet of the code it was documenting at the time this file was generated (line numbers will drift from the current file as it's edited further).
 
-## Line 12
+## Line 11
 
 Precedes: `#include "d/actor/d_a_arrow.h"`
 
 Game includes
 
-## Lines 46-51
+## Lines 39-44
 
 Precedes: `static ConfigVarHandle g_cvarShowInCutscenes = 0;`
 
 Whether this mod's own spawned Zelda should stay visible on Epona during scripted story cutscenes. Off by default: by default she's hidden for the duration of any such cutscene (and reappears once it ends) rather than potentially clashing with the scene's own staging (wrong orientation/animation, overlapping props, etc.) the way earlier attempts at patching her up for every individual cutscene kept doing. Exposed as a single toggle in the mod's panel in the host Mods window.
 
-## Lines 63-66
+## Lines 52-55
 
 Precedes: `static ConfigVarHandle g_cvarAutoTargetEnemies = 0;`
 
 Whether this mod's own spawned Zelda should auto-target and fire her Light Arrows at nearby enemies, the same way she already does at Ganondorf during the real horseback duel, instead of just riding passively. Off by default ("Zelda active in combat" toggle). Exposed as a toggle in the mod's panel in the host Mods window for anyone who'd rather she actively fight.
 
-## Lines 78-84
+## Lines 60-66
 
 Precedes: `static constexpr bool kDiagnosticLoggingEnabled = false;`
 
 Diagnostic logging added while investigating the "Zelda stays hidden after certain cutscenes"/SIGABRT bugs is disabled now that those issues are resolved, but every diagnostic code path below is deliberately kept in place (not removed) in case it's needed again for a future investigation. Flip this to `true` to re-enable all of it at once; there is deliberately no runtime toggle for it anymore (the previous "Log cutscene diagnostics" UI toggle/config var has been removed), since re-enabling it is expected to be a rare, developer-only action rather than something a player would need to reach from the Mods window.
 
-## Lines 87-88
+## Lines 67-68
 
 Precedes: `static const char* kHoZeldaStageName = "HoZelda";`
 
 The stage name used by the game to load the horseback-Zelda actor (see `d_stage.cpp`'s OBJNAME table: OBJNAME("HoZelda", fpcNm_HOZELDA_e, -1)).
 
-## Lines 91-93
+## Lines 68-70
 
 Precedes: `static ActorId s_spawnedZeldaId = 0;`
 
 The ActorId of the horseback-Zelda actor this mod spawned, if any. We only ever manage an actor we spawned ourselves; a HoZelda actor placed by the vanilla game (e.g. during the horseback archery duel against Ganondorf, where Zelda rides alone) is always left untouched.
 
-## Lines 97-100
+## Lines 70-73
 
 Precedes: `static s32 s_lastKnownZeldaRoomNo = -1;`
 
 The room number our spawned Zelda was last confirmed alive in, and whether the most recent engine-initiated loss of her (if any) happened without the room changing. Both are updated by `mod_update()` and consumed by the `inScriptedCutscene` branch's recovery respawn below -- see that branch's own comment for why the recovery respawn must never fire on a cross-room loss.
 
-## Lines 109-116
+## Lines 77-84
 
 Precedes: `if (fpcM_IsCreating((fpc_ProcID)s_spawnedZeldaId)) {`
 
 Actor creation (`fopAcM_create`/`fpcSCtRq_Request`) is a multi-phase request that can take more than one frame to complete (e.g. resource loading), during which the new actor sits in the engine's "create queue" rather than its normal execute queue. While that's happening, `fopAcM_SearchByID` reports "not found" (a null actor, but still a success return) even though the actor we spawned is still on its way and hasn't actually disappeared. Treating that as "the actor is gone" made us give up tracking it and spawn a second HoZelda while the first spawn request was still in flight, producing two overlapping HoZelda actors (the "double Zelda" bug). `fpcM_IsCreating` lets us tell the two cases apart.
 
-## Lines 124-126
+## Lines 77-83
+
+Precedes: `static bool s_safeToModifyEpona = false;`
+
+Whether this mod is currently allowed to create/modify anything attached to Epona. If the mod is enabled while Epona is already loaded (e.g. toggled on mid-session via the mods menu), she wasn't just (re)created through her normal lifecycle, and spawning our HoZelda actor on her immediately can crash the game. So instead, the first time mod_update() runs we check whether Epona is already loaded; if she is, we withhold all changes to her until she next unloads and reloads via a real scene transition (the normal, known-safe path this mod already relies on elsewhere).
+
+## Lines 89-91
 
 Precedes: `s_hasSpawnedZelda = false;`
 
 The actor we spawned no longer exists (e.g. deleted on a room change), or its ProcID has since been recycled by the engine for an unrelated actor (ProcIDs are reused once freed). Either way, we no longer have a spawned Zelda to track.
 
-## Lines 133-140
+## Lines 90-97
 
 Precedes: `static bool is_spawned_zelda(const fopAc_ac_c* actor) {`
 
@@ -64,7 +70,7 @@ Whether `actor` is the HoZelda actor this mod spawned itself (as opposed to a st
 
 NOTE: this dereferences `actor` (via `fopAcM_GetID`), so it is only safe to call with an actor pointer that is already known to currently be alive (e.g. one just handed to us as a hook's own argument, or one just returned by `fopAcM_SearchByID`/`fopAcIt_Judge`). It must NOT be called with `daHorse_c::getZeldaActor()`'s return value directly -- see `is_spawned_zelda_attached()` below for why, and use that instead for that specific case.
 
-## Lines 146-165
+## Lines 83-102
 
 Precedes: `static bool is_spawned_zelda_attached(daHorse_c* horse) {`
 
@@ -74,19 +80,19 @@ Whether the HoZelda actor currently attached to `horse` (`daHorse_c::getZeldaAct
 
 `fopAcM_SearchByID()` never dereferences the pointer it's given back by value here -- it looks the actor up fresh by ID in the engine's live actor table -- so comparing its result against the (potentially dangling) attached pointer by address alone, rather than by dereferencing the attached pointer itself, avoids that crash entirely.
 
-## Lines 176-179
+## Lines 114-117
 
 Precedes: `static bool s_hideSpawnedZeldaInCutscene = false;`
 
 Whether the mod's own spawned Zelda should currently be visually hidden (shrunk to an imperceptible size) rather than deleted, set once per tick by `mod_update()` and read back by the `HoZeldaSetMatrix` hook below, which does the actual hiding. See that hook's comment for why hiding her in place -- instead of deleting and later recreating the actor -- is necessary.
 
-## Lines 182-188
+## Lines 113-119
 
 Precedes: `static bool is_title_screen() {`
 
 The opening title screen (Link/Epona galloping across Hyrule Field) is driven through the same `dScnPly_c` gameplay scene class as ordinary play, just requested under a different proc name (`fpcNm_OPENING_SCENE_e` instead of `fpcNm_PLAY_SCENE_e`, see `dComIfG_changeOpeningScene()` in `d_com_inf_game.cpp`), and that scene drives Epona exactly the same way a scripted cutscene does. Without specifically excluding it, that would make the title screen itself count as a "scripted cutscene" and hide this mod's Zelda there by default -- but she should always be visible on the title screen regardless of the cutscene-visibility toggle.
 
-## Lines 194-246
+## Lines 72-124
 
 Precedes: `static bool names_equal_case_insensitive(const char* a, const char* b) {`
 
@@ -104,25 +110,33 @@ A captured diagnostics log (see `log_cutscene_diagnostics_if_changed()`) from an
 
 "Demo36_00" had the exact same kind of naming mismatch as the case-sensitivity bug above, just one level deeper: a captured diagnostics log from an actual Demo36 playthrough showed `getRunEventName()` only ever returning "demo36_01" and "demo36_02" for Demo36's own two actual cutscene segments -- "demo36_00" never appears as a *running event* name at all (only as the `demoArc` archive name, which this list is not compared against) -- so this entry was dead code exactly like the Demo01 names used to be, and Zelda stayed visible for the user's entire Demo36 playthrough despite the toggle being off. Replaced with the two real sub-event names confirmed by that log. "Demo90_00" had the exact same archive-name-vs-running-event-name mismatch: confirmed its real running event name is "demo90" (singular, no "_00" sub-cut suffix), so it was replaced with that name below.
 
-## Lines 275-277
+## Lines 120-133
+
+Precedes: `static bool is_spawned_zelda_riding_solo() {`
+
+Whether the spawned Zelda actor is currently solo-riding the horse, checked via her own live actor (found by ID, exactly like find_spawned_zelda()) rather than horse->getZeldaActor().
+
+on_horse_call_substance_pre() below intentionally nulls out horse->m_zeldaActorKeep every tick (as part of the grass-whistle fix) and nothing ever restores it afterwards -- vanilla daHorse_c::execute() only re-attaches her once, at the very start of its own next tick. Any check reached after callHorseSubstance() runs within the same execute() call -- which includes every later stage of execute() (procWait()/checkTgHitTurn()/procTurnInit()/setNeckAnime(), all reached further down in the same function body), plus our own execute() post-hook -- was therefore reading horse->getZeldaActor() == nullptr, making is_spawned_zelda_attached(horse) (and anything gated on it, like epona_combat_reactions_suppressed()) silently and permanently read false during exactly the combat window this mod needs to detect. This is the actual root cause behind every "Epona still rears" report this session: none of the suppression hooks ever activated, because the gate itself never read true in the first place.
+
+## Lines 151-153
 
 Precedes: `struct CutsceneDiagnosticsSnapshot {`
 
 Snapshot of every signal `mod_update()` consults to decide whether this mod's own spawned Zelda should be hidden this tick. Kept as a plain struct (rather than just a block of local variables) so it can be compared whole against the previous tick's snapshot below.
 
-## Lines 310-314
+## Lines 181-185
 
 Precedes: `static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScreen,`
 
 Logs every signal feeding into the cutscene hide/show decision above, but only the instant any of them actually changes from the previous tick -- logging unconditionally every tick would flood the log with hundreds of identical lines per second during ordinary gameplay. Gated behind `kDiagnosticLoggingEnabled` (currently `false`) so it never runs unless that's flipped back on for a future investigation.
 
-## Lines 362-363
+## Lines 231-232
 
 Precedes: `static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {`
 
 `fopAcIt_Judge()`'s filter for `find_other_hozelda()` below: matches any `HoZelda` actor other than our own spawned one.
 
-## Lines 371-385
+## Lines 225-239
 
 Precedes: `static fopAc_ac_c* find_other_hozelda() {`
 
@@ -130,7 +144,7 @@ Finds a `HoZelda` actor somewhere in the world that this mod did *not* spawn its
 
 Used to detect that real duel and bow out of its way entirely: this mod otherwise has no way to tell "the story is about to attach its own HoZelda to the horse" apart from the moment it actually happens, which can be one or more frames after this mod's own spawn/keep-mounted logic already ran for that same frame -- `d_a_horse.cpp`'s `execute()` only overwrites whichever actor is currently attached once the story's own HoZelda starts ticking, so there's otherwise a window where both our own spawned Zelda and the story's are simultaneously alive (the "duplicate Zelda" bug), and -- since our own hooks are scoped to our own actor via `is_spawned_zelda()` above -- our own Zelda would keep searching for and firing at nearby enemies the whole time, overlapping the real duel's own Ganondorf-only targeting. Checking for *any* other HoZelda in existence, rather than just whichever is currently attached to the horse, catches that window regardless of exactly which frame the handoff happens on.
 
-## Lines 419-439
+## Lines 252-272
 
 Precedes: `DEFINE_HOOK(static_cast<s32 (*)(fopAc_ac_c*)>(&fopAcM_delete), ActorDelete);`
 
@@ -140,7 +154,7 @@ A captured diagnostics log (see `log_cutscene_diagnostics_if_changed()`) showed 
 
 This hook is kept as a no-behavior-change diagnostic safety net: it logs the exact moment (and surrounding engine state) our own tracked actor is deleted through this specific generic actor-deletion entry point by anything other than this mod's own `remove_spawned_zelda()`, in case some other, not-yet-observed code path does go through it.
 
-## Lines 462-483
+## Lines 272-293
 
 Precedes: `DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);`
 
@@ -150,7 +164,7 @@ A real scripted duel always uses its own, story-placed HoZelda actor, never one 
 
 This hook fires from `daHorse_c::callHorse()`, which -- unlike most of the other HoZelda-related hooks in this file -- is not called from `daHorse_c::execute()` at all, but from Link's own grass-whistle item procedure (`d_a_alink_whistle.inc`). `horse->getZeldaActor()` must therefore be checked via `is_spawned_zelda_attached()`, not `is_spawned_zelda()`, to avoid dereferencing a cached actor pointer that may not have been refreshed yet this tick -- see that helper's own comment, which documents a captured crash log of exactly this call site SIGABRT-ing on a dangling pointer left over from a room reload between ticks.
 
-## Lines 494-537
+## Lines 260-303
 
 Precedes: `DEFINE_HOOK(&daHoZelda_c::setMatrix, HoZeldaSetMatrix);`
 
@@ -164,7 +178,7 @@ Scoped to our own spawned Zelda only: the vanilla duel's story-placed HoZelda al
 
 This same post-hook also fixes a separate rotation-mismatch bug during scripted cutscenes, for both the solo seat AND the dual-ride (Link also riding) seat: see the `inCutscene` branch further down in the hook's body for why a plain `shape_angle = horse->shape_angle` copy (vanilla's own, unconditional, already-correct technique for ordinary gameplay) isn't actually enough there, and what's done differently instead.
 
-## Lines 306-318
+## Lines 316-328
 
 Precedes: `if (s_hideSpawnedZeldaInCutscene) {`
 
@@ -174,7 +188,7 @@ Outside of that real story duel, this mod is the only thing keeping Zelda mounte
 
 A real scripted duel always places its own HoZelda actor (never ours, guarded by the `s_spawnedZeldaId` check above), so this never touches the flag during the actual fight.
 
-## Lines 540-559
+## Lines 286-305
 
 Precedes: `static const f32 kHiddenScale = 0.0001f;`
 
@@ -184,67 +198,67 @@ This replaces an earlier approach of simply deleting (`fopAcM_delete`) the actor
 
 An earlier version of this hiding also moved her model far underground, on top of shrinking it. That caused its own glitch: Epona's reins are attached to Zelda's hand whenever she's loaded and riding solo, so dragging her model's position itself down along with it dragged the reins straight down with her, visibly stretching them to that underground position every time she was hidden. Scale alone doesn't have that problem -- shrinking her model leaves her seated position (and thus the reins' attachment point) exactly where it already was, just imperceptibly small.
 
-## Lines 570-572
+## Lines 313-315
 
 Precedes: `static f32 s_turnStandBlend = 0.0f;`
 
 How much of a rear's local-offset blend (0 = fully vanilla, 1 = fully Link's offset) has eased in so far; chased every frame toward 0 or 1 depending on `checkTurnStand()` so the transition is smooth in both directions instead of an instant swap.
 
-## Lines 581-585
+## Lines 324-328
 
 Precedes: `if (s_hideSpawnedZeldaInCutscene) {`
 
 Hiding her for a cutscene overrides everything else below: her position/rotation/animation don't matter while she's imperceptible underground, and `current.pos`/`shape_angle` (her actual logical transform, read by other systems such as the horse-rider-flag clearing in `mod_update()`) are deliberately left untouched -- only the matrix actually used to draw her this frame is overridden, so she's back exactly where she belongs the instant hiding ends.
 
-## Lines 594-596
+## Lines 334-336
 
 Precedes: `bool dualRide = daPy_getLinkPlayerActorClass()->checkHorseRide();`
 
 Dual-ride (Link also on Epona) is still in scope for the cutscene rotation fix further down (see `inCutscene` below), just not for the rear-blend fix right above: that one addresses a solo-seat-only clipping/floating bug that vanilla's own dual-ride computation never had.
 
-## Lines 605-608
+## Lines 341-344
 
 Precedes: `if (dualRide) {`
 
 Eases toward 1 while rearing, back toward 0 once the rear ends; 1/8th per frame fully blends in about 8 frames (roughly a tenth of a second at 60 FPS), fast enough to not be noticeable as its own separate motion, but slow enough to erase the one-frame snap. Only chased while riding solo -- see the comment on `dualRide` above.
 
-## Lines 615-616
+## Lines 349-350
 
 Precedes: `bool inCutscene = horse->checkHorseDemoMode();`
 
 Whether a scripted cutscene (as opposed to ordinary player-driven riding) is currently puppeting Epona.
 
-## Lines 619-621
+## Lines 350-352
 
 Precedes: `if (!inCutscene && (dualRide || s_turnStandBlend <= 0.0f)) {`
 
 Fully settled outside of a rear and outside of a cutscene: vanilla's own computation (already run by the time this post-hook fires) is left completely untouched. For the dual-ride seat, that's simply "outside of a cutscene" (the rear-blend fix never applies to it at all).
 
-## Lines 626-629
+## Lines 353-356
 
 Precedes: `static const Vec kZeldaFrontHorseRidePos = {-75.893997f, 57.61f, 4.079f};`
 
 Vanilla's own solo-seat local offset (`localFrontHorseRidePos` in `d_a_hozelda.cpp`), kept here so it can be blended against during a rear (and reused as-is otherwise) -- outside of a rear this is exactly what vanilla already uses, so blending starts and ends at the same place vanilla would have placed her.
 
-## Lines 632-635
+## Lines 355-358
 
 Precedes: `static const Vec kLinkHorseRidePos = {-68.208984f, 41.609924f, 0.883789f};`
 
 `daAlink_c`'s own local ride offset for Link's solo riding position (`l_localHorseRidePos` in `d_a_alink.cpp`, a file-local constant we can't reference directly). Blending toward it in place of Zelda's own, further-forward/higher offset is the whole point of the rear fix: it's the offset Link's own riding position already proves doesn't clip or float during a rear.
 
-## Lines 638-640
+## Lines 358-360
 
 Precedes: `static const Vec kZeldaDualRidePos = {-5.894f, 52.61f, 4.079f};`
 
 Vanilla's own dual-ride (Link also riding) local offset (`localHorseRidePos` in `d_a_hozelda.cpp`) -- the rear seat behind Link, used only to rebuild the cutscene-rotation matrix below; never blended, since the rear-blend fix doesn't apply to this seat.
 
-## Lines 652-654
+## Lines 369-371
 
 Precedes: `zelda->shape_angle = horse->shape_angle;`
 
 Kept in sync for other systems that read her logical transform (e.g. the horse-rider-flag clearing and reins handling in `mod_update()`/`on_hozelda_execute_post`), even though the drawn matrix itself is no longer reconstructed from these during a cutscene (see below).
 
-## Lines 659-688
+## Lines 346-375
 
 Precedes: `mDoMtx_stack_c::copy(horse->getRootMtx());`
 
@@ -254,7 +268,7 @@ Several of Epona's scripted cutscene "tool demo" modes (`daHorse_c::procToolDemo
 
 Epona's joint-0 matrix itself isn't oriented the same way `shape_angle`'s Y axis treats "facing forward" -- built straight from the model's own root joint, it's rotated a fixed 90 degrees clockwise relative to that convention (Zelda's seat position above was already correct through this same matrix, since translation isn't affected by that discrepancy, but her orientation visibly came out facing off Epona's right side instead of forward). Correcting for it here, as a local Y rotation applied *after* the translate above (so it turns her in place around her already-correctly-placed seat position rather than moving her), rotates her the needed 90 degrees counter-clockwise to align with Epona's actual forward direction.
 
-## Lines 700-735
+## Lines 372-407
 
 Precedes: `static const f32 kAutoTargetRange = 4000.0f;`
 
@@ -266,13 +280,13 @@ So two changes make her auto-fire at nearby enemies instead of just Ganondorf: 1
 
 Scoped entirely to our own spawned Zelda: the real scripted duel always uses its own, story-placed HoZelda actor, which is left completely untouched by both hooks below.
 
-## Lines 737-739
+## Lines 405-407
 
 Precedes: `static const f32 kAutoTargetRange = 4000.0f;`
 
 How far (in game units, matching e.g. `mpHIO->m.bow_end_distance`'s unused 4000.0f default) and within what cone (reusing `mpHIO->m.bow_end_angle`, the same wider "keep firing" cone vanilla already uses once her bow is drawn) our own Zelda will look for a new target.
 
-## Lines 750-769
+## Lines 398-417
 
 Precedes: `static bool is_dormant_enemy(fopAc_ac_c* i_actor) {`
 
@@ -282,13 +296,19 @@ Whether `i_actor` is currently dormant/underground and therefore shouldn't be au
 
 Deku Babas and Baba Serpents are *not* handled here: unlike Stalhounds, their true intangibility window doesn't line up cleanly with a single state field (it actually extends a short while past the state transition that leaves "dormant", e.g. Deku Baba's `invulnerabilityTimer` and Baba Serpent's `field_0x69c[3]` both keep their hit/attack collision spheres shoved away for several frames after `action`/`field_0x66e` already reports them as no longer stay/dormant). Rather than keep chasing that exact window, the whole "Baba" family of enemies is instead excluded from auto-targeting outright in `judge_nearest_enemy()` below, dormant or not -- see the comment there for which actors that covers and why.
 
-## Lines 781-784
+## Lines 415-417
+
+Precedes: `zelda->mpBowModel->calc();`
+
+setBowModel() already called calc() with the original (visible) base matrix before this post-hook runs, baking it into the model's joint matrices. Overriding the base matrix alone has no visible effect until calc() re-runs with the shrunk matrix.
+
+## Lines 425-428
 
 Precedes: `static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {`
 
 `fopAcIt_Judge()` stops and returns at the first non-NULL result, so to find the *nearest* enemy (rather than just the first one in the actor list) this always returns NULL -- keeping the iteration going over every actor -- and instead threads the closest candidate so far through `i_data`, read back once `fopAcIt_Judge()` itself returns.
 
-## Lines 794-819
+## Lines 427-452
 
 Precedes: `return NULL;`
 
@@ -300,13 +320,81 @@ The entire "Baba" family is excluded outright, dormant or not: E_DB (Deku Baba),
 
 Dormant/underground enemies (see `is_dormant_enemy()` above) are excluded too: Zelda would otherwise auto-target Stalhounds that haven't surfaced for the night yet.
 
-## Line 847
+## Lines 427-429
+
+Precedes: `if (!s_hideSpawnedZeldaInCutscene && !auto_target_enemies_enabled()) {`
+
+When Zelda isn't hidden for a cutscene (that already shrinks her bow along with the rest of her body), shrink just the bow whenever the "Zelda active in combat" toggle is off, so it doesn't visibly float around on an otherwise unarmed Zelda.
+
+## Line 464
 
 Precedes: `DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);`
 
 Pre-hook for change (1) above: see the overview comment further up.
 
-## Lines 856-872
+## Lines 511-516
+
+Precedes: `static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {`
+
+Forces the reins back to their default, saddle-anchored position, even though daHorse_c::setReinPosNormal() normally refuses to do anything while a single-riding Zelda is still attached to the horse (deferring to her hand-following position by design). Briefly detaching her around the call forces it through with no lasting effect, since execute() unconditionally reattaches her at the very start of next tick regardless (the same trick used for the grass-whistle and cutscene-hiding fixes elsewhere in this file).
+
+## Lines 538-547
+
+Precedes: `DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);`
+
+Riding solo, daHorse_c::execute() has Zelda's own daHoZelda_c::execute() call horse->setReinPosHand() every tick, unconditionally re-anchoring the reins to her hand joint regardless of what she's doing. setReinPosHandSubstance() is a rope-physics simulation (gravity + inertia, not an instant snap): letting it run even once with a "hand" target and then immediately overriding with setReinPosNormal() right after (as an execute() post-hook once did) still leaves its spring/velocity state tainted by that one hand-aimed step every single frame, which visibly kept the reins jittering during the whole bow sequence instead of settling into the same still default position they'd have with nobody riding. Replacing the hand-tracking call outright for the duration of the bow sequence, rather than patching up its result afterwards, means only the normal/default physics step ever runs during that time.
+
+## Lines 565-569
+
+Precedes: `static bool epona_combat_reactions_suppressed(daHorse_c* horse) {`
+
+While Zelda is actively fighting from horseback (auto-target enabled), Epona reacting to the fight at all -- rearing at a nearby enemy, or flinching from Zelda's own Light Arrows flying close to her -- is counterproductive, so all of it is suppressed outright. Outside of that feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident should still see her react), since only Zelda's own combat is what's being worked around here.
+
+## Lines 571-572
+
+Precedes: `(void)horse;`
+
+horse is kept for call-site symmetry with the hooks that gate on it, but the live ride-state check below (unlike the old horse->getZeldaActor()-based one) doesn't need it.
+
+## Lines 577-584
+
+Precedes: `static bool is_dismounted_player_tg_hit(daHorse_c* horse) {`
+
+An exception to the suppression above: if the *player* (not Zelda's own combat) is the one physically hitting Epona while dismounted, she should still rear up and interrupt whatever Zelda is doing, exactly like she would without this mod -- only Zelda's own Light-Arrow/enemy combat is meant to be worked around here. GetTgHitAc() reports whichever actor's own attack collider actually caused a given target cylinder/sphere's hit, independent of ChkTgHit()'s generic "something touched me" bit, so it can distinguish the player's sword from an arrow or a nearby enemy. Checked in on_horse_execute_pre (before anything clears the hit flags) and latched into s_allowRearForDismountedPlayerHit for the duration of the resulting reaction.
+
+## Lines 599-604
+
+Precedes: `static bool s_allowRearForDismountedPlayerHit = false;`
+
+Latched true by on_horse_execute_pre the moment a genuine dismounted-player hit is seen (via is_dismounted_player_tg_hit()), and consulted by every other suppression point below for as long as it stays set. ChkTgHit() is only a one-tick pulse, but the resulting reaction (rearing/turning) plays out over many subsequent frames, so this can't simply be recomputed fresh each tick -- it has to persist across the whole reaction. Cleared again by on_horse_execute_post once she's confirmed back to a calm, non-reacting state.
+
+## Lines 607-609
+
+Precedes: `static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose`
+
+daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
+
+## Lines 625-641
+
+Precedes: `bool reactionsSuppressed =`
+
+Even with every known trigger above suppressed, Epona's own m_anmIdx[0] can still read back ANM_HS_STAND (0x14) for a stray tick: the hit that provokes it is cleared and her engine state is corrected the same tick (see HorseExecute's pre/post hooks below), but this function runs from her rider's own execute(), which can observe that still-dirty value in the narrow window before her own correction visibly takes effect. Vanilla's own mapping below treats 0x14 as a meaningful "look alarmed" cue -- fine normally, but while Zelda rides solo it collapses her into the plain "not aiming" branch further down, which resets her upper-body anim and deletes her in-flight arrow, restarting her whole draw/fire cycle from scratch and making her seem to fire much faster than intended. Treat it as a no-op idle tick instead, same as vanilla already does for ANM_HS_EXCITEMENT/EXCITEMENT_2 (8/9, which fall through to the same default case below and were never a problem).
+
+That said, when a dismounted player's hit is genuinely making Epona rear (s_allowRearForDismountedPlayerHit), ANM_HS_STAND is a real, full reaction -- not a stray glitch tick -- so Zelda should play her own normal "look alarmed" reaction (0x16) to it too, exactly like she would without this mod, rather than being held in the no-op idle pose and clipping through Epona as she rears.
+
+## Lines 727-731
+
+Precedes: `bool soloBowMode = zelda->mIsSingleRide && zelda->mBowMode != 0;`
+
+Normally only the two shared "riding together" idle anims (0xE/0x1C) are allowed into the bow-aiming branch below; solo riding always overrides anm_idx[0] to one of its own idle poses (0x17/0x11/0x1B) above, which would otherwise fall through to the plain "not aiming" branch here and silently disable auto-target while Zelda is alone on Epona. Let a solo ride with an active bow target through as well, so she can still draw and fire on her own.
+
+## Lines 752-756
+
+Precedes: `if (!zelda->mIsSingleRide) {`
+
+Riding double, the bow sequence has its own dedicated sit-and-aim base pose (0x1A). Riding solo there's no such pose, so keep her already-computed solo idle anim as the base instead; the bow draw/fire motion below is layered on top as an upper-body-only overlay anim (see setUpperAnime()'s joint-range blend), so her seated position and legs still match normal solo riding while just her arms/torso play the aiming animation.
+
+## Lines 846-862
 
 Precedes: `daHorse_c* horse = dComIfGp_getHorseActor();`
 
@@ -314,7 +402,7 @@ While a scripted cutscene is puppeting Epona (`checkHorseDemoMode()`, the same c
 
 The opening title screen is deliberately excluded from this check (`!is_title_screen()`, mirroring `mod_update()`'s own exclusion): it drives Epona through the exact same `checkHorseDemoMode()` machinery as a real cutscene, but this mod's Zelda is always shown there regardless of the "Show Zelda during cutscenes" toggle, so there's no reason to suppress her combat behavior there either.
 
-## Lines 884-903
+## Lines 471-490
 
 Precedes: `static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {`
 
@@ -322,73 +410,79 @@ Post-hook: while this mod's own spawned Zelda is hidden for a cutscene (`setMatr
 
 Once `execute()` returns, if she's currently hidden, this re-derives the reins' position from `daHorse_c::setReinPosNormal()` instead -- the same saddle-anchored position (`m_model`'s own joint 0x15) the reins already default to whenever nobody is riding solo at all. That function itself skips doing anything when `getZeldaActor()` is attached and riding solo (deferring to the hand-based logic instead, by design): since our Zelda is still attached at this point (`execute()` just reattached her, as it does every tick regardless of hiding), she's briefly detached (`setZeldaActor(nullptr)`) around this one call so `setReinPosNormal()` actually recomputes the reins. This has no lasting effect -- `execute()` unconditionally reattaches her (`horse->setZeldaActor(this)`) at the very start of next tick's call anyway, the same trick already used for the grass-whistle fix above.
 
-## Lines 915-917
+## Lines 482-484
 
 Precedes: `if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {`
 
 `zelda` is already known to be alive here (it's the actor whose own `execute()` we're a post-hook of), so a plain pointer comparison against the horse's attached actor is enough -- no need to dereference whatever `getZeldaActor()` returns to find out whose it is.
 
-## Lines 924-929
+## Lines 512-517
 
 Precedes: `static constexpr u8 kArrowWaitFrames = 5;`
 
 Vanilla gates each Light Arrow shot behind two scripted 30-frame (0.5s) pauses in the bow draw/ready/shoot/recover state machine below: one between nocking the arrow and it becoming ready to fire, and one between a shot landing and the next draw starting. Shortening both speeds up our spawned Zelda's rate of fire, per the mod's design goal, without touching the draw/shoot animation clips themselves. Set much lower than half (30 -> 5) for testing whether a more aggressive cut is actually noticeable in-game.
 
-## Lines 932-938
+## Lines 513-519
 
 Precedes: `static constexpr f32 kDrawAnimSpeedMultiplier = 2.0f;`
 
 With the scripted wait above shortened, the body/bow "ARELORDH"/"BARELORDH" draw animation (`mUpperAnmID == 8`, entered via `setUpperAnime(8)` + `setBowBck(0xB)` below) became the new bottleneck: vanilla always plays it back at its authored speed (`J3DFrameCtrl` rate 1.0, hardcoded inside `daHoZelda_c::setUpperAnime()`/`setBowBck()`) and only advances to the next state once it finishes (`mFrameCtrl[2].checkAnmEnd()`). Doubling both the body clip's frame-controller rate and the bow model's own matching draw clip rate halves the time that state takes, keeping the two in sync with each other.
 
-## Lines 941-946
+## Lines 543-548
 
 Precedes: `static void set_anm_auto_target(daHoZelda_c* zelda) {`
 
 Replace hook for change (2) above: a copy of vanilla's `daHoZelda_c::setAnm()` (dusklight's `src/d/actor/d_a_hozelda.cpp`) for our own spawned Zelda only, with just the Ganondorf-specific targeting checks replaced (search the body for "deviates from vanilla" below), plus the faster-rate-of-fire change documented above (search for "kArrowWaitFrames"); every other branch is unmodified. Operates on `zelda->member` throughout, rather than `this->member`, since it isn't itself a member function.
 
-## Lines 972-976
+## Lines 574-578
 
 Precedes: `*anm_p = 0xE;`
 
 EXPERIMENTAL (for testing only): vanilla keeps RUN_DASH (0x11) mapped to its own Zelda anim (0xF), which is never paired with the bow pose, so Zelda could only ever draw her bow at a full gallop (RUN_FAST/RUN_SLOW). Folding dash into the same bucket as gallop (0xE) makes the bow-draw gate below reachable while dashing too, so the user can play-test how it looks/feels at more than one gait.
 
-## Line 985
+## Line 586
 
 Precedes: `fopAc_ac_c* target_actor = zelda->mGndAcKeep.getActor();`
 
 --- Deviates from vanilla from here... ---
 
-## Lines 988-991
+## Lines 585-588
 
 Precedes: `b_gnd_class* ganondorf = (target_actor != NULL && fopAcM_GetName(target_actor) == fpcNm_B_GND_e)`
 
 Only non-NULL if the target this mod picked happens to actually be Ganondorf (never the case in practice: this mod's own Zelda is never alive at the same time as a `B_gnd` actor, see `judge_nearest_enemy()`'s comment above), kept so his own mount/vulnerability checks below still apply correctly rather than silently skipping them if it ever does happen.
 
-## Lines 1001-1004
+## Lines 594-597
 
 Precedes: `bool target_vulnerable = false;`
 
 Vanilla requires `b_gnd_class::checkPiyo()` (only meaningful, and only safe to call, on an actual Ganondorf actor) and the player's own Z-target list to equal the target. Replaced here with a generic "does it still have health left" check and an always-on auto-lock, since this mod's Zelda has no player of her own to lock on for her.
 
-## Lines 1012-1017
+## Lines 599-604
 
 Precedes: `if ((anm_idx[0] == 0xE || anm_idx[0] == 0x1C) && zelda->field_0x6da == 0 && !zelda->mDamageInit &&`
 
 EXPERIMENTAL (for testing only): vanilla only ever reaches this point with anm_idx[0] == 0xE (full gallop) or 0x1C (the catch-all bucket for every other gait the mapping above doesn't special-case: walk, trot/turn, idle/wait, excitement, etc. -- see the mapping loop above). Both values are safe to allow here since the overlay-blend branch further below (the `anm_idx[0] != 0x1C && anm_idx[0] != 0xE` check) already treats them identically to gallop, so this just widens which gaits can trigger the bow-draw state machine for play-testing.
 
-## Line 1027
+## Line 614
 
 Precedes: `int sp28 = 1;`
 
 --- ...to here; everything below is an unmodified copy of vanilla. ---
 
-## Lines 1116-1119
+## Lines 702-705
 
 Precedes: `if (anm_idx[2] == 8) {`
 
 Speed up the draw animation itself (see `kDrawAnimSpeedMultiplier` above): both the body's upper-anim frame controller and the bow model's own draw clip need the same rate bump, or the bow's string-pull would keep playing at normal speed after the body's arms already finished drawing.
 
-## Lines 1189-1207
+## Lines 869-878
+
+Precedes: `static void set_neck_angle_auto_target(daHoZelda_c* zelda) {`
+
+Vanilla setNeckAngle() aims Zelda's neck/eyes at Link whenever he isn't riding Epona -- normally only true for a few story moments where he's approaching her on foot (e.g. right before mounting up). Under this mod, "not riding" also describes virtually all of ordinary solo-riding combat, since Zelda stays mounted alone while Link fights on foot nearby, so her head and eyes kept locking onto Link's position the whole time instead of whatever enemy she was actually drawing and firing her bow at. Reuse the same target her aiming/body-angle logic already tracks (mGndAcKeep, populated every tick by on_hozelda_execute_pre's auto-target search) whenever she's riding solo and one is in range, falling back to vanilla's own player/Midna-attention-pos behavior otherwise -- e.g. with no target in range, auto-targeting disabled, or actually riding double with Link.
+
+## Lines 899-917
 
 Precedes: `DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);`
 
@@ -396,13 +490,25 @@ The Light Arrow actor (`daArrow_c`) never actually aims itself at Ganondorf, or 
 
 Rather than trying to widen that narrow vanilla clamp (which also drives her visible body/neck twist, and isn't under this mod's control without its own replace hook on `searchBodyAngle()`), this re-aims the arrow directly at the moment it's released: for arrows fired by our own Zelda, the flight direction/speed vanilla would have left untouched is instead pointed straight at whatever enemy she's currently tracking, using the same generic hit-resolution/visuals every other arrow already uses -- only the direction changes.
 
-## Lines 1231-1234
+## Lines 953-954
+
+Precedes: `DEFINE_HOOK_SYMBOL("daMidna_searchNpc", void*(fopAc_ac_c*, void*), MidnaSearchNpc);`
+
+Zelda already knows Link is the hero in wolf form; she shouldn't stop him from transforming back and forth just because she happens to be looking at him.
+
+## Lines 966-971
+
+Precedes: `DEFINE_HOOK_SYMBOL("daHorse_searchEnemy", void*(fopAc_ac_c*, void*), HorseSearchEnemy);`
+
+Epona's idle-state AI (daHorse_c::procWait) periodically scans for nearby ENEMY-group actors via this judge function and, if one is found, spooks into a rearing "excitement" animation. It has no notion of Zelda riding solo and defending herself -- so whenever her auto-targeted Light Arrow combat brings an enemy within range, Epona rears up mid-fight as if under threat. Skip the search entirely (judge functions return NULL for "no match") while that reaction is suppressed.
+
+## Lines 981-984
 
 Precedes: `arrow->current.angle.x = -dir.atan2sY_XZ();`
 
 Matches the sign/axis conventions vanilla's own `arrowShooting()` and `searchBodyAngle()` already use elsewhere in this file for converting a world-space direction into the engine's pitch/yaw angle pair, so the arrow's visible orientation while flying stays consistent with every other arrow.
 
-## Lines 1243-1267
+## Lines 983-1007
 
 Precedes: `DEFINE_HOOK(&cc_at_check, CcAtCheck);`
 
@@ -414,13 +520,99 @@ Rather than trying to special-case (or guess at) every individual enemy's own he
 
 King Bulblin (`e_rdb_class`, `src/d/actor/d_a_e_rdb.cpp`'s `daE_RDB_Create()`, 600-900 health) is additionally exempted here, alongside Ganondorf and Zant: he's a dedicated sub-boss fight (the joust/one-on-one battles), and one-shotting him with a single Light Arrow would trivialize that encounter. Every other enemy -- including ordinary Bulblin riders (`e_rd_class`, 40 health, already a one-shot even without this hook) -- still gets the full one-hit kill.
 
-## Lines 1289-1326
+## Lines 983-995
+
+Precedes: `DEFINE_HOOK(&daHorse_c::procTurnInit, HorseProcTurnInit);`
+
+Separately, daHorse_c::checkTgHitTurn() (called every idle tick while unridden, the same state Zelda's solo riding puts Epona in) spins her around into a rearing stand-up reaction whenever her own body collision cylinders (m_tgco_cyl/m_head_sph) register a hit -- which happens whenever ANY attack collider physically touches her, including a Light Arrow's own attack cylinder simply flying close enough to graze her hitbox on its way to its target, with no regard for who's firing it or why.
+
+checkTgHitTurn() itself has only two, tiny, same-file call sites, which the compiler may freely inline, making it an unreliable hook target in practice (its address may never actually be called at runtime). Both of its call sites -- and the equivalent one reached via daHorse_searchEnemy above -- funnel into daHorse_c::procTurnInit(1) to actually play the rearing ANM_HS_STAND animation, so that shared, many-call-site function (unlikely to be inlined away) is hooked directly instead, gated on its "was this a startled reaction" param.
+
+## Lines 991-1028
 
 Precedes: `static const u8 kLightArrowResMgrId = 2;`
 
 Zelda's Light Arrow trail/hit mark/charge effects (`daArrow_c::setBlur`/`setLightArrowHitMark`/ `setLightChargeEffect`, particle IDs 0x896E-0x8978) -- plus a number of other effects that turned out to live in the very same archive once this was tested in-game (e.g. whatever produces the arrow's actual visible light trail, which isn't any of those eleven IDs) -- only exist in the horseback-duel stage's room-specific particle archive (`/res/Particle/Pscene181.jpc`) today, not in the always-resident common bank (`/res/Particle/common.jpc`), so they're invisible whenever this mod's spawned-in Zelda fires Light Arrows anywhere outside that one vanilla cutscene. Since the mod can't ship a modified `common.jpc` (that would mean redistributing edited copyrighted game assets), the fix instead teaches the engine to keep `Pscene181.jpc` loaded as a *third*, always-resident particle bank -- alongside `common.jpc` (bank 0) and whatever per-room `Pscene###.jpc` is normally loaded (bank 1) -- and redirects every particle ID that archive actually contains to it. Rather than maintaining a hand-picked allowlist of IDs (which turned out to be incomplete and a maintenance burden -- Zelda's effects aren't the only things in that archive, but anything else in it is simply never requested outside the real duel, so redirecting unconditionally is harmless), `getRM_ID()` below queries bank 2's own `JPAResourceManager` directly via `JPAResourceManager::getResource()`.
 
 `dPa_control_c::mEmitterMng` (a `JPAEmitterManager`) only ever provisions 2 resource-manager slots (`ridMax`, hardcoded at construction in `dPa_control_c::createCommon()`), so bank 2 has to be made to exist first: 1. Grow `ridMax` from 2 to 3 right after `mEmitterMng` is constructed, by hooking `JPAEmitterManager::entryResourceManager()` (a normal, addressable member function) and reallocating `pResMgrAry` with room for bank 2 the moment that method is first called (always with `resMgrID == 0`, registering bank 0, immediately after construction in `createCommon()`). An earlier attempt hooked the constructor itself instead, by symbol name (constructors have no pointer-to-member-function form in C++); that only ever worked by accident; see the comment above `ParticleEntryResourceManager` below for why it was replaced. 2. Once `createCommon()` finishes setting up bank 0, synchronously load `Pscene181.jpc`'s raw bytes into a small dedicated heap of this mod's own (see `s_lightArrowHeap` below) -- *not* `dPa_control_c`'s own resident particle heap; see that variable's comment for why. 3. Build a `JPAResourceManager` over it and register it as bank 2, right there in the same function -- see the comment above `on_particle_create_common_post` for why this load isn't kicked off asynchronously the way vanilla's own per-room scene loads are. 4. Finally, `dPa_control_c::getRM_ID()` (which maps a particle ID to the bank it lives in) is replaced so that, once bank 2 is ready, any particle ID that `Pscene181.jpc`'s own resource manager actually contains resolves to it; everything else keeps using vanilla's existing bank 0/1 logic unchanged.
+
+## Lines 998-1008
+
+Precedes: `static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {`
+
+This unconditionally skips every procTurnInit() call while suppressed, rather than only the "was this a startled reaction" (isStartledTurn != 0) ones: a narrower check still let a full, multi-frame rearing animation play out, since procTurnInit() also unconditionally flips m_proc/m_procID to procTurn()/PROC_TURN_e as plain field writes (not hookable function calls), independently driving her body's turn-around the following tick regardless of anim state. Blocking the call outright avoids that path entirely, at the cost of also blocking Epona's normal directional turning while solo-ridden in combat mode.
+
+Exception: if a dismounted player is the one physically hitting her this tick (see is_dismounted_player_tg_hit()), let the real rearing reaction through instead of blocking it, since that's meant to still interrupt Zelda regardless of her own combat.
+
+## Lines 1020-1023
+
+Precedes: `DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);`
+
+Rather than keep chasing individual internal trigger paths one at a time, hook the one place all of them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to switch her into any of the three "spooked" animations above while her combat reactions are suppressed.
+
+## Lines 1041-1050
+
+Precedes: `DEFINE_HOOK(&daHorse_c::setNeckAnime, HorseSetNeckAnime);`
+
+A fourth, separate reaction path lives directly in daHorse_c::execute() itself (not reached through procWait() at all): whenever she's actively being ridden (FLG0_UNK_1) and her neck-anim slot is free, she plays a neck-toss "startled" animation (ANM_HS_LASH) plus an alarmed voice clip the instant any of her body collision cylinders carry a "target hit" flag -- the exact same ChkTgHit() signal a nearby Light Arrow sets, gated by the exact same condition our ChkTgHit()-clearing pre-hook already targets. In principle that clearing should already prevent this from ever firing too, but it's a genuinely different call site (inside the large execute() function itself, not procWait()), where the compiler's inlining decisions could differ. As a direct, low-risk extra layer, block ANM_HS_LASH specifically (leaving her other legitimate idle neck-toss variants untouched) whenever her combat reactions are suppressed.
+
+## Lines 1070-1088
+
+Precedes: `DEFINE_HOOK(&daHorse_c::execute, HorseExecute);`
+
+A diagnostic log confirmed none of the hooks above actually catch Light Arrow rearing (neither toast/log line ever fired), even though she really was found sitting in ANM_HS_STAND by the execute() safety net further down. The root cause: daHorse_c::checkTgHitTurn() (reached from procWait() while Zelda rides solo, since she's never registered as the vanilla "ridden" rider the way Link is) spins Epona into procTurnInit(1) -- and so does its setSingleAnime(ANM_HS_STAND) call -- whenever her own body collision cylinders (m_tgco_cyl/m_head_sph) carry a "target hit" flag, regardless of who or what set it. checkTgHitTurn() is a single-statement, same-file, two-call-site function tiny enough for the compiler to inline together with its tail call to procTurnInit() at those call sites specifically, silently bypassing hooks on both procTurnInit and setSingleAnime for exactly this trigger while still correctly intercepting other call sites (e.g. a player's sword swing, confirmed fixed by the procTurnInit hook above).
+
+Rather than keep hooking functions the compiler is free to inline away, intercept the actual stimulus instead: the "target hit" flag itself (ChkTgHit()) is a generic "something touched me" bit set by the collision engine whenever any attack collider overlaps hers, with no regard for who's attacking or why -- including a Light Arrow's own attack collider simply flying close enough to graze her hitbox. Clear it ourselves, every tick, before any of daHorse_c's own per-tick logic gets a chance to read it, pre-empting checkTgHitTurn() (and the equivalent check further down in execute() itself, used while actually ridden) from ever observing a hit at all.
+
+## Lines 1097-1103
+
+Precedes: `if (is_dismounted_player_tg_hit(horse)) {`
+
+ChkTgHit() is only a one-tick pulse (set the instant a hit is detected, then cleared again), but a genuine rearing reaction plays out over many subsequent frames. Latch the exemption (instead of recomputing it fresh every tick) the moment a real hit is seen, and leave it set for the rest of the reaction; on_horse_execute_post clears it again once she's confirmed back to a calm, non-reacting state. Without this, every tick after the actual hit (once its one-frame ChkTgHit() pulse has already expired) would see allow=false and the post-hook's safety net would force her back to idle mid-animation.
+
+## Lines 1119-1136
+
+Precedes: `static void on_horse_execute_post(ModContext*, void* args, void*, void*) {`
+
+Belt-and-suspenders safety net, kept in case some other still-unidentified path sets her animation directly, bypassing every hook above: correct her back to a clean idle wait on any tick she's still found holding one of the three "spooked" anims while suppressed. Unlike a bare setSingleAnime() override, procWaitInit() also resets m_proc/m_procID back to procWait -- doing only the former while a startled turn's m_proc stayed on procTurn left the two fighting each other every tick (reported in-game as Epona rocking back and forth in place), since procTurn() kept expecting ANM_HS_STAND while this safety net forced her out of it right back out again.
+
+procWaitInit() alone still wasn't enough: it defers the actual anim correction to setMoveAnime(3.0f), which blends via a 3-frame morph (mDoExt_MtxCalcOldFrame::initOldFrameMorf) starting from whatever pose was already on screen -- i.e. the (partial) rearing/excitement pose from this very tick. That produced a few visibly-blended frames of Epona rearing before settling back to idle, exactly matching the reported "she rears up, then clips Zelda as she settles back down" regression. Forcing an explicit setSingleAnime() with i_morf=0.0f first snaps her straight to the idle pose with zero blend (confirmed: initOldFrameMorf() zeroes its morph rate entirely for any non-positive morf, instead of starting a new interpolation), so that by the time procWaitInit()'s own setMoveAnime(3.0f) runs afterwards, it blends from an already-idle pose (a harmless no-op blend) rather than from the spooked one.
+
+## Lines 1144-1158
+
+Precedes: `bool inTurnState = horse->m_procID == daHorse_c::PROC_TURN_e;`
+
+Beyond the anim index itself, also watch her top-level state machine directly: procTurnInit() (the function our HorseProcTurnInit hook targets) is a small, single-purpose function called from exactly two sites within the SAME translation unit as checkTgHitTurn() (itself already confirmed, per the ChkTgHit()-clearing fix, to be inlined away at its own call site inside procWait() -- see Cause 2). If procTurnInit() is similarly inlined at either call site, our function-level hook on it can never fire for those calls, since they never execute a real CALL instruction to its standalone address. setSingleAnime() is still a real, large, widely-called function unlikely to be inlined, so its own hook (Cause 4) should still block the visible anim switch to ANM_HS_STAND in that scenario -- but procTurnInit() ALSO unconditionally sets m_proc/m_procID to procTurn/PROC_TURN_e as plain field writes (not hookable function calls), so the state machine can silently flip into the turning state even while the anim itself stays blocked. The following tick, procTurn() would then run instead of procWait(), independently driving her body's turn-around regardless of anim state. Catching m_procID == PROC_TURN_e directly (on top of the anim-index check) closes this gap regardless of inlining.
+
+## Lines 1162-1165
+
+Precedes: `s_allowRearForDismountedPlayerHit = false;`
+
+She's confirmed back to a calm, non-reacting state -- end the dismounted-player-hit exemption window (see on_horse_execute_pre), so a later, unrelated Light Arrow/nearby enemy trigger goes back to being suppressed as normal instead of staying permanently exempt from a hit several seconds ago.
+
+## Lines 1208-1217
+
+Precedes: `static void on_arrow_execute_post(ModContext*, void* args, void*, void*) {`
+
+daArrow_c::procWait() (run every tick while the arrow is still nocked, before release) unconditionally re-arms a short draw-suppression timer (field_0x942) whenever the player's camera has "attention status 2" set -- true first-person view, where the engine hides Link's own body model to avoid clipping against the near camera. That check never looks at which actor actually owns the arrow, so Zelda's own Light Arrow (o_zg_arow.bmd) goes invisible in first person too, for as long as the status stays set. It only happens to become visible again when the player also draws their own bow, since Link's bow-aim camera clears that same status as a side effect (to keep his own arms/bow visible while aiming) -- nothing to do with Zelda specifically. Force the timer back off for her own arrow every tick so it stays visible regardless of the player's own bow state.
+
+## Lines 1262-1263
+
+Precedes: `static bool grow_particle_emitter_manager_for_light_arrow_bank(JPAEmitterManager* mgr) {`
+
+Grows JPAEmitterManager::pResMgrAry/ridMax (hardcoded to 2 slots at engine boot) by one, so bank kLightArrowResMgrId can be registered. No-op if the array is already big enough.
+
+## Lines 1284-1289
+
+Precedes: `static void ensure_light_arrow_particles_loaded() {`
+
+Loads Pscene181.jpc and registers it as resource bank kLightArrowResMgrId, growing the emitter manager's resource array first if needed. Idempotent: no-ops immediately once s_lightArrowJpcReady is true. Safe to call at any time after the mod is initialized -- whether that's during the normal boot sequence (via the ParticleCreateCommon post-hook) or well after boot, if the mod is enabled mid-session once the particle system already exists (via mod_initialize()).
+
+## Lines 1298-1299
+
+Precedes: `return;`
+
+The particle system hasn't finished dPa_control_c::createCommon() yet -- nothing to do yet. The ParticleCreateCommon post-hook will call this again once it has.
 
 ## Lines 1332-1417
 
@@ -438,11 +630,17 @@ The diagnostic free-size log below (`on_particle_create_common_post`) measured t
 
 Since this heap's backing memory is ordinary host-process `std::malloc()`, entirely outside of and invisible to every one of the game's own fixed memory budgets, there is no longer any reason to keep it small the way the two heaps before it had to be (every byte here costs nothing to any other system, mod, or platform) -- so instead of continuing to guess at an exact byte count that happens to survive on every compiler/ABI this mod ships for, it's sized with a large, deliberately wasteful safety margin well beyond anything a ~200 KB archive plus its resource manager should plausibly need on any platform.
 
-## Lines 1418-1419
+## Lines 1034-1035
 
 Precedes: `static void* s_lightArrowHeapBacking = nullptr;`
 
 2 MiB for Pscene181.jpc and its resource manager, allocated from outside any JKR heap
+
+## Lines 1355-1357
+
+Precedes: `s_lightArrowJpcReady = false;`
+
+createCommon() only ever runs once per process lifetime at boot, but reset defensively in case it's ever re-entered, since mCommonResMng (and therefore our readiness check in ensure_light_arrow_particles_loaded()) would otherwise look stale.
 
 ## Lines 1424-1450
 
@@ -460,7 +658,7 @@ Named hooks on `JPAEmitterManager`'s constructor turned out to be fragile across
 
 Instead, this hooks `JPAEmitterManager::entryResourceManager()` -- an ordinary non-virtual member function, addressable the normal way with `&Class::method`, no name resolution involved at all. `dPa_control_c::createCommon()` always calls it immediately after constructing `mEmitterMng`, registering bank 0 with `resMgrID == 0` -- the first and only call made with that ID. At that exact moment `pResMgrAry` already exists (built by the constructor with its original, too-small `ridMax`) but hasn't been touched yet, and -- critically -- the solid heap it was allocated from (`dPa_control_c::mHeap`) hasn't been trimmed to size yet either: that only happens via `mDoExt_adjustSolidHeap()` at the very end of `createCommon()`, well after every `entryResourceManager()` call it makes. So there's still room to grow `pResMgrAry` here, exactly as if the constructor itself had been asked to allocate a bigger one.
 
-## Lines 1496-1512
+## Lines 1102-1118
 
 Precedes: `DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);`
 
@@ -468,139 +666,139 @@ Loads `Pscene181.jpc`'s raw bytes right after vanilla finishes setting up the co
 
 `createCommon()` is NOT a true one-shot, console-boot-only call: it's only ever invoked from one call site (`dScnLogo_c`'s boot-time phase), but Twilight Princess implements several "big" scene transitions (dying and choosing to continue, certain major stage-to-stage crossings) as a full software reset (`mDoRst`) that tears down and rebuilds the entire particle system from scratch -- a brand new `dPa_control_c`, a brand new resident heap, and a brand new `JPAEmitterManager` with an empty bank 2 slot -- which re-enters this very function. The mod's own static state below lives outside that reset, so it must be unconditionally re-armed here every time this runs, rather than treated as a permanent latch; otherwise, after the first such reset, `s_lightArrowJpcReady` stays stuck `true` forever even though the new `JPAEmitterManager` never actually got bank 2 registered, silently breaking every Light Arrow hit mark/charge effect from that point on.
 
-## Lines 1517-1518
+## Lines 1121-1122
 
 Precedes: `s_lightArrowResMgr = nullptr;`
 
 The previous resource manager (if any) belonged to the heap being destroyed/recreated below, so this pointer must not be dereferenced until a new one is built.
 
-## Lines 1521-1525
+## Lines 1120-1124
 
 Precedes: `if (s_lightArrowHeap != nullptr) {`
 
 `s_lightArrowHeap` is this mod's own heap (see its declaration above), independent of `dPa_control_c`'s lifecycle, but its *contents* (the previous load's archive bytes and resource manager, if any) belong to a bank mapping that's no longer valid once this runs again -- so it's destroyed and recreated fresh here, exactly like vanilla's own resident particle heap is, rather than reused in place.
 
-## Lines 1530-1532
+## Lines 1126-1128
 
 Precedes: `if (s_lightArrowHeapBacking != nullptr) {`
 
 The pointer-based `JKRExpHeap::create()` overload used below doesn't free this itself (see the comment above this function) -- it has to be freed by hand, every time, before the next `std::malloc()` call replaces it.
 
-## Lines 1538-1539
+## Lines 1074-1075
 
 Precedes: `s_lightArrowHeapBacking = std::malloc(kLightArrowHeapSize);`
 
 Ordinary host-side allocation, entirely outside the JKR heap system: on failure this simply returns `nullptr`, with none of the abort-on-failure behavior described above this function.
 
-## Lines 1557-1562
+## Lines 1087-1092
 
 Precedes: `u32 jpcSize = 0;`
 
 Synchronous, direct DVD read: the same low-level routine `mDoDvdThd_toMainRam_c` itself calls on the DVD thread, but invoked here directly, with no command object and no command heap involved at all (see the comment above `s_lightArrowHeap` for why this replaced the async `mDoDvdThd_toMainRam_c::create()` approach used previously). The destination buffer is allocated straight out of `s_lightArrowHeap` -- this mod's own private heap -- with no other heap touched anywhere in this call.
 
-## Lines 1585-1587
+## Lines 1112-1114
 
 Precedes: `mods::log::info("Pscene181.jpc loaded as particle bank {}, resource heap has {} bytes free",`
 
 Logged once per load (including after every soft-reset reload) so this can be checked against `kLightArrowHeapSize` above without needing a debugger: if this ever trends towards 0, the heap needs to grow again, the same way it did when it was first sized.
 
-## Lines 1592-1594
+## Lines 1134-1136
 
 Precedes: `DEFINE_HOOK(&dPa_control_c::getRM_ID, ParticleGetRmId);`
 
 Once bank 2 is ready, redirects any particle ID that `Pscene181.jpc`'s own resource manager actually contains to it; everything else (and these same IDs, while bank 2 is still loading) keeps using vanilla's existing top-bit common/scene selection unchanged.
 
-## Lines 1609-1616
+## Lines 1143-1150
 
 Precedes: `static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {`
 
 Rather than attempting to patch up Zelda's orientation, animation, and any overlapping props for every individual story cutscene that drives Epona (a reaction/firewood/etc. fix was tried for each as they were found, but kept surfacing new, similarly-themed regressions with no end in sight), this mod instead hides its own spawned Zelda for the duration of any such cutscene by default, controlled by `g_cvarShowInCutscenes` above (see `mod_update()`'s cutscene-detection gate). The orientation fix above still applies whenever she *is* shown (including when the user opts in via that toggle), since that's a simple, narrowly-scoped correction to her own seat, not a per-cutscene patch.
 
-## Line 1649
+## Line 1397
 
 Precedes: `}`
 
 Not fatal: this hook is diagnostics-only.
 
-## Line 1656
+## Line 1414
 
 Precedes: `}`
 
 Not fatal: the mod still works, just without the horse-call fix.
 
-## Line 1664
+## Line 1415
 
 Precedes: `}`
 
 Not fatal: the mod still works, just without the cutscene-orientation fix.
 
-## Line 1672
+## Line 1428
 
 Precedes: `}`
 
 Not fatal: the mod still works, Zelda just won't auto-target enemies.
 
-## Line 1681
+## Line 1428
 
 Precedes: `}`
 
 Not fatal: the mod still works, just without the hidden-reins fix.
 
-## Line 1690
+## Line 1445
 
 Precedes: `}`
 
 Not fatal: the mod still works, Zelda just won't auto-target enemies.
 
-## Line 1699
+## Line 1450
 
 Precedes: `}`
 
 Not fatal: the mod still works, arrows just won't be re-aimed at the target.
 
-## Lines 1708-1709
+## Lines 1461-1462
 
 Precedes: `}`
 
 Not fatal: the mod still works, Light Arrows just keep vanilla's own flat-100-power behavior (still enough to one-shot most ordinary enemies, just not high-health ones).
 
-## Lines 1718-1719
+## Lines 1476-1477
 
 Precedes: `}`
 
 Not fatal: the mod still works, Light Arrows just won't show their hit mark/charge effects outside the one vanilla cutscene that already has them.
 
-## Line 1728
+## Line 1478
 
 Precedes: `}`
 
 Not fatal: same as above.
 
-## Line 1737
+## Line 1478
 
 Precedes: `}`
 
 Not fatal: same as above.
 
-## Lines 1749-1750
+## Lines 1477-1478
 
 Precedes: `}`
 
 Not fatal: `show_zelda_in_cutscenes()` already falls back to "off" when the var isn't registered.
 
-## Lines 1762-1763
+## Lines 1477-1478
 
 Precedes: `}`
 
 Not fatal: `auto_target_enemies_enabled()` already falls back to "off" when the var isn't registered.
 
-## Lines 1772-1773
+## Lines 1477-1478
 
 Precedes: `}`
 
 Not fatal: the config var still exists (and can be set via config.json/--cvar even without a UI control for it), it just won't be reachable from the Mods window.
 
-## Lines 1784-1789
+## Lines 1460-1465
 
 Precedes: `remove_spawned_zelda();`
 
@@ -610,7 +808,7 @@ Also clear Link's `FLG2_HORSE_ZELDA` flag here, guarded by a null check on `daPy
 
 The null check is not optional: unlike the later call site below (only reached once this mod has already spawned and attached its own Zelda actor, which can't happen before the player exists), this `horse == nullptr` branch runs unconditionally on every tick, including the handful of early ticks right at game startup/title screen before `dComIfGp_getLinkPlayer()` has created the player actor at all -- calling `offHorseZelda()` on a null pointer there is an immediate SIGSEGV in `mod_update()`, crashing the game the instant it starts.
 
-## Lines 1795-1814
+## Lines 1380-1399
 
 Precedes: `bool horseModelNotDrawn = horse->checkHorseCallWait();`
 
@@ -618,25 +816,25 @@ Right after loading a save made in a different area than Epona was left in, `daH
 
 This mod previously deleted (`remove_spawned_zelda()`) and later recreated its own HoZelda actor for the entire duration of this state, exactly like the "no horse loaded" case above. That churn -- tearing down and recreating a `HoZelda` actor purely because Epona's *model* isn't being drawn, even though her actor data is fully loaded the whole time -- is suspected of being a contributing cause of persisting SIGABRTs elsewhere in `HoZelda`'s loading path. Since the horse actor is valid throughout, there's no need to delete our own Zelda here at all: instead keep her loaded (spawning her once, same as ordinary gameplay, if she isn't already) and simply hide her in place via the same scale-based mechanism already used for scripted cutscenes (`HoZeldaSetMatrix`'s `s_hideSpawnedZeldaInCutscene` branch), so she never has to be recreated once the whistle call clears the flag.
 
-## Lines 1817-1818
+## Lines 1400-1401
 
 Precedes: `bool hadSpawnedZeldaBeforeRefresh = s_hasSpawnedZelda;`
 
 Refresh whether the actor we previously spawned is still alive (it may have been deleted by the game for reasons outside our control, e.g. a scene change).
 
-## Lines 1823-1838
+## Lines 1390-1405
 
 Precedes: `if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {`
 
 Diagnostic: `find_spawned_zelda()` just discovered the actor we spawned was deleted out from under us by the engine itself (its own comment: "e.g. deleted on a room change"), rather than by our own `remove_spawned_zelda()` calls below, which only ever run before this point in the frame via the early `horse == nullptr` return above (`checkHorseCallWait()` no longer deletes her at all). A captured dusklight engine log confirmed one specific cause: switching between two sub-cuts of the same cutscene chain (e.g. "demo01_01" -> "demo01_02") reloads the entire room's actor list including Epona herself, without the room number ever changing. The `inScriptedCutscene` branch further down has a recovery respawn for exactly that case, but -- per a second captured log, this time of a SIGABRT -- blindly respawning her any time she's merely found missing is unsafe: using the horse-call grass whistle to summon Epona across areas goes through the exact same "actor is gone, horseDemoMode is true" shape as the safe sub-cut case, but is a full cross-room teleport, not an in-place reload, and attempting `fopAcM_create` against the old, about-to-be-torn-down room's horse during that transition crashed outright. `s_zeldaLostInSameRoom`, computed here by comparing the room she's lost in against the room she was last confirmed alive in, distinguishes the two: true only for an in-place reload (room unchanged), false for a cross-room loss like the horse-call teleport.
 
-## Lines 1851-1853
+## Lines 1415-1417
 
 Precedes: `if (s_hasSpawnedZelda) {`
 
 Keep tracking the room she's actually in for as long as she's alive, so the comparison above always reflects the room she was in immediately before her most recent loss, not a stale value from further back.
 
-## Lines 1858-1868
+## Lines 1411-1421
 
 Precedes: `fopAc_ac_c* attachedZelda = horse->getZeldaActor();`
 
@@ -644,7 +842,7 @@ Diagnostic: if our tracked actor is still alive but isn't the one currently atta
 
 `attachedZelda` is deliberately never dereferenced (e.g. via `fopAcM_GetID`) here -- same reasoning as `is_spawned_zelda_attached()`'s own comment -- since `horse->getZeldaActor()`'s cached pointer isn't guaranteed to have been refreshed for this exact tick yet, and this diagnostic isn't worth risking a crash over; its raw address is enough to tell from the log whether it's null or some other actor without needing to resolve to an ID.
 
-## Lines 1878-1892
+## Lines 1416-1430
 
 Precedes: `bool inScriptedCutscene = horse->checkHorseDemoMode() && !is_title_screen();`
 
@@ -652,13 +850,13 @@ Whether a real, scripted story cutscene -- as opposed to ordinary gameplay -- is
 
 The only case that should always stay visible regardless of that toggle is the opening title screen (`is_title_screen()`, which drives Epona the exact same way a cutscene does -- see that function's own comment). Every other `checkHorseDemoMode()` event -- including the horse-call/grass-whistle gallop-back, NPC conversations, and area/scene transitions -- is treated the same as any other story cutscene and hidden by default.
 
-## Lines 1895-1902
+## Lines 1425-1432
 
 Precedes: `bool storyHoZeldaActive = find_other_hozelda() != nullptr;`
 
 Whether a story-placed HoZelda (never one this mod spawned) currently exists anywhere, e.g. the real horseback archery duel against Ganondorf, where the game itself places and drives its own HoZelda riding solo. This mod's own spawned Zelda would otherwise duplicate her, and -- since this mod's auto-target/combat hooks are scoped to our own actor only -- our own Zelda would keep auto-targeting nearby enemies the entire time, overlapping the real duel's own Ganondorf-only targeting. So this mod's entire functionality simply steps aside for as long as the real duel's own HoZelda exists: our own spawned Zelda is torn down and not respawned until the story's HoZelda is gone again.
 
-## Lines 1909-1925
+## Lines 1422-1438
 
 Precedes: `s_hideSpawnedZeldaInCutscene = !show_zelda_in_cutscenes() || is_always_hidden_cutscene();`
 
@@ -668,7 +866,7 @@ Unlike earlier, she is never deleted here: the `HoZeldaSetMatrix` hook instead h
 
 A few specific cutscenes (`is_always_hidden_cutscene()`) are staged around Epona not visibly carrying a second rider at all, so this mod's Zelda stays hidden through those regardless of the toggle -- she's un-hidden again the instant the cutscene ends, same as any other cutscene, since this whole branch only runs while `inScriptedCutscene`.
 
-## Lines 1928-1957
+## Lines 1411-1440
 
 Precedes: `bool isDemo01_03 =`
 
@@ -676,16 +874,34 @@ Recovery for the "stays hidden for the rest of a multi-part cutscene" bug: a cap
 
 A second captured log (this time ending in a SIGABRT) showed this straightforward-looking fix is NOT safe to apply unconditionally: using the horse-call grass whistle to summon Epona from a different area she'd been left in produces the exact same observable shape here (`horse->getZeldaActor() == nullptr && !s_hasSpawnedZelda` while `checkHorseDemoMode()` is true for the horse-call's own gallop-back sequence), but is a full cross-room teleport tearing down and rebuilding an entirely different room, not an in-place same-room reload -- and `spawn_zelda_on_horse()` against the stale, about-to-be-destroyed old room's horse crashed outright. `s_zeldaLostInSameRoom` alone was not actually sufficient to rule out every unsafe case either (the SIGABRTs continued even after that guard was added), so this recovery respawn is now scoped down further, to only the one specific transition it was ever confirmed necessary and safe for: "demo01_02" -> "demo01_03" (the only sub-cut transition in the always-hidden -> normally-shown direction that this mod has actually observed losing her this way). Every other `inScriptedCutscene` transition simply leaves her unspawned for the rest of that cutscene chain instead of risking a respawn against a potentially stale `horse` pointer.
 
-## Lines 1965-1971
+## Lines 1441-1447
 
 Precedes: `s_hideSpawnedZeldaInCutscene = true;`
 
 Epona's own model/collision aren't drawn/tangible yet (see `horseModelNotDrawn`'s own comment above), but `horse` itself is already a fully valid, loaded actor -- so keep our own Zelda loaded here too instead of leaving her unspawned, exactly like the ordinary gameplay case just below, just hidden in place via the same scale-based mechanism used for scripted cutscenes rather than shown. She's already attached to a horse that is itself hidden, so she'll be back at Epona's side the instant the player calls her with the grass whistle and `horseModelNotDrawn` clears, with no recreation needed.
 
-## Lines 1977-1983
+## Lines 1449-1455
 
 Precedes: `s_hideSpawnedZeldaInCutscene = false;`
 
 Keep Zelda riding along on Epona at all times during ordinary gameplay, even after Link dismounts: if nobody (neither the story nor this mod) currently has her attached to the horse, spawn her. `daHoZelda_c::execute()` attaches itself to the current horse every tick (`horse->setZeldaActor(this)`), and `daHoZelda_c::setMatrix()`/`setRideOffset()`/ `setAnm()` already support her sitting alone at the front of the saddle whenever Link isn't riding (the `mIsSingleRide` case), so once created it takes care of the rest on its own: reins, dual-ride animation blending, and the solo idle animation.
 
 (The `FLG2_HORSE_ZELDA` clearing logic that used to live here, right after the ordinary-gameplay spawn branch above, has moved into the `HoZeldaSetMatrix` post-hook itself -- see "Lines 306-318" above for why.)
+
+## Lines 1605-1609
+
+Precedes: `ensure_light_arrow_particles_loaded();`
+
+Normally this is a no-op here -- the particle system hasn't booted yet, so this will actually load Pscene181.jpc once the ParticleCreateCommon post-hook above fires at the end of the boot logo/title scene. But if this mod is enabled mid-session (well after boot, with the particle system already up), that boot-time hook has already fired and will never fire again, so this call is what loads the Light Arrow particles instead.
+
+## Lines 1621-1624
+
+Precedes: `s_safeToModifyEpona = (horse == nullptr);`
+
+Nothing to defer if Epona isn't loaded yet -- the normal flow below only ever creates/modifies her HoZelda actor once Epona herself has (re)appeared. If she's already loaded on this very first tick, this mod was enabled mid-session, so hold off until she goes through a real scene transition.
+
+## Lines 1632-1633
+
+Precedes: `s_safeToModifyEpona = true;`
+
+Epona just unloaded -- the next time she appears it will be through a normal scene transition, so it's safe to resume making changes to her.
