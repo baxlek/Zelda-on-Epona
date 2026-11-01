@@ -591,8 +591,8 @@ static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
 // combat is meant to be worked around here. GetTgHitAc() reports whichever actor's own attack
 // collider actually caused a given target cylinder/sphere's hit, independent of ChkTgHit()'s
 // generic "something touched me" bit, so it can distinguish the player's sword from an arrow or
-// a nearby enemy. Checked (and cached for the tick) in on_horse_execute_pre, before anything
-// clears the hit flags.
+// a nearby enemy. Checked in on_horse_execute_pre (before anything clears the hit flags) and
+// latched into s_allowRearForDismountedPlayerHit for the duration of the resulting reaction.
 static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
     bool dismounted = player != nullptr && !player->checkHorseRide();
@@ -623,10 +623,12 @@ static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
     return result;
 }
 
-// Set once per tick by on_horse_execute_pre (the first of this mod's horse hooks to run each
-// tick, before daHorse_c::execute()'s own body -- and therefore before ChkTgHit() gets cleared or
-// read by anything else), and consulted by every other suppression point below for the rest of
-// that same tick.
+// Latched true by on_horse_execute_pre the moment a genuine dismounted-player hit is seen (via
+// is_dismounted_player_tg_hit()), and consulted by every other suppression point below for as
+// long as it stays set. ChkTgHit() is only a one-tick pulse, but the resulting reaction
+// (rearing/turning) plays out over many subsequent frames, so this can't simply be recomputed
+// fresh each tick -- it has to persist across the whole reaction. Cleared again by
+// on_horse_execute_post once she's confirmed back to a calm, non-reacting state.
 static bool s_allowRearForDismountedPlayerHit = false;
 
 // daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
@@ -1059,13 +1061,20 @@ DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
 
 static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
-    s_allowRearForDismountedPlayerHit = false;
     if (!epona_combat_reactions_suppressed(horse)) {
         return HOOK_CONTINUE;
     }
 
-    // Check (and latch for the rest of this tick) before anything below clears the hit flags.
-    s_allowRearForDismountedPlayerHit = is_dismounted_player_tg_hit(horse);
+    // ChkTgHit() is only a one-tick pulse (set the instant a hit is detected, then cleared again),
+    // but a genuine rearing reaction plays out over many subsequent frames. Latch the exemption
+    // (instead of recomputing it fresh every tick) the moment a real hit is seen, and leave it set
+    // for the rest of the reaction; on_horse_execute_post clears it again once she's confirmed
+    // back to a calm, non-reacting state. Without this, every tick after the actual hit (once its
+    // one-frame ChkTgHit() pulse has already expired) would see allow=false and the post-hook's
+    // safety net would force her back to idle mid-animation.
+    if (is_dismounted_player_tg_hit(horse)) {
+        s_allowRearForDismountedPlayerHit = true;
+    }
     if (s_allowRearForDismountedPlayerHit) {
         return HOOK_CONTINUE;
     }
@@ -1121,6 +1130,11 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     bool inTurnState = horse->m_procID == daHorse_c::PROC_TURN_e;
 
     if (!isSpookedAnime && !inTurnState) {
+        // She's confirmed back to a calm, non-reacting state -- end the dismounted-player-hit
+        // exemption window (see on_horse_execute_pre), so a later, unrelated Light Arrow/nearby
+        // enemy trigger goes back to being suppressed as normal instead of staying permanently
+        // exempt from a hit several seconds ago.
+        s_allowRearForDismountedPlayerHit = false;
         return;
     }
 
