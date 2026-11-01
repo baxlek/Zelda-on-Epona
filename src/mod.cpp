@@ -74,13 +74,6 @@ static bool s_hasSpawnedZelda = false;
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
 
-// Whether this mod is currently allowed to create/modify anything attached to Epona.
-// If the mod is enabled while Epona is already loaded (e.g. toggled on mid-session via
-// the mods menu), she wasn't just (re)created through her normal lifecycle, and
-// spawning our HoZelda actor on her immediately can crash the game. So instead, the
-// first time mod_update() runs we check whether Epona is already loaded; if she is, we
-// withhold all changes to her until she next unloads and reloads via a real scene
-// transition (the normal, known-safe path this mod already relies on elsewhere).
 static bool s_safeToModifyEpona = false;
 static bool s_observedInitialHorseState = false;
 
@@ -115,6 +108,11 @@ static bool is_spawned_zelda_attached(daHorse_c* horse) {
     fopAc_ac_c* live = nullptr;
     fopAcM_SearchByID((fpc_ProcID)s_spawnedZeldaId, &live);
     return live != nullptr && live == attached;
+}
+
+static bool is_spawned_zelda_riding_solo() {
+    fopAc_ac_c* actor = find_spawned_zelda();
+    return actor != nullptr && static_cast<daHoZelda_c*>(actor)->checkSingleRide();
 }
 
 static bool s_hideSpawnedZeldaInCutscene = false;
@@ -393,9 +391,6 @@ static void hide_bow_visually(daHoZelda_c* zelda) {
     mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
     mDoMtx_stack_c::scaleM(cXyz(kHiddenScale, kHiddenScale, kHiddenScale));
     zelda->mpBowModel->setBaseTRMtx(mDoMtx_stack_c::get());
-    // setBowModel() already called calc() with the original (visible) base matrix before this
-    // post-hook runs, baking it into the model's joint matrices. Overriding the base matrix
-    // alone has no visible effect until calc() re-runs with the shrunk matrix.
     zelda->mpBowModel->calc();
 }
 
@@ -405,9 +400,6 @@ static void on_hozelda_set_bow_model_post(ModContext*, void* args, void*, void*)
         return;
     }
 
-    // When Zelda isn't hidden for a cutscene (that already shrinks her bow along with
-    // the rest of her body), shrink just the bow whenever the "Zelda active in combat"
-    // toggle is off, so it doesn't visibly float around on an otherwise unarmed Zelda.
     if (!s_hideSpawnedZeldaInCutscene && !auto_target_enemies_enabled()) {
         hide_bow_visually(zelda);
     }
@@ -489,12 +481,6 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     return HOOK_CONTINUE;
 }
 
-// Forces the reins back to their default, saddle-anchored position, even though
-// daHorse_c::setReinPosNormal() normally refuses to do anything while a single-riding Zelda is
-// still attached to the horse (deferring to her hand-following position by design). Briefly
-// detaching her around the call forces it through with no lasting effect, since execute()
-// unconditionally reattaches her at the very start of next tick regardless (the same trick used
-// for the grass-whistle and cutscene-hiding fixes elsewhere in this file).
 static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
     if (horse->getZeldaActor() == static_cast<fopAc_ac_c*>(zelda)) {
         horse->setZeldaActor(nullptr);
@@ -516,16 +502,6 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     force_reins_to_normal_pos(zelda, horse);
 }
 
-// Riding solo, daHorse_c::execute() has Zelda's own daHoZelda_c::execute() call
-// horse->setReinPosHand() every tick, unconditionally re-anchoring the reins to her hand joint
-// regardless of what she's doing. setReinPosHandSubstance() is a rope-physics simulation (gravity
-// + inertia, not an instant snap): letting it run even once with a "hand" target and then
-// immediately overriding with setReinPosNormal() right after (as an execute() post-hook once did)
-// still leaves its spring/velocity state tainted by that one hand-aimed step every single frame,
-// which visibly kept the reins jittering during the whole bow sequence instead of settling into
-// the same still default position they'd have with nobody riding. Replacing the hand-tracking
-// call outright for the duration of the bow sequence, rather than patching up its result
-// afterwards, means only the normal/default physics step ever runs during that time.
 DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);
 
 static HookAction on_horse_set_rein_pos_hand_pre(ModContext*, void* args, void*, void*) {
@@ -543,6 +519,33 @@ static constexpr u8 kArrowWaitFrames = 5;
 
 static constexpr f32 kDrawAnimSpeedMultiplier = 2.0f;
 
+static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
+    (void)horse;
+    return auto_target_enemies_enabled() && is_spawned_zelda_riding_solo();
+}
+
+static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    bool dismounted = player != nullptr && !player->checkHorseRide();
+    fopAc_ac_c* playerActor = dismounted ? static_cast<fopAc_ac_c*>(player) : nullptr;
+
+    bool result = dismounted &&
+                  ((horse->m_tgco_cyl[0].ChkTgHit() && horse->m_tgco_cyl[0].GetTgHitAc() == playerActor) ||
+                      (horse->m_tgco_cyl[1].ChkTgHit() && horse->m_tgco_cyl[1].GetTgHitAc() == playerActor) ||
+                      (horse->m_tgco_cyl[2].ChkTgHit() && horse->m_tgco_cyl[2].GetTgHitAc() == playerActor) ||
+                      (horse->m_head_sph.ChkTgHit() && horse->m_head_sph.GetTgHitAc() == playerActor));
+
+    return result;
+}
+
+static bool s_allowRearForDismountedPlayerHit = false;
+
+static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
+static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
+static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
+static constexpr u16 kAnmHorseWait01 = 27;      // ANM_HS_WAIT_01: normal idle pose
+static constexpr u16 kAnmHorseLash = 14;        // ANM_HS_LASH: neck-toss "startled" reaction
+
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
     daHorse_c* horse = (daHorse_c*)dComIfGp_getHorseActor();
@@ -552,10 +555,15 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         return;
     }
 
+    bool reactionsSuppressed =
+        epona_combat_reactions_suppressed(horse) && !s_allowRearForDismountedPlayerHit;
+
     u16* anm_p = anm_idx;
     for (int i = 0; i < 3; i++, anm_p++) {
         u16 horse_anm_idx = horse->getAnmIdx(i);
-        if (horse_anm_idx == 0x14) {
+        if (horse_anm_idx == 0x14 && reactionsSuppressed) {
+            *anm_p = 0x1C;
+        } else if (horse_anm_idx == 0x14) {
             *anm_p = 0x16;
         } else if (horse_anm_idx == 0x15) {
             *anm_p = 0x18;
@@ -632,11 +640,6 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->field_0x6dd = 1;
     }
 
-    // Normally only the two shared "riding together" idle anims (0xE/0x1C) are allowed into the
-    // bow-aiming branch below; solo riding always overrides anm_idx[0] to one of its own idle
-    // poses (0x17/0x11/0x1B) above, which would otherwise fall through to the plain "not aiming"
-    // branch here and silently disable auto-target while Zelda is alone on Epona. Let a solo ride
-    // with an active bow target through as well, so she can still draw and fire on her own.
     bool soloBowMode = zelda->mIsSingleRide && zelda->mBowMode != 0;
 
     if (((anm_idx[0] != 0x1C && anm_idx[0] != 0xE) && !soloBowMode) || player->checkHorseElecDamage()) {
@@ -657,11 +660,6 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         zelda->deleteArrow();
     } else if (zelda->mBowMode != 0) {
         BOOL anm_end = zelda->mFrameCtrl[2].checkAnmEnd();
-        // Riding double, the bow sequence has its own dedicated sit-and-aim base pose (0x1A).
-        // Riding solo there's no such pose, so keep her already-computed solo idle anim as the
-        // base instead; the bow draw/fire motion below is layered on top as an upper-body-only
-        // overlay anim (see setUpperAnime()'s joint-range blend), so her seated position and legs
-        // still match normal solo riding while just her arms/torso play the aiming animation.
         if (!zelda->mIsSingleRide) {
             anm_idx[0] = 0x1A;
         }
@@ -774,8 +772,80 @@ static void on_hozelda_set_anm_replace(ModContext*, void* args, void*, void*) {
     set_anm_auto_target(zelda);
 }
 
-// Zelda already knows Link is the hero in wolf form; she shouldn't stop him from
-// transforming back and forth just because she happens to be looking at him.
+static void set_neck_angle_auto_target(daHoZelda_c* zelda) {
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    fopAc_ac_c* target = zelda->mGndAcKeep.getActor();
+    cXyz* var_r28 = NULL;
+    s16 angle_x_target = 0;
+    s16 angle_y_target = 0;
+    s16 var_r27 = 0;
+    s16 var_r26 = 0;
+
+    if (target != NULL && zelda->checkSingleRide()) {
+        var_r28 = &target->eyePos;
+    } else if (!player->checkHorseRide()) {
+        cXyz sp34 = player->current.pos - zelda->current.pos;
+        int sp18 = cLib_distanceAngleS(sp34.atan2sX_Z(), zelda->shape_angle.y);
+
+        f32 var_f31;
+        int sp14;
+        if (zelda->mNeckAngle.y != 0) {
+            sp14 = 0x5800;
+            var_f31 = 250000.0f;
+        } else {
+            sp14 = 0x5000;
+            var_f31 = 90000.0f;
+        }
+
+        if (sp18 <= 0x4000 || (sp18 <= sp14 && sp34.abs2XZ(player->current.pos) < var_f31)) {
+            var_r28 = &player->eyePos;
+        }
+    } else if (zelda->mBowMode == 0 && zelda->field_0x6da == 0 && player->checkMidnaAtnPos()) {
+        var_r28 = player->getMidnaAtnPos();
+    }
+
+    if (var_r28 != NULL) {
+        cXyz sp1C = *var_r28 - zelda->field_0x6f8;
+        s16 spE = sp1C.atan2sY_XZ();
+        s16 spC = sp1C.atan2sX_Z() - zelda->shape_angle.y;
+        s16 spA = spE;
+        s16 sp8 = spC;
+
+        angle_x_target = cLib_minMaxLimit<s16>((s16)spE, -10000, 8000);
+        angle_y_target = cLib_minMaxLimit<s16>((s16)spC, -20000, 20000);
+
+        var_r27 = angle_x_target >> 1;
+        var_r26 = angle_y_target >> 1;
+
+        angle_x_target = var_r27;
+        angle_y_target = var_r26;
+
+        var_r27 = (s16)(var_r27 + (spA - spE));
+        var_r26 = (s16)(var_r26 + (sp8 - spC));
+    }
+
+    daPy_addCalcShort(&zelda->mNeckAngle.x, angle_x_target, 3, 0x1000, 0x100);
+    daPy_addCalcShort(&zelda->mNeckAngle.y, angle_y_target, 3, 0x1000, 0x100);
+
+    if (zelda->field_0x6de != 0) {
+        zelda->clearEyeMove();
+    } else {
+        zelda->setEyeMove(var_r28, var_r27, var_r26);
+    }
+}
+
+DEFINE_HOOK(&daHoZelda_c::setNeckAngle, HoZeldaSetNeckAngle);
+
+static void on_hozelda_set_neck_angle_replace(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda)) {
+        HoZeldaSetNeckAngle::g_orig(zelda);
+        return;
+    }
+
+    set_neck_angle_auto_target(zelda);
+}
+
 DEFINE_HOOK_SYMBOL("daMidna_searchNpc", void*(fopAc_ac_c*, void*), MidnaSearchNpc);
 
 static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*) {
@@ -787,7 +857,109 @@ static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
+DEFINE_HOOK_SYMBOL("daHorse_searchEnemy", void*(fopAc_ac_c*, void*), HorseSearchEnemy);
+
+static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse != nullptr && epona_combat_reactions_suppressed(horse)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&daHorse_c::procTurnInit, HorseProcTurnInit);
+
+static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&daHorse_c::setSingleAnime, HorseSetSingleAnime);
+
+static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    u16 anmIdx = mods::arg<u16>(args, 1);
+    bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+                           anmIdx == kAnmHorseExcitement2;
+    if (isSpookedAnime) {
+        bool suppressed = epona_combat_reactions_suppressed(horse);
+        if (suppressed && !s_allowRearForDismountedPlayerHit) {
+            return HOOK_SKIP_ORIGINAL;
+        }
+    }
+
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&daHorse_c::setNeckAnime, HorseSetNeckAnime);
+
+static HookAction on_horse_set_neck_anime_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    u16 anmIdx = mods::arg<u16>(args, 1);
+    if (anmIdx != kAnmHorseLash) {
+        return HOOK_CONTINUE;
+    }
+
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 DEFINE_HOOK(&daArrow_c::arrowShooting, ArrowShooting);
+
+DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
+
+static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    if (!epona_combat_reactions_suppressed(horse)) {
+        return HOOK_CONTINUE;
+    }
+
+    if (is_dismounted_player_tg_hit(horse)) {
+        s_allowRearForDismountedPlayerHit = true;
+    }
+    if (s_allowRearForDismountedPlayerHit) {
+        return HOOK_CONTINUE;
+    }
+
+    horse->m_tgco_cyl[0].ClrTgHit();
+    horse->m_tgco_cyl[1].ClrTgHit();
+    horse->m_tgco_cyl[2].ClrTgHit();
+    horse->m_head_sph.ClrTgHit();
+
+    return HOOK_CONTINUE;
+}
+
+static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+
+    u16 anmIdx = horse->getAnmIdx(0);
+    bool isSpookedAnime = anmIdx == kAnmHorseStand || anmIdx == kAnmHorseExcitement ||
+                          anmIdx == kAnmHorseExcitement2;
+
+    bool inTurnState = horse->m_procID == daHorse_c::PROC_TURN_e;
+
+    if (!isSpookedAnime && !inTurnState) {
+        s_allowRearForDismountedPlayerHit = false;
+        return;
+    }
+
+    bool suppressed = epona_combat_reactions_suppressed(horse);
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
+        horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 0.0f, 0);
+        horse->procWaitInit();
+    }
+}
 
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
@@ -820,16 +992,6 @@ static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
 
 DEFINE_HOOK(&daArrow_c::execute, ArrowExecute);
 
-// daArrow_c::procWait() (run every tick while the arrow is still nocked, before release)
-// unconditionally re-arms a short draw-suppression timer (field_0x942) whenever the player's
-// camera has "attention status 2" set -- true first-person view, where the engine hides Link's
-// own body model to avoid clipping against the near camera. That check never looks at which
-// actor actually owns the arrow, so Zelda's own Light Arrow (o_zg_arow.bmd) goes invisible in
-// first person too, for as long as the status stays set. It only happens to become visible
-// again when the player also draws their own bow, since Link's bow-aim camera clears that same
-// status as a side effect (to keep his own arms/bow visible while aiming) -- nothing to do with
-// Zelda specifically. Force the timer back off for her own arrow every tick so it stays visible
-// regardless of the player's own bow state.
 static void on_arrow_execute_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT) {
@@ -874,8 +1036,6 @@ static const u32 kLightArrowHeapSize = 0x100000;
 static void* s_lightArrowHeapBacking = nullptr;
 static JKRExpHeap* s_lightArrowHeap = nullptr;
 
-// Grows JPAEmitterManager::pResMgrAry/ridMax (hardcoded to 2 slots at engine boot) by one,
-// so bank kLightArrowResMgrId can be registered. No-op if the array is already big enough.
 static bool grow_particle_emitter_manager_for_light_arrow_bank(JPAEmitterManager* mgr) {
     if (mgr->ridMax > kLightArrowResMgrId) {
         return true;
@@ -896,12 +1056,6 @@ static bool grow_particle_emitter_manager_for_light_arrow_bank(JPAEmitterManager
     return true;
 }
 
-// Loads Pscene181.jpc and registers it as resource bank kLightArrowResMgrId, growing the
-// emitter manager's resource array first if needed. Idempotent: no-ops immediately once
-// s_lightArrowJpcReady is true. Safe to call at any time after the mod is initialized --
-// whether that's during the normal boot sequence (via the ParticleCreateCommon post-hook)
-// or well after boot, if the mod is enabled mid-session once the particle system already
-// exists (via mod_initialize()).
 static void ensure_light_arrow_particles_loaded() {
     if (s_lightArrowJpcReady) {
         return;
@@ -910,8 +1064,6 @@ static void ensure_light_arrow_particles_loaded() {
     dPa_control_c* control = g_dComIfG_gameInfo.play.getParticle();
     JPAEmitterManager* emitterMng = dPa_control_c::getEmitterManager();
     if (control == nullptr || control->mCommonResMng == nullptr || emitterMng == nullptr) {
-        // The particle system hasn't finished dPa_control_c::createCommon() yet -- nothing
-        // to do yet. The ParticleCreateCommon post-hook will call this again once it has.
         return;
     }
 
@@ -967,9 +1119,6 @@ static void ensure_light_arrow_particles_loaded() {
 DEFINE_HOOK(&dPa_control_c::createCommon, ParticleCreateCommon);
 
 static void on_particle_create_common_post(ModContext*, void*, void*, void*) {
-    // createCommon() only ever runs once per process lifetime at boot, but reset defensively
-    // in case it's ever re-entered, since mCommonResMng (and therefore our readiness check in
-    // ensure_light_arrow_particles_loaded()) would otherwise look stale.
     s_lightArrowJpcReady = false;
     s_lightArrowResMgr = nullptr;
 
@@ -1084,12 +1233,67 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::replace<HoZeldaSetNeckAngle>(on_hozelda_set_neck_angle_replace);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda setNeckAngle, Zelda will keep looking at Link instead of her "
+            "bow target while riding solo: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<MidnaSearchNpc>(on_midna_search_npc_pre);
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook Midna's NPC transform-block search, Zelda will act as a normal NPC "
             "and may prevent transforming near her: {}",
             (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSearchEnemy>(on_horse_search_enemy_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's nearby-enemy search, she may rear up in fear while Zelda is "
+            "riding solo and fighting nearby enemies: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseProcTurnInit>(on_horse_proc_turn_init_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's startled-turn reaction, she may rear up whenever a Light "
+            "Arrow flies close to her while Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSetSingleAnime>(on_horse_set_single_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's animation setter, she may still rear up or spook while "
+            "Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseSetNeckAnime>(on_horse_set_neck_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's neck-animation setter, she may still toss her head in an "
+            "alarmed reaction while Zelda is riding solo and fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseExecute>(on_horse_execute_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() to clear her target-hit flags, she may still rear "
+            "up whenever a Light Arrow flies close to her while Zelda is riding solo and "
+            "fighting: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the spooked-anim safety net: {}", (int)result);
     }
 
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
@@ -1162,11 +1366,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
                          (int)result);
     }
 
-    // Normally this is a no-op here -- the particle system hasn't booted yet, so this will
-    // actually load Pscene181.jpc once the ParticleCreateCommon post-hook above fires at the
-    // end of the boot logo/title scene. But if this mod is enabled mid-session (well after
-    // boot, with the particle system already up), that boot-time hook has already fired and
-    // will never fire again, so this call is what loads the Light Arrow particles instead.
     ensure_light_arrow_particles_loaded();
 
     mods::log::info("zelda_on_epona initialized");
@@ -1178,10 +1377,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     if (!s_observedInitialHorseState) {
         s_observedInitialHorseState = true;
-        // Nothing to defer if Epona isn't loaded yet -- the normal flow below only
-        // ever creates/modifies her HoZelda actor once Epona herself has (re)appeared.
-        // If she's already loaded on this very first tick, this mod was enabled
-        // mid-session, so hold off until she goes through a real scene transition.
         s_safeToModifyEpona = (horse == nullptr);
     }
 
@@ -1189,8 +1384,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         if (horse != nullptr) {
             return MOD_OK;
         }
-        // Epona just unloaded -- the next time she appears it will be through a
-        // normal scene transition, so it's safe to resume making changes to her.
         s_safeToModifyEpona = true;
     }
 
@@ -1278,6 +1471,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaExecute>();
     mods::hook::uninstall<HorseSetReinPosHandSubstance>();
     mods::hook::uninstall<HoZeldaSetAnm>();
+    mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
     return MOD_OK;
