@@ -1060,6 +1060,18 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 static constexpr f32 kEponaFollowDistance = 200.0f;
 static constexpr f32 kEponaFollowRampRange = 80.0f;
 
+// Extra distance beyond kEponaFollowDistance Link must put between himself and Epona before she
+// resumes approaching once stopped. Without this hysteresis, a bare "distXZ <= kEponaFollowDistance"
+// threshold flickers once she's close enough to physically touch Link: the collision push-back
+// that keeps the two actors from interpenetrating nudges distXZ back above the threshold for a
+// tick, re-engaging the approach and driving her straight back into him, over and over.
+static constexpr f32 kEponaFollowResumeMargin = 60.0f;
+
+// Whether Epona is currently in her "approaching" phase, as opposed to stopped/settled within the
+// follow distance. See kEponaFollowResumeMargin above for why this needs to be sticky across
+// frames rather than recomputed from distance alone each tick.
+static bool s_eponaFollowApproaching = true;
+
 // Per-tick turn-rate clamp used to turn Epona in place to face Link: both while she's stopped
 // within the follow distance, and before she's allowed to start walking toward him (see
 // kEponaFollowAlignmentCone below).
@@ -1076,9 +1088,11 @@ static constexpr s16 kEponaFollowAlignmentCone = 0x3000;
 
 static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
     if (horse == nullptr || player == nullptr || !epona_follow_active()) {
+        s_eponaFollowApproaching = true;  // reset so the next engagement starts by approaching
         return false;
     }
     if (player->checkHorseRide()) {
+        s_eponaFollowApproaching = true;
         return false;  // Link is still mounted, nothing to follow
     }
     if (horse->checkHorseDemoMode() || horse->checkHorseCallWait() || dComIfGp_event_runCheck()) {
@@ -1106,17 +1120,25 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
     horse->m_padStickAngleY = bearing;
 
     f32 distXZ = horse->current.pos.absXZ(player->current.pos);
-    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
+    if (s_eponaFollowApproaching) {
+        if (distXZ <= kEponaFollowDistance) {
+            s_eponaFollowApproaching = false;
+        }
+    } else if (distXZ > kEponaFollowDistance + kEponaFollowResumeMargin) {
+        s_eponaFollowApproaching = true;
+    }
+
     s16 facingError = bearing - horse->shape_angle.y;
     bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
                    (facingError >= -kEponaFollowAlignmentCone);
-    if (magnitude <= 0.0f || !aligned) {
-        // Either close enough to stop, or still turning to face Link (see
+    if (!s_eponaFollowApproaching || !aligned) {
+        // Either settled within the follow distance, or still turning to face Link (see
         // on_horse_follow_execute_post) -- withhold forward stick input either way.
         horse->m_padStickValue = 0.0f;
         return;
     }
 
+    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
     horse->m_padStickValue = magnitude > 1.0f ? 1.0f : magnitude;
 
     // Without a real rider, daHorse_c::procWait() unconditionally zeroes any speed
@@ -1138,11 +1160,12 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
     }
 
     s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
-    f32 distXZ = horse->current.pos.absXZ(player->current.pos);
     s16 facingError = bearing - horse->shape_angle.y;
     bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
                    (facingError >= -kEponaFollowAlignmentCone);
-    if (distXZ > kEponaFollowDistance && aligned) {
+    // s_eponaFollowApproaching was already updated for this tick by on_horse_set_stick_data_post,
+    // which runs earlier within daHorse_c::execute().
+    if (s_eponaFollowApproaching && aligned) {
         return;  // already aligned and still approaching; native turning/movement handles this tick
     }
 
