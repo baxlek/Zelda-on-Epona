@@ -1060,7 +1060,20 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 // user request, since our earlier guesses at a sensible "in-game units" distance (20, then 200)
 // both turned out to be far too small a fraction of the engine's real distance scale.
 static constexpr f32 kEponaFollowDistance = 1000.0f;
-static constexpr f32 kEponaFollowRampRange = 80.0f;
+static constexpr f32 kEponaFollowRampRange = 300.0f;
+
+// Ceiling on the forward stick magnitude we ever feed her while following. Forward speed target
+// is normalMaxSpeed * padStickValue^2, and daHorse_c::setMoveAnime() blends into a full running
+// "dash burst" animation once that target crosses fastwalk_to_run_rate; combined with riderless
+// horses always using the hard/quick m_hio->m.stopping_deceleration rate to slow down (rather
+// than a gentle coast), braking from that speed looked like an unintended "skid". Capping well
+// below 1.0 keeps her at a brisk walk/jog at most, so she never reaches that run animation and a
+// quick stop from a walk doesn't look like a skid.
+static constexpr f32 kEponaFollowMaxStickValue = 0.4f;
+
+// Beyond this distance Epona gives up following entirely (as if the feature were off) rather than
+// keep trying to close in from arbitrarily far away.
+static constexpr f32 kEponaFollowMaxDistance = 5000.0f;
 
 // Extra distance beyond a stop threshold Link must put between himself and Epona before she
 // resumes an action (approaching, or facing him) once stopped. Without this hysteresis, a bare
@@ -1115,6 +1128,12 @@ static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
     if (horse->checkRodeoMode() || horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000)) {
         return false;  // rodeo minigame, or already mid an in-progress whistle-call run
     }
+    if (horse->current.pos.absXZ(player->current.pos) > kEponaFollowMaxDistance) {
+        // Too far away to reasonably chase down; stop trying until Link closes the gap himself.
+        s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
+        return false;
+    }
     return true;
 }
 
@@ -1160,8 +1179,8 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
         return;
     }
 
-    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
-    horse->m_padStickValue = magnitude > 1.0f ? 1.0f : magnitude;
+    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange * kEponaFollowMaxStickValue;
+    horse->m_padStickValue = magnitude > kEponaFollowMaxStickValue ? kEponaFollowMaxStickValue : magnitude;
 
     // Without a real rider, daHorse_c::procWait() unconditionally zeroes any speed
     // setSpeedAndAngle() computes unless ERFLG0_MOVE_ACCEPT is set that tick, so she'd otherwise
@@ -1424,10 +1443,12 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     followControl.kind = UI_CONTROL_TOGGLE;
     followControl.label = "Epona follows when dismounted";
     followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
-                              "face him and walking over once he's more than about 1000 units away "
-                              "(half the clawshot's maximum range), stopping at that distance. She "
-                              "keeps turning to face him down to 500 units, then holds completely "
-                              "still. Requires "
+                              "face him and walking over at a brisk walk (never a full gallop) "
+                              "once he's more than about 1000 units away (half the clawshot's "
+                              "maximum range), stopping at that distance. She keeps turning to "
+                              "face him down to 500 units, then holds completely still. If he "
+                              "gets more than about 5000 units away, she gives up following "
+                              "until he comes back closer. Requires "
                               "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;
     followControl.config_var = g_cvarEponaFollowDismounted;
