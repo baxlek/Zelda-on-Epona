@@ -117,6 +117,11 @@ static bool is_spawned_zelda_riding_solo() {
 
 static bool s_hideSpawnedZeldaInCutscene = false;
 
+// True while the spawned Zelda's current bow target sits behind her rather than in front, which
+// means she should aim/fire with her body turned 180 degrees from the usual forward-facing pose.
+// Only ever set while dual-riding; solo-riding Zelda never fires backwards.
+static bool s_zeldaBackwardBowTarget = false;
+
 static bool is_title_screen() {
     scene_class* playScene = fopScnM_SearchByID(dStage_roomControl_c::getProcID());
     return playScene != nullptr && fpcM_GetName(playScene) == fpcNm_OPENING_SCENE_e;
@@ -342,6 +347,19 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
+    if (dualRide && zelda->mBowMode != 0 && s_zeldaBackwardBowTarget) {
+        // Firing at a target behind her: turn her whole body 180 degrees from the usual
+        // forward-facing pose so the normal firing animation points backwards instead. Her seat
+        // position on the horse (current.pos) is left untouched, only the facing changes.
+        s_turnStandBlend = 0.0f;
+        zelda->shape_angle.y = (s16)(zelda->shape_angle.y + 0x8000);
+        zelda->current.angle.y = zelda->shape_angle.y;
+        mDoMtx_stack_c::transS(zelda->current.pos);
+        mDoMtx_stack_c::ZXYrotM(zelda->shape_angle.x, zelda->shape_angle.y, zelda->shape_angle.z);
+        zelda->model->setBaseTRMtx(mDoMtx_stack_c::get());
+        return;
+    }
+
     if (dualRide) {
         s_turnStandBlend = 0.0f;
     } else {
@@ -411,9 +429,41 @@ struct HoZeldaTargetSearch {
     const fopAc_ac_c* self;
     f32 maxDistSq;
     s16 maxAngle;
+    s16 refAngleY;
+    bool behind;
     fopAc_ac_c* best;
     f32 bestDistSq;
 };
+
+// fopAcM_seenActorAngleY() returns how far (0..0x8000) an actor sits from i_actorA's forward
+// facing direction. Mirroring that value around the halfway point (0x8000) yields the
+// equivalent "how far from directly behind" angle, letting the same cone-width checks used for
+// forward targeting be reused to search for targets behind Zelda.
+static s32 mirror_seen_angle_behind(s32 seenAngleY) {
+    return 0x8000 - seenAngleY;
+}
+
+// Measures how far i_targetPos sits (0..0x8000) from the i_refAngleY facing direction, as seen
+// from i_fromPos. Unlike fopAcM_seenActorAngleY(), the facing angle is passed in explicitly
+// instead of being read from an actor's own shape_angle.y -- this keeps targeting decisions based
+// on a stable reference even while Zelda's own shape_angle.y is snapped 180 degrees for backward
+// firing (reading her own, already-flipped shape_angle.y back as the "forward" direction would
+// make her flip-flop between facings every frame).
+static s32 seen_angle_from_yaw(const cXyz& i_fromPos, const cXyz& i_targetPos, s16 i_refAngleY) {
+    s16 targetAngle = cLib_targetAngleY(&i_fromPos, &i_targetPos);
+    targetAngle -= i_refAngleY;
+    return abs(targetAngle);
+}
+
+// The yaw Zelda's targeting should be measured against: the horse's facing while dual-riding
+// (stable, unaffected by her own backward-firing snap), or her own facing otherwise (e.g.
+// solo-riding, where she isn't necessarily aligned with the horse).
+static s16 zelda_targeting_reference_angle_y(const daHoZelda_c* zelda) {
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    bool dualRide = horse != nullptr && player != nullptr && player->checkHorseRide();
+    return dualRide ? horse->shape_angle.y : zelda->shape_angle.y;
+}
 
 static bool is_dormant_enemy(fopAc_ac_c* i_actor) {
     switch (fopAcM_GetName(i_actor)) {
@@ -439,9 +489,13 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     }
 
     f32 distSq = search->self->current.pos.abs2XZ(i_actor->current.pos);
-    if (distSq > search->maxDistSq ||
-        fopAcM_seenActorAngleY(search->self, i_actor) > search->maxAngle)
-    {
+    s32 seenAngleY =
+        seen_angle_from_yaw(search->self->current.pos, i_actor->current.pos, search->refAngleY);
+    if (search->behind) {
+        seenAngleY = mirror_seen_angle_behind(seenAngleY);
+    }
+
+    if (distSq > search->maxDistSq || seenAngleY > search->maxAngle) {
         return NULL;
     }
 
@@ -453,11 +507,15 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     return NULL;
 }
 
-static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda) {
+// i_behind selects targets roughly opposite Zelda's forward facing (for firing backwards while
+// dual-riding) instead of the normal forward-facing cone.
+static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     HoZeldaTargetSearch search = {};
     search.self = zelda;
     search.maxDistSq = kAutoTargetRange * kAutoTargetRange;
     search.maxAngle = zelda->mpHIO->m.bow_end_angle;
+    search.behind = i_behind;
+    search.refAngleY = zelda_targeting_reference_angle_y(zelda);
     fopAcIt_Judge((fopAcIt_JudgeFunc)judge_nearest_enemy, &search);
     return search.best;
 }
@@ -474,9 +532,21 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
 
     if (auto_target_enemies_enabled() && !inCutscene) {
-        zelda->mGndAcKeep.setData(find_nearest_enemy(zelda));
+        fopAc_ac_c* target = find_nearest_enemy(zelda, false);
+        bool backward = false;
+
+        daPy_py_c* player = daPy_getLinkPlayerActorClass();
+        bool dualRide = player != nullptr && player->checkHorseRide();
+        if (target == nullptr && dualRide) {
+            target = find_nearest_enemy(zelda, true);
+            backward = target != nullptr;
+        }
+
+        zelda->mGndAcKeep.setData(target);
+        s_zeldaBackwardBowTarget = backward;
     } else {
         zelda->mGndAcKeep.clearData();
+        s_zeldaBackwardBowTarget = false;
     }
     return HOOK_CONTINUE;
 }
@@ -592,8 +662,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
 
     int target_seen_angleY = 0;
     if (target_actor != NULL) {
-        target_seen_angleY = fopAcM_seenActorAngleY(zelda, target_actor);
+        target_seen_angleY = seen_angle_from_yaw(zelda->current.pos, target_actor->current.pos,
+                                                  zelda_targeting_reference_angle_y(zelda));
     }
+
+    // When the current target is behind Zelda, use the mirrored angle so the same cone-width
+    // checks below apply to "how far from directly behind" instead of "how far from forward".
+    int bow_mode_angleY =
+        s_zeldaBackwardBowTarget ? mirror_seen_angle_behind(target_seen_angleY) : target_seen_angleY;
 
     bool target_vulnerable = false;
     if (ganondorf != NULL) {
@@ -604,8 +680,8 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
 
     if ((anm_idx[0] == 0xE || anm_idx[0] == 0x1C) && zelda->field_0x6da == 0 && !zelda->mDamageInit &&
         zelda->field_0x6dd == 0 && target_actor != NULL && target_vulnerable &&
-        (target_seen_angleY < zelda->mpHIO->m.bow_start_angle ||
-            (zelda->mBowMode != 0 && target_seen_angleY < zelda->mpHIO->m.bow_end_angle)))
+        (bow_mode_angleY < zelda->mpHIO->m.bow_start_angle ||
+            (zelda->mBowMode != 0 && bow_mode_angleY < zelda->mpHIO->m.bow_end_angle)))
     {
         zelda->mBowMode = 1;
     } else {
@@ -1166,8 +1242,10 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     autoTargetControl.label = "Zelda active in combat";
     autoTargetControl.help_rml = "When on, Zelda automatically draws her bow and fires Light "
                                   "Arrows at nearby enemies, the same way she already does at "
-                                  "Ganondorf during the horseback duel. When off (default), she "
-                                  "just rides along passively.";
+                                  "Ganondorf during the horseback duel. While sharing the saddle "
+                                  "with Link, she can also aim and fire backwards at enemies "
+                                  "behind her if none are ahead. When off (default), she just "
+                                  "rides along passively.";
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
