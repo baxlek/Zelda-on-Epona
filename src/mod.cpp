@@ -574,6 +574,7 @@ static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
 static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
 static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
 static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
+static constexpr u16 kAnmHorseWait01 = 27;      // ANM_HS_WAIT_01: normal idle pose
 
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
@@ -971,6 +972,17 @@ static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
 // only the former while a startled turn's m_proc stayed on procTurn left the two fighting each
 // other every tick (reported in-game as Epona rocking back and forth in place), since procTurn()
 // kept expecting ANM_HS_STAND while this safety net forced her out of it right back out again.
+//
+// procWaitInit() alone still wasn't enough: it defers the actual anim correction to
+// setMoveAnime(3.0f), which blends via a 3-frame morph (mDoExt_MtxCalcOldFrame::initOldFrameMorf)
+// starting from whatever pose was already on screen -- i.e. the (partial) rearing/excitement pose
+// from this very tick. That produced a few visibly-blended frames of Epona rearing before settling
+// back to idle, exactly matching the reported "she rears up, then clips Zelda as she settles back
+// down" regression. Forcing an explicit setSingleAnime() with i_morf=0.0f first snaps her straight
+// to the idle pose with zero blend (confirmed: initOldFrameMorf() zeroes its morph rate entirely
+// for any non-positive morf, instead of starting a new interpolation), so that by the time
+// procWaitInit()'s own setMoveAnime(3.0f) runs afterwards, it blends from an already-idle pose
+// (a harmless no-op blend) rather than from the spooked one.
 static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     if (!epona_combat_reactions_suppressed(horse)) {
@@ -986,6 +998,7 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
             "suppression -- resetting back to her wait state. This means something bypasses the "
             "ChkTgHit()/setSingleAnime suppression entirely; please report this log line if seen.",
             anmIdx);
+        horse->setSingleAnime(kAnmHorseWait01, 1.0f, 0.0f, -1, 0.0f, 0);
         horse->procWaitInit();
     }
 }
