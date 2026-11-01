@@ -1148,10 +1148,11 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
     horse->onMoveAccept();
 }
 
-// Turns Epona in place to face Link: while she's stopped within the follow distance, and before
-// she's allowed to start walking toward him (the native stick-driven turning in setSpeedAndAngle()
-// only engages while forward stick magnitude is nonzero, which we deliberately withhold above
-// until she's already facing roughly the right way).
+// Turns Epona in place to face Link before she's allowed to start walking toward him (the native
+// stick-driven turning in setSpeedAndAngle() only engages while forward stick magnitude is
+// nonzero, which we deliberately withhold above until she's already facing roughly the right
+// way). Once she's settled within the standoff distance, this does nothing at all -- she holds
+// still, including her facing, so Link can approach and mount her without her fidgeting.
 static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
@@ -1159,14 +1160,18 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
         return;
     }
 
+    // s_eponaFollowApproaching was already updated for this tick by on_horse_set_stick_data_post,
+    // which runs earlier within daHorse_c::execute().
+    if (!s_eponaFollowApproaching) {
+        return;  // settled within the standoff distance; hold still, don't even turn to face Link
+    }
+
     s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
     s16 facingError = bearing - horse->shape_angle.y;
     bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
                    (facingError >= -kEponaFollowAlignmentCone);
-    // s_eponaFollowApproaching was already updated for this tick by on_horse_set_stick_data_post,
-    // which runs earlier within daHorse_c::execute().
-    if (s_eponaFollowApproaching && aligned) {
-        return;  // already aligned and still approaching; native turning/movement handles this tick
+    if (aligned) {
+        return;  // already aligned; native turning/movement handles this tick
     }
 
     cLib_addCalcAngleS(&horse->shape_angle.y, bearing, 5, kEponaFollowIdleTurnMax,
