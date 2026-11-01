@@ -169,7 +169,8 @@ archery duel, where she rides alone) is never touched or duplicated.
 > cutscene if she wasn't already present, it only applies going forward.
 >
 > An **Epona follows when dismounted** toggle lets Epona walk over and keep Link company on foot, instead of
-> waiting wherever he left her. While it's on, and Link is more than about 200 units away, she first turns in
+> waiting wherever he left her. While it's on, and Link is more than about 1000 units away (half the
+> clawshot's maximum range), she first turns in
 > place to face him, then walks toward him once she's roughly facing his direction, stopping once she closes
 > to that distance. Once stopped she holds still -- she won't turn or fidget -- so Link can walk up and mount
 > her freely. Since this only makes sense alongside her other combat behavior, it requires the **Zelda active

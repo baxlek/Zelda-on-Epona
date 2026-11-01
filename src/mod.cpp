@@ -1055,9 +1055,11 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 }
 
 // Standoff distance Epona tries to hold while following Link on foot, and the extra range beyond
-// it over which her approach speed ramps up to a full walk/trot (loosely mirroring the 20/40/100
-// unit distance bands daHorse_c::setDemoMoveData() already uses for its own speed transitions).
-static constexpr f32 kEponaFollowDistance = 200.0f;
+// it over which her approach speed ramps up to a full walk/trot. Set to half the clawshot's
+// maximum range (daAlinkHIO_hookshot_c0::m.mMaxLength == 2000.0f in d_a_alink_HIO_data.inc) per
+// user request, since our earlier guesses at a sensible "in-game units" distance (20, then 200)
+// both turned out to be far too small a fraction of the engine's real distance scale.
+static constexpr f32 kEponaFollowDistance = 1000.0f;
 static constexpr f32 kEponaFollowRampRange = 80.0f;
 
 // Extra distance beyond kEponaFollowDistance Link must put between himself and Epona before she
@@ -1401,7 +1403,8 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     followControl.kind = UI_CONTROL_TOGGLE;
     followControl.label = "Epona follows when dismounted";
     followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
-                              "face him and keeping a distance of about 200 units. Requires "
+                              "face him and keeping a distance of about 1000 units (half the "
+                              "clawshot's maximum range). Requires "
                               "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;
     followControl.config_var = g_cvarEponaFollowDismounted;
