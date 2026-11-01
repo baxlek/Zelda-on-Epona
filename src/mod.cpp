@@ -1060,11 +1060,19 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 static constexpr f32 kEponaFollowDistance = 20.0f;
 static constexpr f32 kEponaFollowRampRange = 80.0f;
 
-// Per-tick turn-rate clamp used only to keep Epona facing Link while she's stopped within the
-// follow distance; turning while she's still approaching is handled natively via the stick angle
-// set below, the same as it is for real player input.
+// Per-tick turn-rate clamp used to turn Epona in place to face Link: both while she's stopped
+// within the follow distance, and before she's allowed to start walking toward him (see
+// kEponaFollowAlignmentCone below).
 static constexpr s16 kEponaFollowIdleTurnMax = 0x600;
 static constexpr s16 kEponaFollowIdleTurnMin = 0x40;
+
+// How closely Epona must already be facing Link before she's allowed to walk toward him.
+// daHorse_c::setSpeedAndAngle() treats any commanded angle more than 0x6000 (135 degrees) away
+// from her current facing as a "spin around" input and drives speedF *backward* instead (vanilla's
+// player-held-reverse-stick mechanic) -- not what we want for an absolute "walk toward this point"
+// follow behavior. Withholding forward stick magnitude until she's within this cone keeps her
+// comfortably clear of that branch and matches the requested "turn to face before moving" order.
+static constexpr s16 kEponaFollowAlignmentCone = 0x3000;
 
 static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
     if (horse == nullptr || player == nullptr || !epona_follow_active()) {
@@ -1094,19 +1102,34 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
         return;
     }
 
+    s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    horse->m_padStickAngleY = bearing;
+
     f32 distXZ = horse->current.pos.absXZ(player->current.pos);
     f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
-    if (magnitude <= 0.0f) {
+    s16 facingError = bearing - horse->shape_angle.y;
+    bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
+                   (facingError >= -kEponaFollowAlignmentCone);
+    if (magnitude <= 0.0f || !aligned) {
+        // Either close enough to stop, or still turning to face Link (see
+        // on_horse_follow_execute_post) -- withhold forward stick input either way.
         horse->m_padStickValue = 0.0f;
         return;
     }
 
     horse->m_padStickValue = magnitude > 1.0f ? 1.0f : magnitude;
-    horse->m_padStickAngleY = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+
+    // Without a real rider, daHorse_c::procWait() unconditionally zeroes any speed
+    // setSpeedAndAngle() computes unless ERFLG0_MOVE_ACCEPT is set that tick, so she'd otherwise
+    // never transition into her walking proc at all. This mirrors what the rodeo minigame's own
+    // autonomous movement does to drive the horse without a rider (setStickRodeoMove()).
+    horse->onMoveAccept();
 }
 
-// Once Epona is within the follow distance, the native stick-driven turning above stops engaging
-// (it only turns while actively moving), so keep nudging her to face Link while she's stopped.
+// Turns Epona in place to face Link: while she's stopped within the follow distance, and before
+// she's allowed to start walking toward him (the native stick-driven turning in setSpeedAndAngle()
+// only engages while forward stick magnitude is nonzero, which we deliberately withhold above
+// until she's already facing roughly the right way).
 static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
@@ -1114,13 +1137,16 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
         return;
     }
 
+    s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
     f32 distXZ = horse->current.pos.absXZ(player->current.pos);
-    if (distXZ > kEponaFollowDistance) {
-        return;
+    s16 facingError = bearing - horse->shape_angle.y;
+    bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
+                   (facingError >= -kEponaFollowAlignmentCone);
+    if (distXZ > kEponaFollowDistance && aligned) {
+        return;  // already aligned and still approaching; native turning/movement handles this tick
     }
 
-    s16 facingAngle = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
-    cLib_addCalcAngleS(&horse->shape_angle.y, facingAngle, 5, kEponaFollowIdleTurnMax,
+    cLib_addCalcAngleS(&horse->shape_angle.y, bearing, 5, kEponaFollowIdleTurnMax,
                         kEponaFollowIdleTurnMin);
     horse->current.angle.y = horse->shape_angle.y;
     horse->initHorseMtx();
