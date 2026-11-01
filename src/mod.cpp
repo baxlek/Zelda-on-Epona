@@ -554,6 +554,27 @@ static constexpr u8 kArrowWaitFrames = 5;
 
 static constexpr f32 kDrawAnimSpeedMultiplier = 2.0f;
 
+// While Zelda is actively fighting from horseback (auto-target enabled), Epona reacting to the
+// fight at all -- rearing at a nearby enemy, or flinching from Zelda's own Light Arrows flying
+// close to her -- is counterproductive, so all of it is suppressed outright. Outside of that
+// feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident
+// should still see her react), since only Zelda's own combat is what's being worked around here.
+static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
+    if (!auto_target_enemies_enabled() || !is_spawned_zelda_attached(horse)) {
+        return false;
+    }
+
+    daHoZelda_c* zelda = horse->getZeldaActor();
+    return zelda != nullptr && zelda->checkSingleRide();
+}
+
+// daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
+// d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
+// d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
+static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
+static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
+static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
+
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
     daHorse_c* horse = (daHorse_c*)dComIfGp_getHorseActor();
@@ -563,10 +584,25 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         return;
     }
 
+    // Even with every known trigger above suppressed, Epona's own m_anmIdx[0] can still read back
+    // ANM_HS_STAND (0x14) for a stray tick: the hit that provokes it is cleared and her engine
+    // state is corrected the same tick (see HorseExecute's pre/post hooks below), but this
+    // function runs from her rider's own execute(), which can observe that still-dirty value in
+    // the narrow window before her own correction visibly takes effect. Vanilla's own mapping
+    // below treats 0x14 as a meaningful "look alarmed" cue -- fine normally, but while Zelda rides
+    // solo it collapses her into the plain "not aiming" branch further down, which resets her
+    // upper-body anim and deletes her in-flight arrow, restarting her whole draw/fire cycle from
+    // scratch and making her seem to fire much faster than intended. Treat it as a no-op idle tick
+    // instead, same as vanilla already does for ANM_HS_EXCITEMENT/EXCITEMENT_2 (8/9, which fall
+    // through to the same default case below and were never a problem).
+    bool reactionsSuppressed = epona_combat_reactions_suppressed(horse);
+
     u16* anm_p = anm_idx;
     for (int i = 0; i < 3; i++, anm_p++) {
         u16 horse_anm_idx = horse->getAnmIdx(i);
-        if (horse_anm_idx == 0x14) {
+        if (horse_anm_idx == 0x14 && reactionsSuppressed) {
+            *anm_p = 0x1C;
+        } else if (horse_anm_idx == 0x14) {
             *anm_p = 0x16;
         } else if (horse_anm_idx == 0x15) {
             *anm_p = 0x18;
@@ -798,20 +834,6 @@ static HookAction on_midna_search_npc_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
-// While Zelda is actively fighting from horseback (auto-target enabled), Epona reacting to the
-// fight at all -- rearing at a nearby enemy, or flinching from Zelda's own Light Arrows flying
-// close to her -- is counterproductive, so all of it is suppressed outright. Outside of that
-// feature, Epona keeps her normal reactions (e.g. a player who swings a sword at her by accident
-// should still see her react), since only Zelda's own combat is what's being worked around here.
-static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
-    if (!auto_target_enemies_enabled() || !is_spawned_zelda_attached(horse)) {
-        return false;
-    }
-
-    daHoZelda_c* zelda = horse->getZeldaActor();
-    return zelda != nullptr && zelda->checkSingleRide();
-}
-
 // Epona's idle-state AI (daHorse_c::procWait) periodically scans for nearby ENEMY-group actors
 // via this judge function and, if one is found, spooks into a rearing "excitement" animation.
 // It has no notion of Zelda riding solo and defending herself -- so whenever her auto-targeted
@@ -844,25 +866,15 @@ static HookAction on_horse_search_enemy_pre(ModContext*, void*, void*, void*) {
 // inlined away) is hooked directly instead, gated on its "was this a startled reaction" param.
 DEFINE_HOOK(&daHorse_c::procTurnInit, HorseProcTurnInit);
 
-// TEMPORARY diagnostic helper: reports every "spooked" trigger this mod knows about to both the
-// log and an on-screen toast, regardless of whether it was actually suppressed, so a report of
-// Epona still rearing from a Light Arrow can be matched against what (if anything) fired here.
-// Remove once the Light Arrow rearing trigger is confirmed and handled.
+// TEMPORARY diagnostic helper: logs every "spooked" trigger this mod knows about, regardless of
+// whether it was actually suppressed, so a report of Epona still rearing from a Light Arrow can
+// be matched against what (if anything) fired here. Remove once the Light Arrow rearing trigger
+// is confirmed and handled.
 static void report_diag(const char* source, bool suppressed, bool autoTarget, bool zeldaAttached,
     bool singleRide) {
     mods::log::warn("[epona-diag] {} fired (suppressed={}, autoTarget={}, zeldaAttached={}, "
                      "singleRide={})",
         source, suppressed, autoTarget, zeldaAttached, singleRide);
-
-    UiToastDesc toast = UI_TOAST_DESC_INIT;
-    toast.type = suppressed ? "success" : "warning";
-    toast.title_rml = "Epona diag";
-    const auto body = fmt::format(
-        "<span>{} (suppressed={}, autoTarget={}, zeldaAttached={}, singleRide={})</span>", source,
-        suppressed, autoTarget, zeldaAttached, singleRide);
-    toast.body_rml = body.c_str();
-    toast.duration_ms = 6000;
-    svc_ui->push_toast(mod_ctx, &toast);
 }
 
 static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, void*) {
@@ -880,13 +892,6 @@ static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, vo
 
     return HOOK_CONTINUE;
 }
-
-// daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
-// d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
-// d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
-static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
-static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
-static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
 
 // Rather than keep chasing individual internal trigger paths one at a time, hook the one place
 // all of them must funnel through to become visible: daHorse_c::setSingleAnime(), and refuse to
