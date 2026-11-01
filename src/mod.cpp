@@ -585,6 +585,33 @@ static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
     return auto_target_enemies_enabled() && is_spawned_zelda_riding_solo();
 }
 
+// An exception to the suppression above: if the *player* (not Zelda's own combat) is the one
+// physically hitting Epona while dismounted, she should still rear up and interrupt whatever
+// Zelda is doing, exactly like she would without this mod -- only Zelda's own Light-Arrow/enemy
+// combat is meant to be worked around here. GetTgHitAc() reports whichever actor's own attack
+// collider actually caused a given target cylinder/sphere's hit, independent of ChkTgHit()'s
+// generic "something touched me" bit, so it can distinguish the player's sword from an arrow or
+// a nearby enemy. Checked (and cached for the tick) in on_horse_execute_pre, before anything
+// clears the hit flags.
+static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (player == nullptr || player->checkHorseRide()) {
+        return false;
+    }
+
+    fopAc_ac_c* playerActor = static_cast<fopAc_ac_c*>(player);
+    return (horse->m_tgco_cyl[0].ChkTgHit() && horse->m_tgco_cyl[0].GetTgHitAc() == playerActor) ||
+           (horse->m_tgco_cyl[1].ChkTgHit() && horse->m_tgco_cyl[1].GetTgHitAc() == playerActor) ||
+           (horse->m_tgco_cyl[2].ChkTgHit() && horse->m_tgco_cyl[2].GetTgHitAc() == playerActor) ||
+           (horse->m_head_sph.ChkTgHit() && horse->m_head_sph.GetTgHitAc() == playerActor);
+}
+
+// Set once per tick by on_horse_execute_pre (the first of this mod's horse hooks to run each
+// tick, before daHorse_c::execute()'s own body -- and therefore before ChkTgHit() gets cleared or
+// read by anything else), and consulted by every other suppression point below for the rest of
+// that same tick.
+static bool s_allowRearForDismountedPlayerHit = false;
+
 // daHorse_c's ANM_HS_* animation indices aren't exposed in its header (they're #defines local to
 // d_a_horse.cpp), so the handful needed here are duplicated by value. Confirmed against
 // d_a_hozelda.cpp's own raw-literal horse_anm_idx checks (e.g. its "0x14" is this ANM_HS_STAND).
@@ -908,7 +935,11 @@ static HookAction on_horse_proc_turn_init_pre(ModContext*, void* args, void*, vo
     // responsible for what's being observed. This is intentionally broader than production-safe:
     // it will also block Epona's normal directional turning while solo-ridden in combat mode.
     // Narrow this back down (or replace it) once confirmed.
-    if (suppressed) {
+    //
+    // Exception: if a dismounted player is the one physically hitting her this tick (see
+    // is_dismounted_player_tg_hit()), let the real rearing reaction through instead of blocking
+    // it, since that's meant to still interrupt Zelda regardless of her own combat.
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
         mods::log::warn(
             "[epona-diag] procTurnInit(isStartledTurn={}) fired while suppressed -- skipping "
             "unconditionally for testing (current anmIdx={})",
@@ -945,7 +976,7 @@ static HookAction on_horse_set_single_anime_pre(ModContext*, void* args, void*, 
         bool suppressed = epona_combat_reactions_suppressed(horse);
         report_diag("setSingleAnime", suppressed, auto_target_enemies_enabled(),
             find_spawned_zelda() != nullptr, is_spawned_zelda_riding_solo());
-        if (suppressed) {
+        if (suppressed && !s_allowRearForDismountedPlayerHit) {
             return HOOK_SKIP_ORIGINAL;
         }
     } else if (s_arrowShotDiagFramesLeft > 0) {
@@ -979,7 +1010,7 @@ static HookAction on_horse_set_neck_anime_pre(ModContext*, void* args, void*, vo
     bool suppressed = epona_combat_reactions_suppressed(horse);
     report_diag("setNeckAnime(ANM_HS_LASH)", suppressed, auto_target_enemies_enabled(),
         find_spawned_zelda() != nullptr, is_spawned_zelda_riding_solo());
-    if (suppressed) {
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
         return HOOK_SKIP_ORIGINAL;
     }
 
@@ -1011,7 +1042,14 @@ DEFINE_HOOK(&daHorse_c::execute, HorseExecute);
 
 static HookAction on_horse_execute_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    s_allowRearForDismountedPlayerHit = false;
     if (!epona_combat_reactions_suppressed(horse)) {
+        return HOOK_CONTINUE;
+    }
+
+    // Check (and latch for the rest of this tick) before anything below clears the hit flags.
+    s_allowRearForDismountedPlayerHit = is_dismounted_player_tg_hit(horse);
+    if (s_allowRearForDismountedPlayerHit) {
         return HOOK_CONTINUE;
     }
 
@@ -1085,7 +1123,7 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
         "autoTarget={}, zeldaAttached={}, singleRide={})",
         anmIdx, inTurnState, suppressed, autoTarget, zeldaAttached, singleRide);
 
-    if (suppressed) {
+    if (suppressed && !s_allowRearForDismountedPlayerHit) {
         mods::log::warn(
             "[epona-diag] -- resetting back to her wait state. This means something bypasses the "
             "ChkTgHit()/setSingleAnime/procTurnInit suppression entirely (possibly via inlining); "
