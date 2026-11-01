@@ -595,15 +595,32 @@ static bool epona_combat_reactions_suppressed(daHorse_c* horse) {
 // clears the hit flags.
 static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
-    if (player == nullptr || player->checkHorseRide()) {
-        return false;
+    bool dismounted = player != nullptr && !player->checkHorseRide();
+    fopAc_ac_c* playerActor = dismounted ? static_cast<fopAc_ac_c*>(player) : nullptr;
+
+    bool anyTgHit = horse->m_tgco_cyl[0].ChkTgHit() || horse->m_tgco_cyl[1].ChkTgHit() ||
+                    horse->m_tgco_cyl[2].ChkTgHit() || horse->m_head_sph.ChkTgHit();
+    bool result = dismounted &&
+                  ((horse->m_tgco_cyl[0].ChkTgHit() && horse->m_tgco_cyl[0].GetTgHitAc() == playerActor) ||
+                      (horse->m_tgco_cyl[1].ChkTgHit() && horse->m_tgco_cyl[1].GetTgHitAc() == playerActor) ||
+                      (horse->m_tgco_cyl[2].ChkTgHit() && horse->m_tgco_cyl[2].GetTgHitAc() == playerActor) ||
+                      (horse->m_head_sph.ChkTgHit() && horse->m_head_sph.GetTgHitAc() == playerActor));
+
+    // TEMPORARY diagnostic: only logs on a real hit tick (cheap, rare), to pin down why a
+    // genuine dismounted player hit might not be recognized as such.
+    if (anyTgHit) {
+        mods::log::warn(
+            "[epona-diag] is_dismounted_player_tg_hit: player={:p} dismounted={} playerActor={:p} "
+            "result={} | cyl0(hit={},ac={:p}) cyl1(hit={},ac={:p}) cyl2(hit={},ac={:p}) "
+            "head(hit={},ac={:p})",
+            (void*)player, dismounted, (void*)playerActor, result,
+            (bool)horse->m_tgco_cyl[0].ChkTgHit(), (void*)horse->m_tgco_cyl[0].GetTgHitAc(),
+            (bool)horse->m_tgco_cyl[1].ChkTgHit(), (void*)horse->m_tgco_cyl[1].GetTgHitAc(),
+            (bool)horse->m_tgco_cyl[2].ChkTgHit(), (void*)horse->m_tgco_cyl[2].GetTgHitAc(),
+            (bool)horse->m_head_sph.ChkTgHit(), (void*)horse->m_head_sph.GetTgHitAc());
     }
 
-    fopAc_ac_c* playerActor = static_cast<fopAc_ac_c*>(player);
-    return (horse->m_tgco_cyl[0].ChkTgHit() && horse->m_tgco_cyl[0].GetTgHitAc() == playerActor) ||
-           (horse->m_tgco_cyl[1].ChkTgHit() && horse->m_tgco_cyl[1].GetTgHitAc() == playerActor) ||
-           (horse->m_tgco_cyl[2].ChkTgHit() && horse->m_tgco_cyl[2].GetTgHitAc() == playerActor) ||
-           (horse->m_head_sph.ChkTgHit() && horse->m_head_sph.GetTgHitAc() == playerActor);
+    return result;
 }
 
 // Set once per tick by on_horse_execute_pre (the first of this mod's horse hooks to run each
@@ -1120,8 +1137,9 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     bool singleRide = is_spawned_zelda_riding_solo();
     mods::log::warn(
         "[epona-diag] execute() post-hook found anmIdx={} inTurnState={} (suppressed={}, "
-        "autoTarget={}, zeldaAttached={}, singleRide={})",
-        anmIdx, inTurnState, suppressed, autoTarget, zeldaAttached, singleRide);
+        "autoTarget={}, zeldaAttached={}, singleRide={}, allowPlayerHit={})",
+        anmIdx, inTurnState, suppressed, autoTarget, zeldaAttached, singleRide,
+        s_allowRearForDismountedPlayerHit);
 
     if (suppressed && !s_allowRearForDismountedPlayerHit) {
         mods::log::warn(
