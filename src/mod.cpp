@@ -1581,18 +1581,29 @@ static void update_zelda_talk_interaction() {
     update_zelda_mouth_animation(s_zeldaTalkActive);
 
     if (!s_zeldaTalkActive) {
-        if (s_zeldaTalkNodeId == 0 || !eligible) {
-            return;
+        dAttention_c* attention = dComIfGp_getAttention();
+        bool lockedOnZelda = zelda != nullptr && attention->LockonTruth() &&
+            attention->LockonTarget(0) == zelda;
+        bool triggered = mDoCPd_c::getTrigA(PAD_1);
+
+        // Temporary diagnostics: logs exactly once per button press made while locked onto Zelda,
+        // regardless of which gate ends up blocking it, so a real play-test pinpoints exactly why
+        // dialogue isn't opening in the field.
+        if (lockedOnZelda && triggered) {
+            mods::log::info(
+                "zelda talk: button press while locked on (eligible={}, nodeId={}, busy={})",
+                eligible, (int)s_zeldaTalkNodeId, dMsgObject_isTalkNowCheck());
         }
 
-        dAttention_c* attention = dComIfGp_getAttention();
-        bool lockedOnZelda = attention->LockonTruth() && attention->LockonTarget(0) == zelda;
-        if (!lockedOnZelda || dMsgObject_isTalkNowCheck() || !mDoCPd_c::getTrigA(PAD_1)) {
+        if (s_zeldaTalkNodeId == 0 || !eligible || !lockedOnZelda || !triggered ||
+            dMsgObject_isTalkNowCheck()) {
             return;
         }
 
         s_zeldaTalkActive = true;
         s_zeldaMsgFlow.init(zelda, s_zeldaTalkNodeId, 0, nullptr);
+        mods::log::info("zelda talk: flow init() called, status now talkNow={}",
+            dMsgObject_isTalkNowCheck());
         return;
     }
 
