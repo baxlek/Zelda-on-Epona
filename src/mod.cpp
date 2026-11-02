@@ -276,6 +276,18 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
 
     s_spawnedZeldaId = newId;
     s_hasSpawnedZelda = true;
+
+    // HoZelda is created attached to the room layer she spawned in (per room_num above), so the
+    // room-based actor culling system deletes her the moment that room's process unloads (e.g.
+    // crossing into an adjacent room/area). daHorse_c avoids this entirely by reparenting itself
+    // to the stage-wide layer via fopAcM_setStageLayer() at the end of its own create() (see
+    // d_a_horse.cpp), which keeps Epona alive across room boundaries without any respawn logic.
+    // Do the same for the spawned Zelda so she survives room transitions instead of flickering
+    // out and being respawned by mod_update().
+    fopAc_ac_c* spawned = nullptr;
+    if (fopAcM_SearchByID((fpc_ProcID)s_spawnedZeldaId, &spawned) && spawned != nullptr) {
+        fopAcM_setStageLayer(spawned);
+    }
 }
 
 static void remove_spawned_zelda() {
