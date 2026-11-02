@@ -6,6 +6,7 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/actor.h"
 #include "mods/svc/config.h"
+#include "mods/svc/flow.hpp"
 #include "mods/svc/log.hpp"
 #include "mods/svc/ui.h"
 
@@ -15,10 +16,13 @@
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
+#include "d/d_attention.h"
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_event_manager.h"
+#include "d/d_msg_flow.h"
+#include "d/d_msg_object.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
@@ -26,9 +30,14 @@
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "helpers/string.hpp"
+#include "JSystem/J3DGraphAnimator/J3DJoint.h"
+#include "JSystem/J3DGraphAnimator/J3DModel.h"
+#include "JSystem/J3DGraphAnimator/J3DModelData.h"
+#include "JSystem/J3DGraphBase/J3DSys.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
+#include "m_Do/m_Do_controller_pad.h"
 #include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
@@ -41,6 +50,8 @@ IMPORT_SERVICE(ActorService, svc_actor);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(LogService, svc_log);
+IMPORT_SERVICE(FlowService, svc_flow);
+IMPORT_SERVICE(MessageService, svc_message);
 
 static ConfigVarHandle g_cvarShowInCutscenes = 0;
 
@@ -514,6 +525,40 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     return search.best;
 }
 
+// Faux lip-sync for the spawned Zelda's dialogue (see update_zelda_mouth_animation() below). Her
+// model has no authored mouth-flap animation of its own, unlike native talking NPCs: those rely on
+// daNpcT_c::ctrlMsgAnm() (d_a_npc.cpp) toggling playback of an authored "talk" BCK/BTP in bursts
+// timed to dMsgObject_isMouthCheck(), using per-NPC-class motion-sequence-manager infrastructure
+// her class doesn't have. Her skeleton does have a dedicated mouth joint, though (ZELH_JNT_MOUTH_e
+// in the model's generated joint-index table -- not part of any public SDK header, identified
+// directly from the game's own resource data), so we drive that joint procedurally instead,
+// reusing the exact matrix idiom daHoZelda_c::modelCallBack() already applies to other joints
+// (mNeckAngle/mBodyAngle): copy the joint's current anm matrix, apply an extra local rotation,
+// write it back, then mirror it into J3DSys::mCurrentMtx for J3DJoint::recursiveCalc() to pick up.
+static constexpr u16 kZelhJntMouth = 0xA;
+static s16 s_zeldaMouthAngle = 0;
+
+static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
+    if (phase != 0) {
+        return 1;
+    }
+
+    // J3DJoint callbacks are registered on the (possibly shared) model data, not a specific actor
+    // instance -- j3dSys.getModel() is however the J3DModel currently being calculated, so this
+    // mirrors the native callback's own technique for finding "which actor owns this model".
+    daHoZelda_c* zelda = reinterpret_cast<daHoZelda_c*>(j3dSys.getModel()->getUserArea());
+    if (!is_spawned_zelda(zelda)) {
+        return 1;
+    }
+
+    u16 jntNo = joint->getJntNo();
+    mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
+    mDoMtx_stack_c::XrotM(s_zeldaMouthAngle);
+    zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
+    mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
+    return 1;
+}
+
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
 
 static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) {
@@ -521,6 +566,10 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     if (!is_spawned_zelda(zelda)) {
         return HOOK_CONTINUE;
     }
+
+    // Cheap to re-set every tick; avoids tracking creation/respawn state separately.
+    zelda->mpZeldaModel->getModelData()->getJointNodePointer(kZelhJntMouth)->setCallBack(
+        hozelda_mouth_joint_callback);
 
     daHorse_c* horse = dComIfGp_getHorseActor();
     bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
@@ -1336,6 +1385,166 @@ static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval,
     }
 }
 
+// --- Dismounted NPC-style interaction with the spawned Zelda ---
+//
+// Z-targeting Zelda while dismounted and pressing the action button opens a short, original
+// message box, instead of the normal proximity "talk" prompt icon that every other NPC uses --
+// that icon would visually and functionally collide with Epona's own "mount" prompt, since Zelda
+// is always within mounting distance of the horse she rides on. Always enabled, no toggle.
+//
+// To get the native "Speak" action-button prompt to show up while (and only while) Z-targeting
+// her, and to make her Z-targetable for this purpose at all, we toggle two per-actor fields every
+// tick: attention_info.flags's fopAc_AttnFlag_TALK_e bit (dAttention_c::calcWeight() only ever
+// considers an actor for the lock-on "talk" weight/type if this bit is set in its attention_info
+// flags -- see loc_type_tbl in d_attention.cpp) and eventInfo's dEvtCnd_CANTALK_e condition
+// (calcWeight() zeroes the weight for TALK_e/SPEAK_e types unless this condition bit is set).
+// Both are left off whenever she isn't currently eligible (mounted, hidden, mid-cutscene), which
+// makes her completely un-targetable for this interaction outside of those moments -- not just
+// "ignored by our own trigger code" but actually invisible to the engine's own lock-on logic.
+//
+// While her dialogue is on screen, a faux lip-sync also drives her model's dedicated mouth joint
+// (see hozelda_mouth_joint_callback() and update_zelda_mouth_animation() further down), since her
+// model has no authored talk animation of its own for the generic engine-wide mechanism to drive.
+
+// BMG message group our custom greeting is registered under. Group 0 is the always-resident
+// "common" message archive (the same one Midna's menu uses), so it resolves correctly no matter
+// which field/stage Zelda is approached in.
+static constexpr u16 kZeldaTalkMessageGroup = 0;
+
+static mods::flow::Graph s_zeldaTalkGraph;
+static std::vector<mods::flow::RegisteredMessage> s_zeldaTalkMessages;
+static u16 s_zeldaTalkNodeId = 0;
+static dMsgFlow_c s_zeldaMsgFlow;
+static bool s_zeldaTalkActive = false;
+
+static ModResult register_zelda_talk_flow() {
+    static constexpr std::array kAllLanguages{
+        MESSAGE_LANGUAGE_ENGLISH,
+        MESSAGE_LANGUAGE_GERMAN,
+        MESSAGE_LANGUAGE_FRENCH,
+        MESSAGE_LANGUAGE_SPANISH,
+        MESSAGE_LANGUAGE_ITALIAN,
+        MESSAGE_LANGUAGE_JAPANESE,
+    };
+
+    mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
+    builder.text("It's nice to ride along like this, Link. Thank you for bringing me with you.");
+
+    std::vector<mods::flow::MessageVariant> variants;
+    variants.reserve(kAllLanguages.size());
+    for (MessageLanguage language : kAllLanguages) {
+        variants.push_back(builder.build(language));
+    }
+
+    auto message = mods::flow::register_message(kZeldaTalkMessageGroup, variants);
+    if (!message) {
+        return message.result();
+    }
+    MessageId greetingId = message.id();
+    s_zeldaTalkMessages.push_back(std::move(message));
+
+    mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
+    const auto greeting = graph.add_message(greetingId).next(mods::flow::kEnd);
+    s_zeldaTalkNodeId = greeting;
+
+    s_zeldaTalkGraph = graph.commit();
+    return s_zeldaTalkGraph.result();
+}
+
+DEFINE_HOOK(&dMsgObject_c::changeFlowGroupLocal, MsgObjectChangeFlowGroupLocal);
+
+static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* args, void*, void*) {
+    if (!s_zeldaTalkActive) {
+        return HOOK_CONTINUE;
+    }
+
+    // Our standalone Zelda-talk flow uses a mod-registered custom node id (>= 0x8000). The
+    // engine's own group-resolution logic (the function we're hooking) only auto-forces the
+    // common group (0) for *vanilla* flow ids in [3000, 0x8000) -- e.g. Midna's menu -- while
+    // custom ids instead inherit whatever message group happens to be active for the current
+    // stage. Since Zelda can be talked to from any field/stage while riding along, force the
+    // common group ourselves here, matching where we registered her greeting, mirroring exactly
+    // what the original function's own "common flow" branch would have done.
+    dMsgObject_c* self = mods::arg<dMsgObject_c*>(args, 0);
+    self->mFlowChk = 1;
+    dMsgObject_c::changeGroup(kZeldaTalkMessageGroup);
+    return HOOK_SKIP_ORIGINAL;
+}
+
+// Whether Zelda is currently allowed to be targeted/talked to at all: dismounted, not hidden for
+// a cutscene, and no scripted event running. Does not look at the lock-on state itself, since
+// this is also what drives whether the engine will let her be locked onto for this purpose in
+// the first place.
+static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
+    if (zelda == nullptr || player == nullptr || player->checkHorseRide()) {
+        return false;
+    }
+    return !s_hideSpawnedZeldaInCutscene && !dComIfGp_event_runCheck();
+}
+
+// Keeps Zelda's native lock-on "talk" eligibility in sync with zelda_talk_may_be_targeted() every
+// tick, so the engine's own "Speak" action-button prompt only ever appears while she's actually
+// allowed to be talked to, and Z-targeting her is otherwise impossible for this purpose.
+static void update_zelda_talk_eligibility(fopAc_ac_c* zelda, bool eligible) {
+    if (zelda == nullptr) {
+        return;
+    }
+    if (eligible) {
+        zelda->attention_info.flags |= fopAc_AttnFlag_TALK_e;
+        zelda->eventInfo.onCondition(dEvtCnd_CANTALK_e);
+    } else {
+        zelda->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
+        zelda->eventInfo.offCondition(dEvtCnd_CANTALK_e);
+    }
+}
+
+// Drives s_zeldaMouthAngle (applied every frame by hozelda_mouth_joint_callback(), see its
+// comment above) toward an "open" pose while our dialogue is the one actually on screen and
+// dMsgObject_isMouthCheck() -- the same engine-wide text-reveal-rhythm flag real talking NPCs
+// read in ctrlMsgAnm() -- says this instant is a "mouth open" beat, easing back to closed the rest
+// of the time (including whenever she isn't actively talking to us at all).
+static constexpr s16 kZeldaMouthOpenAngle = 0x500;
+
+static void update_zelda_mouth_animation(bool talking) {
+    s16 target = (talking && dMsgObject_isMouthCheck()) ? kZeldaMouthOpenAngle : 0;
+    daPy_addCalcShort(&s_zeldaMouthAngle, target, 3, 0x1000, 0x100);
+}
+
+static void update_zelda_talk_interaction() {
+    fopAc_ac_c* zelda = find_spawned_zelda();
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    bool eligible = zelda_talk_may_be_targeted(zelda, player);
+    update_zelda_talk_eligibility(zelda, eligible);
+    update_zelda_mouth_animation(s_zeldaTalkActive);
+
+    if (!s_zeldaTalkActive) {
+        if (s_zeldaTalkNodeId == 0 || !eligible) {
+            return;
+        }
+
+        dAttention_c* attention = dComIfGp_getAttention();
+        bool lockedOnZelda = attention->LockonTruth() && attention->LockonTarget(0) == zelda;
+        if (!lockedOnZelda || dMsgObject_isTalkNowCheck() || !mDoCPd_c::getTrigA(PAD_1)) {
+            return;
+        }
+
+        s_zeldaTalkActive = true;
+        s_zeldaMsgFlow.init(zelda, s_zeldaTalkNodeId, 0, nullptr);
+        return;
+    }
+
+    if (zelda == nullptr) {
+        s_zeldaMsgFlow.remove();
+        s_zeldaTalkActive = false;
+        return;
+    }
+
+    s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
+    if (s_zeldaMsgFlow.checkEndFlow()) {
+        s_zeldaTalkActive = false;
+    }
+}
+
 static bool is_epona_follow_control_disabled(ModContext*, void*) {
     return !auto_target_enemies_enabled();
 }
@@ -1561,6 +1770,23 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_pre<MsgObjectChangeFlowGroupLocal>(
+        on_msg_object_change_flow_group_local_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook message group resolution, talking to Zelda while dismounted will be "
+            "unavailable: {}",
+            (int)result);
+    }
+
+    result = register_zelda_talk_flow();
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register Zelda's dismounted-talk message, talking to Zelda while "
+            "dismounted will be unavailable: {}",
+            (int)result);
+    }
+
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
     cvarDesc.name = "showInCutscenes";
     cvarDesc.type = CONFIG_VAR_BOOL;
@@ -1630,6 +1856,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         if (link != nullptr) {
             link->offHorseZelda();
         }
+        update_zelda_talk_interaction();
         return MOD_OK;
     }
 
@@ -1695,11 +1922,19 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
                                          storyHoZeldaActive);
 
+    update_zelda_talk_interaction();
+
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
+    if (s_zeldaTalkActive) {
+        s_zeldaMsgFlow.remove();
+        s_zeldaTalkActive = false;
+    }
+    s_zeldaTalkGraph.reset();
+    s_zeldaTalkMessages.clear();
     mods::hook::uninstall<ActorDelete>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
@@ -1710,6 +1945,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
+    mods::hook::uninstall<MsgObjectChangeFlowGroupLocal>();
     return MOD_OK;
 }
 }
