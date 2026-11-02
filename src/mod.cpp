@@ -639,7 +639,14 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
             *anm_p = 0x12;
         } else if (horse_anm_idx == 0xA) {
             *anm_p = 0x13;
-        } else if (horse_anm_idx == 0x11 || horse_anm_idx == 0x12 || horse_anm_idx == 0x13) {
+        } else if (horse_anm_idx == 0x11) {
+            // ANM_HS_RUN_DASH: Epona's "Lash" speed-burst anim, most noticeable right after a
+            // skidding stop when immediately accelerating again. Vanilla keeps this distinct
+            // from the calmer run anims below (mapped to 0xF, not 0xE); merging it into 0xE
+            // here made Zelda use a body pose that doesn't account for the dash's extra forward
+            // lurch, leaning her head into Link's back.
+            *anm_p = 0xF;
+        } else if (horse_anm_idx == 0x12 || horse_anm_idx == 0x13) {
             *anm_p = 0xE;
         } else if (horse_anm_idx == 0xFFFF) {
             *anm_p = 0xFFFF;
