@@ -1527,8 +1527,19 @@ static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*)
 // explicitly marked DUSK_NOINLINE in its header declaration, which keeps a real, hookable call
 // site alive -- hook that instead. Forcing it to report true while our flow is active freezes the
 // player exactly the way they would for any other NPC's dialogue.
+//
+// Temporary diagnostics: logs exactly once per conversation (reset alongside s_zeldaTalkActive in
+// update_zelda_talk_interaction()) the first time this handler actually runs while active, so a
+// real play-test can distinguish "the hook never fires at all" from "it fires, but checkEventRun()
+// returning true doesn't stop the player regardless."
+static bool s_loggedEventRunCheckHookFired = false;
+
 static HookAction on_com_ifgp_event_run_check_pre(ModContext*, void*, void*, void* retval) {
     if (s_zeldaTalkActive) {
+        if (!s_loggedEventRunCheckHookFired) {
+            mods::log::info("zelda talk: event-run-check hook fired, forcing checkEventRun()=true");
+            s_loggedEventRunCheckHookFired = true;
+        }
         if (retval != nullptr) {
             *static_cast<BOOL*>(retval) = true;
         }
@@ -1538,6 +1549,30 @@ static HookAction on_com_ifgp_event_run_check_pre(ModContext*, void*, void*, voi
 }
 
 DEFINE_HOOK(&dComIfGp_event_runCheck, ComIfGpEventRunCheck);
+
+// Belt-and-suspenders fallback for the hook above: force-freeze the player directly at the one
+// place in daAlink_c::setStickData() that actually reads the controller for the frame, instead of
+// relying on checkEventRun() correctly reporting true everywhere its ~40 call sites expect. Even
+// if the event-run-check hook above is for whatever reason not taking effect at runtime (its
+// installation is logged, but has not yet been confirmed to actually stop the player in practice),
+// this guarantees mStickValue/mMoveValue/mItemTrigger/mItemButton can never be repopulated from
+// real input while our conversation is active, matching setStickData()'s own checkEventRun()==true
+// branch (which leaves them at the zeroed/demo-only values set earlier in the same function).
+static void on_alink_set_stick_data_post(ModContext*, void* args, void*, void*) {
+    if (!s_zeldaTalkActive) {
+        return;
+    }
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+    if (link == nullptr) {
+        return;
+    }
+    link->mStickValue = 0.0f;
+    link->mMoveValue = 0.0f;
+    link->mItemTrigger = 0;
+    link->mItemButton = 0;
+}
+
+DEFINE_HOOK(&daAlink_c::setStickData, AlinkSetStickData);
 
 // Whether the above hook is actually installed. If it failed to install for some reason, making
 // Zelda targetable/talkable via fopAc_AttnFlag_TALK_e would reintroduce the softlock it exists to
@@ -1680,6 +1715,7 @@ static void update_zelda_talk_interaction() {
         mods::log::info("zelda talk: kill-message flag before init() was {}", killFlagWasSet);
 
         s_zeldaTalkActive = true;
+        s_loggedEventRunCheckHookFired = false;
         // Use the synthetic "common flow" id here (see kZeldaTalkFlowId's comment) purely so the
         // engine's own group-resolution logic binds everything to our common message group (0)
         // correctly on its own. It doesn't correspond to any real vanilla flow, so init()'s own
@@ -1990,10 +2026,23 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     }
 
     result = mods::hook::add_pre<ComIfGpEventRunCheck>(on_com_ifgp_event_run_check_pre);
+    // Temporary diagnostics: logged unconditionally (not just on failure) so a real play-test can
+    // directly confirm the install actually succeeded, rather than inferring it from the absence
+    // of the warning below.
+    mods::log::info("zelda talk: event-run-check hook install result = {}", (int)result);
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook player event-run check, player will be able to move/fight during "
             "Zelda's dialogue: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<AlinkSetStickData>(on_alink_set_stick_data_post);
+    mods::log::info("zelda talk: player stick-freeze hook install result = {}", (int)result);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook player stick-data, player will be able to move/fight during Zelda's "
+            "dialogue: {}",
             (int)result);
     }
 
@@ -2166,6 +2215,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<MsgFlowSetNodeIndex>();
     mods::hook::uninstall<OrderTalkEvent>();
     mods::hook::uninstall<ComIfGpEventRunCheck>();
+    mods::hook::uninstall<AlinkSetStickData>();
     s_orderTalkEventHookInstalled = false;
     return MOD_OK;
 }
