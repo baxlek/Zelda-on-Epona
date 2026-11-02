@@ -1484,6 +1484,35 @@ static ModResult register_zelda_talk_flow() {
     return s_zeldaTalkGraph.result();
 }
 
+DEFINE_HOOK(&fopAcM_orderTalkEvent, OrderTalkEvent);
+
+// The real engine root cause of "no textbox + softlock": setting fopAc_AttnFlag_TALK_e (needed
+// to make the native "Speak" action-button prompt show up at all, see
+// update_zelda_talk_eligibility() below) also makes the generic player code
+// (daAlink_c::orderTalk(), see its BUTTON_STATUS_SPEAK branch) treat her exactly like any other
+// talk-capable NPC: every time the action button is pressed while she's the current target, it
+// unconditionally calls fopAcM_orderTalkEvent(), which in turn queues a real dEvt_type_TALK_e
+// event order through the full scripted event/demo system (dComIfGp_event_order()) -- completely
+// independent of our own manual dMsgFlow-based trigger below. Since Zelda was never set up as a
+// legitimate talk-event actor pair for that system (no registered event script targets her), that
+// order can never resolve: it silently blocks player control waiting on an event that will never
+// complete, while no window ever opens, which is exactly the hang/softlock this was causing.
+// Skipping the original call here (returning zero, its own "couldn't order" value) keeps her
+// permanently invisible to that system while leaving our own lock-on + button-press handling in
+// update_zelda_talk_interaction() as the only thing that ever drives her conversation.
+static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* talkPartner = mods::arg<fopAc_ac_c*>(args, 1);
+    if (is_spawned_zelda(talkPartner)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+// Whether the above hook is actually installed. If it failed to install for some reason, making
+// Zelda targetable/talkable via fopAc_AttnFlag_TALK_e would reintroduce the softlock it exists to
+// prevent, so zelda_talk_may_be_targeted() refuses to ever make her eligible without it.
+static bool s_orderTalkEventHookInstalled = false;
+
 DEFINE_HOOK(&dMsgObject_c::changeFlowGroupLocal, MsgObjectChangeFlowGroupLocal);
 
 static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* args, void*, void*) {
@@ -1509,7 +1538,8 @@ static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* a
 // this is also what drives whether the engine will let her be locked onto for this purpose in
 // the first place.
 static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
-    if (zelda == nullptr || player == nullptr || player->checkHorseRide()) {
+    if (zelda == nullptr || player == nullptr || player->checkHorseRide() ||
+        !s_orderTalkEventHookInstalled) {
         return false;
     }
     return !s_hideSpawnedZeldaInCutscene && !dComIfGp_event_runCheck();
@@ -1803,6 +1833,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_pre<OrderTalkEvent>(on_order_talk_event_pre);
+    s_orderTalkEventHookInstalled = result == MOD_OK;
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook talk-event ordering, talking to Zelda while dismounted will be "
+            "unavailable: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<MsgObjectChangeFlowGroupLocal>(
         on_msg_object_change_flow_group_local_pre);
     if (result != MOD_OK) {
@@ -1979,6 +2018,8 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
     mods::hook::uninstall<MsgObjectChangeFlowGroupLocal>();
+    mods::hook::uninstall<OrderTalkEvent>();
+    s_orderTalkEventHookInstalled = false;
     return MOD_OK;
 }
 }
