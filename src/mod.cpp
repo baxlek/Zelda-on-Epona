@@ -15,6 +15,7 @@
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
+#include "d/actor/d_a_suspend.h"
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
@@ -354,6 +355,29 @@ static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
             dComIfG_play_c::getLayerNo(0));
     }
     return HOOK_CONTINUE;
+}
+
+// Root cause of Zelda's model briefly unloading/reloading at certain room boundaries (e.g.
+// Faron Field <-> Kakariko Gorge, southern <-> northern Faron Woods): the engine places invisible
+// "Sus" (suspend) zone actors (daSus_c) in some rooms to stop background NPCs from executing or
+// drawing while far from the player, purely as a performance optimization. daSus_c::check() runs
+// once per actor per frame (from inside fopAc_Execute(), before that function's own gate check)
+// and sets/clears status flag fopAcStts_UNK_0x20000000_e based on the actor's position relative
+// to any Sus zones registered for its current room; fopAc_Execute() and fopAc_Draw() both skip
+// the actor entirely (without even invoking its own execute()/draw() virtuals) whenever that flag
+// is set. daSus_c::check() explicitly exempts fopAc_PLAYER_e (1) and fopAc_UNK_GROUP_5_e (5)
+// actors - the horse's profile uses group 5, so it's naturally immune - but HoZelda's profile
+// uses fopAc_NPC_e (4), so she gets caught by the same zones real background NPCs were meant for,
+// even though she's actively riding along with the player. Unlike the horse, there is no per-tick
+// position-based opt-out for her, so the fix force-clears the flag for the spawned Zelda actor
+// specifically, immediately after each check, before fopAc_Execute's gate re-reads it.
+DEFINE_HOOK(static_cast<void (*)(fopAc_ac_c*)>(&daSus_c::check), SusCheck);
+
+static void on_sus_check_post(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (is_spawned_zelda(actor)) {
+        fopAcM_OffStatus(actor, fopAcStts_UNK_0x20000000_e);
+    }
 }
 
 DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);
@@ -1497,6 +1521,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
                          (int)result);
     }
 
+    result = mods::hook::add_post<SusCheck>(on_sus_check_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook daSus_c::check, Zelda's model may briefly disappear at some room "
+            "boundaries: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
     if (result != MOD_OK) {
         mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
@@ -1833,6 +1865,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<ActorDelete>();
+    mods::hook::uninstall<SusCheck>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HorseDraw>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
