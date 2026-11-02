@@ -1549,15 +1549,20 @@ DEFINE_HOOK(&dMsgFlow_c::setNodeIndex, MsgFlowSetNodeIndex);
 // Temporary diagnostic: dMsgFlow_c::setNodeIndex(0xFFFF, ...) is the ONLY place that marks a flow
 // "ended" (checkEndFlow()'s backing field) outside of .remove() (which we never call on
 // s_zeldaMsgFlow while active) or the kill-message-flag path (already ruled out via the previous
-// diagnostic). Confirming whether -- and with what previous node index -- this is actually being
-// hit for OUR flow instance specifically pinpoints whether a node/message resolution failure
-// (not yet otherwise visible) is what is actually ending the conversation on its first tick.
+// diagnostic). The previous round of this diagnostic showed the abandoned node was already 0,
+// not our actual starting node id (32782) -- meaning an earlier, successful setNodeIndex() call
+// already happened THIS SAME TICK before the final abandoning call, which the 0xFFFF-only filter
+// didn't catch. Log every call for our flow instance (there are only ever a handful per tick) to
+// see the complete sequence of node transitions leading up to the abandonment.
 static HookAction on_msg_flow_set_node_index_pre(ModContext*, void* args, void*, void*) {
     dMsgFlow_c* self = mods::arg<dMsgFlow_c*>(args, 0);
     u16 nodeIdx = mods::arg<u16>(args, 1);
-    if (self == &s_zeldaMsgFlow && nodeIdx == 0xFFFF) {
-        mods::log::info("zelda talk: setNodeIndex(0xFFFF) called, abandoning node {}",
-            (int)self->mNodeIdx);
+    if (self == &s_zeldaMsgFlow) {
+        mods::log::info(
+            "zelda talk: setNodeIndex({}) called (previous mNodeIdx={}, field_0x25={}, "
+            "field_0x26={}, mMsg={})",
+            (int)nodeIdx, (int)self->mNodeIdx, (int)self->field_0x25, (int)self->field_0x26,
+            (unsigned)self->mMsg);
     }
     return HOOK_CONTINUE;
 }
