@@ -99,10 +99,25 @@ static bool s_zeldaDrewThisFrame = false;
 
 // Actor creation (svc_actor->create_actor_from_name -> fopAcM_create) is queued via
 // fpcSCtRq_Request and only actually constructs the actor on a later management tick (see
-// fpcM_IsCreating()), so the actor cannot be looked up and reparented to the stage layer in the
-// same call that spawned it. This flag lets mod_update() apply fopAcM_setStageLayer() exactly
-// once, as soon as find_spawned_zelda() first reports a fully-created actor.
+// fpcM_IsCreating()), so the actor cannot be looked up and reparented to the stage layer (or have
+// its group overridden - see s_appliedGroupOverrideToZelda below) in the same call that spawned
+// it. This flag lets mod_update() apply fopAcM_setStageLayer() exactly once, as soon as
+// find_spawned_zelda() first reports a fully-created actor.
 static bool s_appliedStageLayerToZelda = false;
+
+// HoZelda's profile places her in fopAc_NPC_e (group 4), the same group ordinary background NPCs
+// use. daSus_c::check() (the engine's per-room "Sus" suspend-zone system, a performance
+// optimization that disables execute()/draw() for background NPCs far from the player) explicitly
+// exempts fopAc_PLAYER_e (1) and fopAc_UNK_GROUP_5_e (5) actors from ever being suspended - the
+// horse's own profile uses group 5, which is why she's immune but Zelda isn't, even though she's
+// always actively riding along. A post-hook on daSus_c::check() (SusCheck) already clears the
+// resulting status flag for her every frame as a first line of defense, but since she's
+// constantly attached to the horse rather than being a stationary background character, directly
+// matching the horse's group is a more robust fix: it keeps her out of the Sus system entirely,
+// rather than relying on reacting to it every frame. Group 5 is a generic "misc utility actor"
+// bucket used by many unrelated actor types (arrows, boomerangs, mirrors, scene markers, etc.),
+// not something horse-specific, so reusing it for her carries no other behavioral meaning.
+static bool s_appliedGroupOverrideToZelda = false;
 
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
@@ -324,6 +339,7 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
     // creation is only queued (fpcSCtRq_Request) and finishes on a later management tick -- so
     // mod_update() applies fopAcM_setStageLayer() once she's actually been created.
     s_appliedStageLayerToZelda = false;
+    s_appliedGroupOverrideToZelda = false;
 }
 
 static void remove_spawned_zelda() {
@@ -1800,6 +1816,11 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (trackedZelda != nullptr && !s_appliedStageLayerToZelda) {
         fopAcM_setStageLayer(trackedZelda);
         s_appliedStageLayerToZelda = true;
+    }
+
+    if (trackedZelda != nullptr && !s_appliedGroupOverrideToZelda) {
+        trackedZelda->group = fopAc_UNK_GROUP_5_e;
+        s_appliedGroupOverrideToZelda = true;
     }
 
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
