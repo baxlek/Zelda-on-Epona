@@ -1509,8 +1509,6 @@ static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
-DEFINE_HOOK(&daAlink_c::checkEventRun, AlinkCheckEventRun);
-
 // Real NPC dialogue is always backed by a genuine dComIfGp_event_order() event, and
 // daAlink_c::checkEventRun() (== dComIfGp_event_runCheck() || checkPlayerDemoMode()) is the single
 // check nearly all of the player's own movement/combat/item code gates on to decide whether the
@@ -1518,9 +1516,18 @@ DEFINE_HOOK(&daAlink_c::checkEventRun, AlinkCheckEventRun);
 // conversation deliberately never goes through that event pipeline (see the fopAcM_orderTalkEvent
 // hook above), so without this, nothing ever tells the player's own code a conversation is
 // happening at all, and they remain completely free to move/fight/etc. the whole time her message
-// window is open. Force checkEventRun() to report true while our flow is active so the player
-// freezes exactly the way they would for any other NPC's dialogue.
-static HookAction on_alink_check_event_run_pre(ModContext*, void*, void*, void* retval) {
+// window is open.
+//
+// daAlink_c::checkEventRun() itself is a trivial one-line wrapper around
+// dComIfGp_event_runCheck() with no DUSK_NOINLINE attribute, called from 40+ sites within its own
+// translation unit (d_a_alink.cpp) -- in a RelWithDebInfo build the optimizer inlines it away at
+// every one of those call sites, leaving no actual call instruction left anywhere for an
+// address-patching hook to intercept (confirmed: the hook installed with no error, but the player
+// remained completely free to move during testing). dComIfGp_event_runCheck() itself, however, is
+// explicitly marked DUSK_NOINLINE in its header declaration, which keeps a real, hookable call
+// site alive -- hook that instead. Forcing it to report true while our flow is active freezes the
+// player exactly the way they would for any other NPC's dialogue.
+static HookAction on_com_ifgp_event_run_check_pre(ModContext*, void*, void*, void* retval) {
     if (s_zeldaTalkActive) {
         if (retval != nullptr) {
             *static_cast<BOOL*>(retval) = true;
@@ -1529,6 +1536,8 @@ static HookAction on_alink_check_event_run_pre(ModContext*, void*, void*, void* 
     }
     return HOOK_CONTINUE;
 }
+
+DEFINE_HOOK(&dComIfGp_event_runCheck, ComIfGpEventRunCheck);
 
 // Whether the above hook is actually installed. If it failed to install for some reason, making
 // Zelda targetable/talkable via fopAc_AttnFlag_TALK_e would reintroduce the softlock it exists to
@@ -1980,7 +1989,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn("failed to hook flow node-index diagnostics: {}", (int)result);
     }
 
-    result = mods::hook::add_pre<AlinkCheckEventRun>(on_alink_check_event_run_pre);
+    result = mods::hook::add_pre<ComIfGpEventRunCheck>(on_com_ifgp_event_run_check_pre);
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook player event-run check, player will be able to move/fight during "
@@ -2156,7 +2165,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<ArrowExecute>();
     mods::hook::uninstall<MsgFlowSetNodeIndex>();
     mods::hook::uninstall<OrderTalkEvent>();
-    mods::hook::uninstall<AlinkCheckEventRun>();
+    mods::hook::uninstall<ComIfGpEventRunCheck>();
     s_orderTalkEventHookInstalled = false;
     return MOD_OK;
 }
