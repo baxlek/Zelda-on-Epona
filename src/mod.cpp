@@ -1611,6 +1611,26 @@ static void update_zelda_talk_interaction() {
             return;
         }
 
+        // dMsgFlow_c::doFlow() unconditionally kills the flow it's given -- before ever
+        // attempting to open a message window -- whenever dMsgObject_isKillMessageFlag() reads
+        // true that tick (see its field_0x26/field_0x27 early-out). That flag lives on the
+        // engine-wide dMsgObject_c singleton (shared by every flow in the game, not just ours),
+        // gets set any time some other system aborts a conversation (pause menu opening, a
+        // scripted event starting, another NPC's flow being torn down, ...), and is only ever
+        // consumed/cleared by dMsgObject_c::_execute() -- which itself only runs while an actual
+        // message window process is alive. That means a stale flag set before we ever had a
+        // window open can never self-clear, silently killing our very first doFlow() tick (the
+        // exact doFlowResult=1/ended=true symptom seen in testing) without ever touching the
+        // group-resolution path at all. Clear it ourselves right before init() so a leftover kill
+        // request from something unrelated can't swallow our conversation before it starts.
+        dMsgObject_c* msgObjectClass = dMsgObject_getMsgObjectClass();
+        bool killFlagWasSet =
+            msgObjectClass != nullptr && msgObjectClass->isKillMessageFlagLocal();
+        if (killFlagWasSet) {
+            msgObjectClass->offKillMessageFlagLocal();
+        }
+        mods::log::info("zelda talk: kill-message flag before init() was {}", killFlagWasSet);
+
         s_zeldaTalkActive = true;
         s_zeldaMsgFlow.init(zelda, s_zeldaTalkNodeId, 0, nullptr);
         mods::log::info("zelda talk: flow init() called, status now talkNow={}",
