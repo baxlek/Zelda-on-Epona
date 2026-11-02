@@ -87,6 +87,10 @@ static constexpr bool kDiagnosticLoggingEnabled = true;
 
 static const char* kHoZeldaStageName = "HoZelda";
 
+// daHorse_c's profile (g_profile_HORSE) uses process List ID 4 - see
+// s_appliedListIdOverrideToZelda's comment below for why this matters.
+static constexpr u16 kHorseProcessListId = 4;
+
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
@@ -118,6 +122,27 @@ static bool s_appliedStageLayerToZelda = false;
 // bucket used by many unrelated actor types (arrows, boomerangs, mirrors, scene markers, etc.),
 // not something horse-specific, so reusing it for her carries no other behavioral meaning.
 static bool s_appliedGroupOverrideToZelda = false;
+
+// Root cause of the room-boundary disappearance (confirmed via a ground-truth diagnostic hook
+// directly on fopAc_Draw): HoZelda's profile uses process List ID 7 - the single largest, most
+// generic process list in the game, shared by the vast majority of ordinary room-placed NPCs,
+// enemies, and objects (480+ actor types use it, vs. only 16 for the horse's List ID 4). Each
+// room's first-time connect (dScnRoom_Create's objectSetCheck() loop in d_s_room.cpp) inserts
+// every one of that room's newly-placed actors into this same shared list, and that insertion
+// transiently removes the spawned Zelda actor from the per-list draw/execute iteration for 1-2
+// frames, even though her actor_status/actor_condition bits never change and fopAcM_setStageLayer
+// already moved her off any specific room's own layer. The horse's own List ID 4 is a much
+// smaller, non-room-actor list that is never touched by this per-room insertion, which is why she
+// alone disappears while riding through a boundary for the first time, and why turning around and
+// re-crossing the same boundary (no longer "first time" for that room) never reproduces it. Moving
+// her onto the horse's own list exempts her from the rebuild entirely, the same way matching the
+// horse's group exempted her from the Sus suspend-zone system above.
+static bool s_appliedListIdOverrideToZelda = false;
+
+static void apply_zelda_list_id_override(fopAc_ac_c* zelda) {
+    process_priority_class* priority = &((base_process_class*)zelda)->priority;
+    fpcPi_Change(priority, fpcLy_CURRENT_e, kHorseProcessListId, fpcPi_CURRENT_e);
+}
 
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
@@ -354,6 +379,7 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
     // mod_update() applies fopAcM_setStageLayer() once she's actually been created.
     s_appliedStageLayerToZelda = false;
     s_appliedGroupOverrideToZelda = false;
+    s_appliedListIdOverrideToZelda = false;
 }
 
 static void remove_spawned_zelda() {
@@ -1871,6 +1897,11 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     if (trackedZelda != nullptr && !s_appliedGroupOverrideToZelda) {
         trackedZelda->group = fopAc_UNK_GROUP_5_e;
         s_appliedGroupOverrideToZelda = true;
+    }
+
+    if (trackedZelda != nullptr && !s_appliedListIdOverrideToZelda) {
+        apply_zelda_list_id_override(trackedZelda);
+        s_appliedListIdOverrideToZelda = true;
     }
 
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
