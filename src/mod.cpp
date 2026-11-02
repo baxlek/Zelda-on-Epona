@@ -1716,6 +1716,13 @@ static void update_zelda_talk_interaction() {
 
         s_zeldaTalkActive = true;
         s_loggedEventRunCheckHookFired = false;
+        // Vanilla's own dAttention_c::execute() auto-releases lock-on once checkEventRun() reads
+        // true (see its "mAttnStatus = EState_NONE; ...; freeAttention();" branch), but that's
+        // one more mechanism relying on indirect cascading rather than something directly
+        // observed to work in this mod's testing. Release it ourselves right away too, so the
+        // L-target reticle on Zelda can't linger on screen for even a frame once the conversation
+        // starts, regardless of exactly why the vanilla path alone wasn't enough.
+        dComIfGp_getAttention()->freeAttention();
         // Use the synthetic "common flow" id here (see kZeldaTalkFlowId's comment) purely so the
         // engine's own group-resolution logic binds everything to our common message group (0)
         // correctly on its own. It doesn't correspond to any real vanilla flow, so init()'s own
@@ -1757,6 +1764,22 @@ static void update_zelda_talk_interaction() {
     static bool s_lastLoggedBusy = false;
     static int s_ticksSinceActivation = 0;
     bool busyBefore = dMsgObject_isTalkNowCheck();
+
+    // Keep lock-on released every tick, not just once at activation, in case anything reacquires
+    // it while we're talking (see the comment where this is first called, at conversation start).
+    dComIfGp_getAttention()->freeAttention();
+
+    // Temporary diagnostics: log the exact raw hardware trigger state dMsgObject_c::isSend() reads
+    // (mDoCPd_c::getTrigA/getTrigB) every tick it's nonzero, to directly confirm whether real
+    // button input is what's driving each setNodeIndex() transition logged by
+    // on_msg_flow_set_node_index_pre -- including the final page, which has been auto-closing
+    // without an apparent press even now that the player is fully frozen.
+    bool rawTrigA = mDoCPd_c::getTrigA(PAD_1);
+    bool rawTrigB = mDoCPd_c::getTrigB(PAD_1);
+    if (rawTrigA || rawTrigB) {
+        mods::log::info("zelda talk: raw hw trigger this tick (A={}, B={})", rawTrigA, rawTrigB);
+    }
+
     int doFlowResult = s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
     bool ended = s_zeldaMsgFlow.checkEndFlow();
     bool busyAfter = dMsgObject_isTalkNowCheck();
