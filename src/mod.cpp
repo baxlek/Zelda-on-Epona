@@ -1513,36 +1513,30 @@ static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*)
 // prevent, so zelda_talk_may_be_targeted() refuses to ever make her eligible without it.
 static bool s_orderTalkEventHookInstalled = false;
 
-DEFINE_HOOK(&dMsgObject_c::changeFlowGroupLocal, MsgObjectChangeFlowGroupLocal);
-
-static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* args, void*, void*) {
-    if (!s_zeldaTalkActive) {
-        return HOOK_CONTINUE;
-    }
-
-    // Our standalone Zelda-talk flow uses a mod-registered custom node id (>= 0x8000). The
-    // engine's own group-resolution logic (the function we're hooking) only auto-forces the
-    // common group (0) for *vanilla* flow ids in [3000, 0x8000) -- e.g. Midna's menu -- while
-    // custom ids instead inherit whatever message group happens to be active for the current
-    // stage. Since Zelda can be talked to from any field/stage while riding along, force the
-    // common group ourselves here, matching where we registered her greeting, mirroring exactly
-    // what the original function's own "common flow" branch would have done.
-    dMsgObject_c* self = mods::arg<dMsgObject_c*>(args, 0);
-
-    // Temporary diagnostic: confirms this hook actually fires and shows what group it's
-    // overriding away from, to rule out (or confirm) a hook-installation/resolution problem as
-    // the reason the group never actually ends up forced to common (0).
-    static s16 s_lastLoggedGroup = -2;
-    if (self->mCurrentGroupID != kZeldaTalkMessageGroup && self->mCurrentGroupID != s_lastLoggedGroup) {
-        mods::log::info("zelda talk: forcing msg group {} -> {}", self->mCurrentGroupID,
-            (int)kZeldaTalkMessageGroup);
-        s_lastLoggedGroup = self->mCurrentGroupID;
-    }
-
-    self->mFlowChk = 1;
-    dMsgObject_c::changeGroup(kZeldaTalkMessageGroup);
-    return HOOK_SKIP_ORIGINAL;
-}
+// dMsgFlow_c::init(partner, i_flowID, ...) does two separate things with i_flowID that both
+// matter for which BMG "group" our dialogue ends up resolving against: it calls
+// dMsgObject_changeFlowGroup(i_flowID), AND (TARGET_PC only) it independently re-binds whatever
+// dMsgObject_getMsgDtPtr() currently returns to flow_group(i_flowID) -- its own private helper,
+// not something we can hook. Both of those only ever treat i_flowID as "common" (forcing the
+// shared group 0, where we registered Zelda's conversation) when it falls in [3000, 0x8000); our
+// mod-registered node id (>= 0x8000, e.g. 32782) never qualifies, so passing it directly as
+// i_flowID made init()'s own unconditional second bind_resource() call re-bind the active message
+// data back to whatever group the *current stage* happens to use instead of our common group --
+// silently corrupting node resolution for the rest of the conversation (our message node then
+// got misread as a leftover/garbage vanilla "event" node, explaining the setNodeIndex(0) ->
+// setNodeIndex(0xFFFF) abandonment sequence seen in testing). We previously tried to patch around
+// this with a changeFlowGroupLocal hook forcing mCurrentGroupID to 0, but that only ever affected
+// the *first* bind (inside changeGroupLocal()); init()'s own second, independent bind_resource()
+// call always ran right after it with the wrong group regardless, so the hook never actually
+// fixed anything.
+//
+// Instead, we call init() with a synthetic id in that common-flow range so the engine's own
+// logic binds everything to group 0 correctly on its own (removing the need for that hook
+// entirely), then immediately redirect to our real starting node once init() is done. Since this
+// id intentionally doesn't match any real vanilla flow label, init()'s own getInitNodeIndex()
+// lookup for it fails and marks the flow "ended" (checkEndFlow() reads true); we clear that back
+// off before redirecting.
+static constexpr u16 kZeldaTalkFlowId = 0x7000;
 
 DEFINE_HOOK(&dMsgFlow_c::setNodeIndex, MsgFlowSetNodeIndex);
 
@@ -1655,13 +1649,15 @@ static void update_zelda_talk_interaction() {
         mods::log::info("zelda talk: kill-message flag before init() was {}", killFlagWasSet);
 
         s_zeldaTalkActive = true;
-        s_zeldaMsgFlow.init(zelda, s_zeldaTalkNodeId, 0, nullptr);
-        // Temporary diagnostic: init() itself calls setNodeIndex() on our starting node right
-        // away, before doFlow() ever runs. If that first resolution already fails (e.g. the
-        // group-resolution path is wrong after all, or the node/message data itself is
-        // malformed), checkEndFlow() will already read true here, before our very first doFlow()
-        // tick -- telling us the failure is in init()'s own node resolution rather than anything
-        // doFlow()/nodeProc() does afterward.
+        // Use the synthetic "common flow" id here (see kZeldaTalkFlowId's comment) purely so the
+        // engine's own group-resolution logic binds everything to our common message group (0)
+        // correctly on its own. It doesn't correspond to any real vanilla flow, so init()'s own
+        // getInitNodeIndex() lookup for it fails and marks the flow ended; clear that back off
+        // and jump straight to our actual registered starting node now that the message group is
+        // correctly bound.
+        s_zeldaMsgFlow.init(zelda, kZeldaTalkFlowId, 0, nullptr);
+        s_zeldaMsgFlow.field_0x26 = 0;
+        s_zeldaMsgFlow.setNodeIndex(s_zeldaTalkNodeId, nullptr);
         mods::log::info(
             "zelda talk: flow init() called, status now talkNow={}, already ended={}",
             dMsgObject_isTalkNowCheck(), s_zeldaMsgFlow.checkEndFlow());
@@ -1929,18 +1925,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
-    result = mods::hook::add_pre<MsgObjectChangeFlowGroupLocal>(
-        on_msg_object_change_flow_group_local_pre);
-    if (result != MOD_OK) {
-        mods::log::warn(
-            "failed to hook message group resolution, talking to Zelda while dismounted will be "
-            "unavailable: {}",
-            (int)result);
-    }
-    // Temporary diagnostic: confirms this specific (member-function) hook actually installed, to
-    // rule out a resolution failure as the reason her dialogue window never opens.
-    mods::log::info("zelda talk: message group hook install result = {}", (int)result);
-
     result = mods::hook::add_pre<MsgFlowSetNodeIndex>(on_msg_flow_set_node_index_pre);
     if (result != MOD_OK) {
         mods::log::warn("failed to hook flow node-index diagnostics: {}", (int)result);
@@ -2112,7 +2096,6 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
-    mods::hook::uninstall<MsgObjectChangeFlowGroupLocal>();
     mods::hook::uninstall<MsgFlowSetNodeIndex>();
     mods::hook::uninstall<OrderTalkEvent>();
     s_orderTalkEventHookInstalled = false;
