@@ -64,6 +64,21 @@ static bool auto_target_enemies_enabled() {
     return value;
 }
 
+static ConfigVarHandle g_cvarEponaFollowDismounted = 0;
+
+static bool epona_follow_dismounted_enabled() {
+    bool value = false;
+    if (g_cvarEponaFollowDismounted == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarEponaFollowDismounted, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
+static bool epona_follow_active() {
+    return auto_target_enemies_enabled() && epona_follow_dismounted_enabled();
+}
+
 static constexpr bool kDiagnosticLoggingEnabled = false;
 
 static const char* kHoZeldaStageName = "HoZelda";
@@ -117,9 +132,6 @@ static bool is_spawned_zelda_riding_solo() {
 
 static bool s_hideSpawnedZeldaInCutscene = false;
 
-// True while the spawned Zelda's current bow target sits behind her rather than in front, which
-// means she should aim/fire with her body turned 180 degrees from the usual forward-facing pose.
-// Only ever set while dual-riding; solo-riding Zelda never fires backwards.
 static bool s_zeldaBackwardBowTarget = false;
 
 static bool is_title_screen() {
@@ -348,9 +360,6 @@ static void on_hozelda_set_matrix_post(ModContext*, void* args, void*, void*) {
     }
 
     if (dualRide && zelda->mBowMode != 0 && s_zeldaBackwardBowTarget) {
-        // Firing at a target behind her: turn her whole body 180 degrees from the usual
-        // forward-facing pose so the normal firing animation points backwards instead. Her seat
-        // position on the horse (current.pos) is left untouched, only the facing changes.
         s_turnStandBlend = 0.0f;
         zelda->shape_angle.y = (s16)(zelda->shape_angle.y + 0x8000);
         zelda->current.angle.y = zelda->shape_angle.y;
@@ -435,29 +444,16 @@ struct HoZeldaTargetSearch {
     f32 bestDistSq;
 };
 
-// fopAcM_seenActorAngleY() returns how far (0..0x8000) an actor sits from i_actorA's forward
-// facing direction. Mirroring that value around the halfway point (0x8000) yields the
-// equivalent "how far from directly behind" angle, letting the same cone-width checks used for
-// forward targeting be reused to search for targets behind Zelda.
 static s32 mirror_seen_angle_behind(s32 seenAngleY) {
     return 0x8000 - seenAngleY;
 }
 
-// Measures how far i_targetPos sits (0..0x8000) from the i_refAngleY facing direction, as seen
-// from i_fromPos. Unlike fopAcM_seenActorAngleY(), the facing angle is passed in explicitly
-// instead of being read from an actor's own shape_angle.y -- this keeps targeting decisions based
-// on a stable reference even while Zelda's own shape_angle.y is snapped 180 degrees for backward
-// firing (reading her own, already-flipped shape_angle.y back as the "forward" direction would
-// make her flip-flop between facings every frame).
 static s32 seen_angle_from_yaw(const cXyz& i_fromPos, const cXyz& i_targetPos, s16 i_refAngleY) {
     s16 targetAngle = cLib_targetAngleY(&i_fromPos, &i_targetPos);
     targetAngle -= i_refAngleY;
     return abs(targetAngle);
 }
 
-// The yaw Zelda's targeting should be measured against: the horse's facing while dual-riding
-// (stable, unaffected by her own backward-firing snap), or her own facing otherwise (e.g.
-// solo-riding, where she isn't necessarily aligned with the horse).
 static s16 zelda_targeting_reference_angle_y(const daHoZelda_c* zelda) {
     daHorse_c* horse = dComIfGp_getHorseActor();
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
@@ -507,8 +503,6 @@ static void* judge_nearest_enemy(fopAc_ac_c* i_actor, void* i_data) {
     return NULL;
 }
 
-// i_behind selects targets roughly opposite Zelda's forward facing (for firing backwards while
-// dual-riding) instead of the normal forward-facing cone.
 static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     HoZeldaTargetSearch search = {};
     search.self = zelda;
@@ -610,11 +604,11 @@ static bool is_dismounted_player_tg_hit(daHorse_c* horse) {
 
 static bool s_allowRearForDismountedPlayerHit = false;
 
-static constexpr u16 kAnmHorseStand = 20;       // ANM_HS_STAND: rearing "stand" pose
-static constexpr u16 kAnmHorseExcitement = 8;   // ANM_HS_EXCITEMENT: spooked-by-enemy reaction
-static constexpr u16 kAnmHorseExcitement2 = 9;  // ANM_HS_EXCITEMENT_2: same, alternate clip
-static constexpr u16 kAnmHorseWait01 = 27;      // ANM_HS_WAIT_01: normal idle pose
-static constexpr u16 kAnmHorseLash = 14;        // ANM_HS_LASH: neck-toss "startled" reaction
+static constexpr u16 kAnmHorseStand = 20;
+static constexpr u16 kAnmHorseExcitement = 8;
+static constexpr u16 kAnmHorseExcitement2 = 9;
+static constexpr u16 kAnmHorseWait01 = 27;
+static constexpr u16 kAnmHorseLash = 14;
 
 static void set_anm_auto_target(daHoZelda_c* zelda) {
     u16 anm_idx[3];
@@ -666,8 +660,6 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
                                                   zelda_targeting_reference_angle_y(zelda));
     }
 
-    // When the current target is behind Zelda, use the mirrored angle so the same cone-width
-    // checks below apply to "how far from directly behind" instead of "how far from forward".
     int bow_mode_angleY =
         s_zeldaBackwardBowTarget ? mirror_seen_angle_behind(target_seen_angleY) : target_seen_angleY;
 
@@ -1037,6 +1029,119 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+static constexpr f32 kEponaFollowDistance = 1000.0f;
+static constexpr f32 kEponaFollowRampRange = 300.0f;
+
+static constexpr f32 kEponaFollowMaxStickValue = 0.8f;
+
+static constexpr f32 kEponaFollowMaxDistance = 5000.0f;
+
+static constexpr f32 kEponaFollowResumeMargin = 60.0f;
+
+static constexpr f32 kEponaFollowStillDistance = 650.0f;
+
+static bool s_eponaFollowApproaching = true;
+
+static bool s_eponaFollowFacing = true;
+
+static constexpr s16 kEponaFollowIdleTurnMax = 0x600;
+static constexpr s16 kEponaFollowIdleTurnMin = 0x40;
+
+static constexpr s16 kEponaFollowAlignmentCone = 0x3000;
+
+static bool epona_follow_should_engage(daHorse_c* horse, daPy_py_c* player) {
+    if (horse == nullptr || player == nullptr || !epona_follow_active()) {
+        s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
+        return false;
+    }
+    if (player->checkHorseRide()) {
+        s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
+        return false;
+    }
+    if (horse->checkHorseDemoMode() || horse->checkHorseCallWait() || dComIfGp_event_runCheck()) {
+        return false;
+    }
+    if (horse->checkRodeoMode() || horse->checkStateFlg0(daHorse_c::FLG0_UNK_10000000)) {
+        return false;
+    }
+    if (horse->current.pos.absXZ(player->current.pos) > kEponaFollowMaxDistance) {
+        s_eponaFollowApproaching = true;
+        s_eponaFollowFacing = true;
+        return false;
+    }
+    return true;
+}
+
+DEFINE_HOOK(&daHorse_c::setStickData, HorseSetStickData);
+
+static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (!epona_follow_should_engage(horse, player)) {
+        return;
+    }
+
+    s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    horse->m_padStickAngleY = bearing;
+
+    f32 distXZ = horse->current.pos.absXZ(player->current.pos);
+    if (s_eponaFollowApproaching) {
+        if (distXZ <= kEponaFollowDistance) {
+            s_eponaFollowApproaching = false;
+        }
+    } else if (distXZ > kEponaFollowDistance + kEponaFollowResumeMargin) {
+        s_eponaFollowApproaching = true;
+    }
+
+    if (s_eponaFollowFacing) {
+        if (distXZ <= kEponaFollowStillDistance) {
+            s_eponaFollowFacing = false;
+        }
+    } else if (distXZ > kEponaFollowStillDistance + kEponaFollowResumeMargin) {
+        s_eponaFollowFacing = true;
+    }
+
+    s16 facingError = bearing - horse->shape_angle.y;
+    bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
+                   (facingError >= -kEponaFollowAlignmentCone);
+    if (!s_eponaFollowApproaching || !aligned) {
+        horse->m_padStickValue = 0.0f;
+        return;
+    }
+
+    f32 magnitude = (distXZ - kEponaFollowDistance) / kEponaFollowRampRange;
+    horse->m_padStickValue = magnitude > kEponaFollowMaxStickValue ? kEponaFollowMaxStickValue : magnitude;
+
+    horse->onMoveAccept();
+}
+
+static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (!epona_follow_should_engage(horse, player)) {
+        return;
+    }
+
+    if (!s_eponaFollowFacing) {
+        return;
+    }
+
+    s16 bearing = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    s16 facingError = bearing - horse->shape_angle.y;
+    bool aligned = (facingError <= kEponaFollowAlignmentCone) &&
+                   (facingError >= -kEponaFollowAlignmentCone);
+    if (s_eponaFollowApproaching && aligned) {
+        return;
+    }
+
+    cLib_addCalcAngleS(&horse->shape_angle.y, bearing, 5, kEponaFollowIdleTurnMax,
+                        kEponaFollowIdleTurnMin);
+    horse->current.angle.y = horse->shape_angle.y;
+    horse->initHorseMtx();
+}
+
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
@@ -1224,6 +1329,10 @@ static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval,
     }
 }
 
+static bool is_epona_follow_control_disabled(ModContext*, void*) {
+    return !auto_target_enemies_enabled();
+}
+
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_TOGGLE;
@@ -1249,6 +1358,22 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
+
+    UiControlDesc followControl = UI_CONTROL_DESC_INIT;
+    followControl.kind = UI_CONTROL_TOGGLE;
+    followControl.label = "Epona follows when dismounted";
+    followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
+                              "face him and walking over at a brisk walk (never a full gallop) "
+                              "once he's more than about 1000 units away (half the clawshot's "
+                              "maximum range), stopping at that distance. She keeps turning to "
+                              "face him down to 750 units, then holds completely still. If he "
+                              "gets more than about 5000 units away, she gives up following "
+                              "until he comes back closer. Requires "
+                              "\"Zelda active in combat\" to be on.";
+    followControl.binding = UI_BINDING_CONFIG_VAR;
+    followControl.config_var = g_cvarEponaFollowDismounted;
+    followControl.is_disabled = is_epona_follow_control_disabled;
+    svc_ui->pane_add_control(mod_ctx, panel, &followControl, nullptr);
     return MOD_OK;
 }
 
@@ -1374,6 +1499,21 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "failed to hook Epona's execute() for the spooked-anim safety net: {}", (int)result);
     }
 
+    result = mods::hook::add_post<HorseSetStickData>(on_horse_set_stick_data_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's stick-data setter, she won't follow Link when he's "
+            "dismounted: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_follow_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the dismounted-follow facing correction: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1433,6 +1573,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to register autoTargetEnemies option, defaulting to auto-targeting off: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc followCvarDesc = CONFIG_VAR_DESC_INIT;
+    followCvarDesc.name = "eponaFollowDismounted";
+    followCvarDesc.type = CONFIG_VAR_BOOL;
+    followCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &followCvarDesc, &g_cvarEponaFollowDismounted);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register eponaFollowDismounted option, defaulting to following off: {}",
             (int)result);
     }
 
