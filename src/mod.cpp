@@ -1767,7 +1767,46 @@ static void update_zelda_talk_interaction() {
 
     // Keep lock-on released every tick, not just once at activation, in case anything reacquires
     // it while we're talking (see the comment where this is first called, at conversation start).
-    dComIfGp_getAttention()->freeAttention();
+    dAttention_c* attention = dComIfGp_getAttention();
+    attention->freeAttention();
+
+    // Temporary diagnostics: dAttention_c::execute()'s own checkEventRun()-gated branch should
+    // force mAttnStatus back to EState_NONE and keep LockonTarget(0) permanently NULL every tick
+    // our hook reports checkEventRun()==true -- meaning our freeAttention() call above should be
+    // entirely redundant with vanilla behavior, and the reticle should vanish (after at most a few
+    // fade-out frames) regardless. If it's still locked onto Zelda right after we called
+    // freeAttention() ourselves, that's direct proof something is re-acquiring the lock later the
+    // same frame (i.e. d_attention.cpp's own call to checkEventRun() isn't seeing our forced
+    // value, mirroring the exact same failure mode daAlink_c::checkEventRun() had).
+    static bool s_lastLoggedStillLocked = false;
+    bool stillLockedOnZelda = zelda != nullptr && attention->LockonTruth() &&
+        attention->LockonTarget(0) == zelda;
+    if (stillLockedOnZelda != s_lastLoggedStillLocked) {
+        mods::log::info(
+            "zelda talk: lock-on state right after freeAttention() this tick: stillLockedOnZelda={}",
+            stillLockedOnZelda);
+        s_lastLoggedStillLocked = stillLockedOnZelda;
+    }
+
+    // Our checkEventRun() hook and daAlink_c::setStickData() post-hook only block the player's own
+    // movement/combat processing and the real event system's own menu-gating logic -- but neither
+    // actually stops the Start button or D-pad (item wheel / map) triggers from reaching the pause
+    // menu's own FSM, nor the C-stick from reaching the camera, since both read straight off the
+    // raw mDoCPd_c pad struct rather than going through anything we've hooked. Opening the pause
+    // menu, item wheel, or map screen mid-conversation corrupts the UI and has been observed to
+    // softlock the game (and SIGSEGV on a subsequent reset), so zero out exactly those raw fields
+    // on the shared pad struct every tick while talking: C-stick (camera), Start, and the D-pad
+    // directions. A/B/X/Y/Z/L/R are deliberately left untouched so dMsgObject_c::isSend() (which
+    // reads the same struct) still sees real A/B presses to advance/end the conversation.
+    interface_of_controller_pad& pad = mDoCPd_c::getCpadInfo(PAD_1);
+    pad.mCStickPosX = 0.0f;
+    pad.mCStickPosY = 0.0f;
+    pad.mCStickValue = 0.0f;
+    pad.mCStickAngle = 0;
+    constexpr u32 kBlockedButtonMask =
+        PAD_BUTTON_START | PAD_BUTTON_UP | PAD_BUTTON_DOWN | PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT;
+    pad.mPressedButtonFlags &= ~kBlockedButtonMask;
+    pad.mButtonFlags &= ~kBlockedButtonMask;
 
     // Temporary diagnostics: log the exact raw hardware trigger state dMsgObject_c::isSend() reads
     // (mDoCPd_c::getTrigA/getTrigB) every tick it's nonzero, to directly confirm whether real
@@ -1806,6 +1845,7 @@ static void update_zelda_talk_interaction() {
         s_zeldaTalkActive = false;
         s_lastLoggedBusy = false;
         s_ticksSinceActivation = 0;
+        s_lastLoggedStillLocked = false;
     }
 }
 
