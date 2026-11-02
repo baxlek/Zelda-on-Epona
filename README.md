@@ -172,7 +172,7 @@ archery duel, where she rides alone) is never touched or duplicated.
 > waiting wherever he left her. While it's on, and Link is more than about 1000 units away (half the
 > clawshot's maximum range), she first turns in place to face him, then walks toward him at a brisk walk once
 > she's roughly facing his direction, stopping once she closes to that distance. She keeps turning to face
-> him down to 500 units, then holds completely still -- no walking, no turning -- so Link can walk up and
+> him down to 750 units, then holds completely still -- no walking, no turning -- so Link can walk up and
 > mount her without her fidgeting. She deliberately never breaks into a full gallop while following: riderless
 > horses always brake with the game's hard "quick stop" deceleration rather than coasting gently, so chasing
 > at full speed made her brake look like an unintended skid every time she closed the distance. If Link

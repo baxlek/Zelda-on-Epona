@@ -1069,7 +1069,7 @@ static constexpr f32 kEponaFollowRampRange = 300.0f;
 // than a gentle coast), braking from that speed looked like an unintended "skid". Capping well
 // below 1.0 keeps her at a brisk walk/jog at most, so she never reaches that run animation and a
 // quick stop from a walk doesn't look like a skid.
-static constexpr f32 kEponaFollowMaxStickValue = 0.4f;
+static constexpr f32 kEponaFollowMaxStickValue = 0.7f;
 
 // Beyond this distance Epona gives up following entirely (as if the feature were off) rather than
 // keep trying to close in from arbitrarily far away.
@@ -1085,7 +1085,7 @@ static constexpr f32 kEponaFollowResumeMargin = 60.0f;
 // Distance within which Epona holds completely still -- no walking, no turning -- so Link can
 // walk up and mount her without her fidgeting. Between this and kEponaFollowDistance she's still
 // close enough that walking isn't warranted, but she keeps turning to face him.
-static constexpr f32 kEponaFollowStillDistance = 500.0f;
+static constexpr f32 kEponaFollowStillDistance = 750.0f;
 
 // Whether Epona is currently in her "approaching" phase, as opposed to stopped/settled within the
 // follow distance. See kEponaFollowResumeMargin above for why this needs to be sticky across
@@ -1446,7 +1446,7 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
                               "face him and walking over at a brisk walk (never a full gallop) "
                               "once he's more than about 1000 units away (half the clawshot's "
                               "maximum range), stopping at that distance. She keeps turning to "
-                              "face him down to 500 units, then holds completely still. If he "
+                              "face him down to 750 units, then holds completely still. If he "
                               "gets more than about 5000 units away, she gives up following "
                               "until he comes back closer. Requires "
                               "\"Zelda active in combat\" to be on.";
