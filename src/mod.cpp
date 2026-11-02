@@ -10,6 +10,7 @@
 #include "mods/svc/log.hpp"
 #include "mods/svc/ui.h"
 
+#include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
 #include "d/actor/d_a_e_sh.h"
@@ -1508,6 +1509,27 @@ static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*)
     return HOOK_CONTINUE;
 }
 
+DEFINE_HOOK(&daAlink_c::checkEventRun, AlinkCheckEventRun);
+
+// Real NPC dialogue is always backed by a genuine dComIfGp_event_order() event, and
+// daAlink_c::checkEventRun() (== dComIfGp_event_runCheck() || checkPlayerDemoMode()) is the single
+// check nearly all of the player's own movement/combat/item code gates on to decide whether the
+// player is "busy" with a conversation/cutscene and should ignore normal input. Our Zelda
+// conversation deliberately never goes through that event pipeline (see the fopAcM_orderTalkEvent
+// hook above), so without this, nothing ever tells the player's own code a conversation is
+// happening at all, and they remain completely free to move/fight/etc. the whole time her message
+// window is open. Force checkEventRun() to report true while our flow is active so the player
+// freezes exactly the way they would for any other NPC's dialogue.
+static HookAction on_alink_check_event_run_pre(ModContext*, void*, void*, void* retval) {
+    if (s_zeldaTalkActive) {
+        if (retval != nullptr) {
+            *static_cast<BOOL*>(retval) = true;
+        }
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
 // Whether the above hook is actually installed. If it failed to install for some reason, making
 // Zelda targetable/talkable via fopAc_AttnFlag_TALK_e would reintroduce the softlock it exists to
 // prevent, so zelda_talk_may_be_targeted() refuses to ever make her eligible without it.
@@ -1705,6 +1727,14 @@ static void update_zelda_talk_interaction() {
     s_ticksSinceActivation++;
 
     if (ended) {
+        // The flow object itself considers the conversation over as soon as the last node is
+        // abandoned (setNodeIndex(0xFFFF)), but that alone never tells the underlying
+        // dMsgObject_c singleton to actually tear down -- remove() is what sets its
+        // kill-message flag (dMsgObject_onKillMessageFlag()), which is what its own _execute()
+        // reads to finally close the window and drop back to idle. Without this,
+        // dMsgObject_isTalkNowCheck() ("busy") stays stuck true forever even though our flow has
+        // already moved on, leaving the UI looking like the conversation never ended.
+        s_zeldaMsgFlow.remove();
         s_zeldaTalkActive = false;
         s_lastLoggedBusy = false;
         s_ticksSinceActivation = 0;
@@ -1950,6 +1980,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn("failed to hook flow node-index diagnostics: {}", (int)result);
     }
 
+    result = mods::hook::add_pre<AlinkCheckEventRun>(on_alink_check_event_run_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook player event-run check, player will be able to move/fight during "
+            "Zelda's dialogue: {}",
+            (int)result);
+    }
+
     result = register_zelda_talk_flow();
     if (result != MOD_OK) {
         mods::log::warn(
@@ -2118,6 +2156,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<ArrowExecute>();
     mods::hook::uninstall<MsgFlowSetNodeIndex>();
     mods::hook::uninstall<OrderTalkEvent>();
+    mods::hook::uninstall<AlinkCheckEventRun>();
     s_orderTalkEventHookInstalled = false;
     return MOD_OK;
 }
