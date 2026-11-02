@@ -1060,18 +1060,18 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 // both turned out to be far too small a fraction of the engine's real distance scale.
 static constexpr f32 kEponaFollowDistance = 1000.0f;
 
-// Ceiling on the forward stick magnitude we ever feed her while following (1.0 = full speed). The
-// key defense against the earlier "skidding" stop is giving her plenty of room to decelerate
-// gradually as she nears Link, not capping her top speed -- see kEponaFollowSpeedPeakDistance.
-static constexpr f32 kEponaFollowMaxStickValue = 1.0f;
+// Ceiling on the forward stick magnitude we ever feed her while following. Giving her a long
+// runway to decelerate (kEponaFollowSpeedPeakDistance) wasn't enough on its own: at 1.0 she still
+// hit the native run/dash animation and its abrupt stop, skidding regardless of distance. Capping
+// below full speed is what actually keeps the stop smooth; 1.0 reintroduces the skid.
+static constexpr f32 kEponaFollowMaxStickValue = 0.8f;
 
 // Distance at which Epona's commanded speed ramps all the way up to kEponaFollowMaxStickValue.
-// Beyond this (and up to kEponaFollowMaxDistance below) she keeps approaching at full speed. The
+// Beyond this (and up to kEponaFollowMaxDistance below) she keeps approaching at that speed. The
 // long run from kEponaFollowDistance up to here gives her plenty of room to decelerate smoothly
-// as Link gets closer again, rather than needing to brake hard from full speed right at the
-// standoff distance -- riderless horses always use the game's hard/quick stopping_deceleration
-// rate rather than a gentle coast, so that abrupt a stop from full speed looked like an
-// unintended "skid".
+// as Link gets closer again, rather than needing to brake hard right at the standoff distance --
+// riderless horses always use the game's hard/quick stopping_deceleration rate rather than a
+// gentle coast, so an abrupt stop from speed looked like an unintended "skid".
 static constexpr f32 kEponaFollowSpeedPeakDistance = 3500.0f;
 
 // Beyond this distance Epona gives up following entirely (as if the feature were off) rather than
@@ -1453,12 +1453,12 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
                               "face him and walking over once he's more than about 1000 units "
                               "away (half the clawshot's maximum range), stopping at that "
-                              "distance. The farther away he is, the faster she closes in, "
-                              "reaching full speed by about 3500 units away so she has room to "
-                              "slow back down smoothly as she approaches. She keeps turning to "
-                              "face him down to 750 units, then holds completely still. If he "
-                              "gets more than about 5000 units away, she gives up following "
-                              "until he comes back closer. Requires "
+                              "distance. The farther away he is, the faster she closes in (never "
+                              "a full gallop), reaching her top speed by about 3500 units away so "
+                              "she has room to slow back down smoothly as she approaches. She "
+                              "keeps turning to face him down to 750 units, then holds completely "
+                              "still. If he gets more than about 5000 units away, she gives up "
+                              "following until he comes back closer. Requires "
                               "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;
     followControl.config_var = g_cvarEponaFollowDismounted;
