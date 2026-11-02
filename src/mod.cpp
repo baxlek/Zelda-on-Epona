@@ -195,6 +195,7 @@ struct CutsceneDiagnosticsSnapshot {
     bool hideSpawnedZelda = false;
     bool hasSpawnedZelda = false;
     bool zeldaDrewLastFrame = false;
+    bool horseDrewLastFrame = false;
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
@@ -214,6 +215,7 @@ struct CutsceneDiagnosticsSnapshot {
                hideSpawnedZelda == other.hideSpawnedZelda &&
                hasSpawnedZelda == other.hasSpawnedZelda &&
                zeldaDrewLastFrame == other.zeldaDrewLastFrame &&
+               horseDrewLastFrame == other.horseDrewLastFrame &&
                demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
                zeldaRoomNo == other.zeldaRoomNo && horseRoomNo == other.horseRoomNo &&
@@ -228,7 +230,8 @@ struct CutsceneDiagnosticsSnapshot {
 static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* trackedZelda,
                                                  bool titleScreen, bool inScriptedCutscene,
                                                  bool storyHoZeldaActive,
-                                                 bool zeldaDrewLastFrame) {
+                                                 bool zeldaDrewLastFrame,
+                                                 bool horseDrewLastFrame) {
     if (!kDiagnosticLoggingEnabled) {
         return;
     }
@@ -243,6 +246,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
     snapshot.hideSpawnedZelda = s_hideSpawnedZeldaInCutscene;
     snapshot.hasSpawnedZelda = s_hasSpawnedZelda;
     snapshot.zeldaDrewLastFrame = zeldaDrewLastFrame;
+    snapshot.horseDrewLastFrame = horseDrewLastFrame;
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
@@ -270,13 +274,14 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
         "cutscene diagnostics: stage='{}' event='{}' demoArc='{}' cutName='{}' demoStaffId={} "
         "room={} zeldaRoom={} horseRoom={} layer={} horseDemoMode={} titleScreen={} "
         "storyHoZeldaActive={} inScriptedCutscene={} alwaysHiddenCutscene={} "
-        "showInCutscenesToggle={} hideSpawnedZelda={} hasSpawnedZelda={} zeldaDrewLastFrame={}",
+        "showInCutscenesToggle={} hideSpawnedZelda={} hasSpawnedZelda={} zeldaDrewLastFrame={} "
+        "horseDrewLastFrame={}",
         snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
         snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.horseRoomNo,
         snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
         snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
         snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda,
-        snapshot.zeldaDrewLastFrame);
+        snapshot.zeldaDrewLastFrame, snapshot.horseDrewLastFrame);
 }
 
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -352,6 +357,19 @@ static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
 }
 
 DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);
+DEFINE_HOOK(&daHorse_c::draw, HorseDraw);
+
+// Diagnostic-only, mirrors s_zeldaDrewThisFrame: determines whether the horse's own draw() ever
+// gets skipped the same way Zelda's does during a room-boundary crossing, to tell apart a
+// generic room-connect-based draw suppression (which would affect the horse too) from something
+// specific to the spawned HoZelda actor.
+static bool s_horseDrewThisFrame = false;
+
+static HookAction on_horse_draw_pre(ModContext*, void* args, void*, void*) {
+    s_horseDrewThisFrame = true;
+    (void)args;
+    return HOOK_CONTINUE;
+}
 
 static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
@@ -1485,6 +1503,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
                          (int)result);
     }
 
+    result = mods::hook::add_pre<HorseDraw>(on_horse_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook horse draw, diagnostic logging will be incomplete: {}",
+                         (int)result);
+    }
+
     result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1710,6 +1734,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     // during the previous frame's draw pass), then reset for this frame's tracking.
     bool zeldaDrewLastFrame = s_zeldaDrewThisFrame;
     s_zeldaDrewThisFrame = false;
+    bool horseDrewLastFrame = s_horseDrewThisFrame;
+    s_horseDrewThisFrame = false;
 
     if (!s_observedInitialHorseState) {
         s_observedInitialHorseState = true;
@@ -1799,7 +1825,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     log_cutscene_diagnostics_if_changed(horse, trackedZelda, is_title_screen(),
                                          inScriptedCutscene, storyHoZeldaActive,
-                                         zeldaDrewLastFrame);
+                                         zeldaDrewLastFrame, horseDrewLastFrame);
 
     return MOD_OK;
 }
@@ -1808,6 +1834,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<ActorDelete>();
     mods::hook::uninstall<HorseCallSubstance>();
+    mods::hook::uninstall<HorseDraw>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
