@@ -1658,6 +1658,15 @@ static void update_zelda_talk_interaction() {
         s_zeldaMsgFlow.init(zelda, kZeldaTalkFlowId, 0, nullptr);
         s_zeldaMsgFlow.field_0x26 = 0;
         s_zeldaMsgFlow.setNodeIndex(s_zeldaTalkNodeId, nullptr);
+        // dMsgObject_c::waitProc() only opens the message window once either a "talk camera" has
+        // actually focused on the speaker (dComIfGp_checkCameraAttentionStatus(..., 4)) or this
+        // camera-cancel flag is set; the normal fopAcM_orderTalkEvent()/event pipeline sets up
+        // that talk-camera focus for us, but our flow bypasses that pipeline entirely, so
+        // waitProc() would otherwise stall forever waiting for a camera transition that never
+        // happens. Force the same bypass vanilla "demo" messages use (see
+        // dMsgObject_c::setMessageIndexDemo()) so the window opens immediately; the engine clears
+        // this flag back off on its own once the conversation's cleanup runs.
+        dMsgObject_onCameraCancelFlag();
         mods::log::info(
             "zelda talk: flow init() called, status now talkNow={}, already ended={}",
             dMsgObject_isTalkNowCheck(), s_zeldaMsgFlow.checkEndFlow());
