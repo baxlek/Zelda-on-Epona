@@ -190,6 +190,7 @@ struct CutsceneDiagnosticsSnapshot {
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
+    int zeldaRoomNo = -1;
     char eventName[64] = {0};
     char demoArcName[64] = {0};
     char cutName[64] = {0};
@@ -204,6 +205,7 @@ struct CutsceneDiagnosticsSnapshot {
                hideSpawnedZelda == other.hideSpawnedZelda &&
                hasSpawnedZelda == other.hasSpawnedZelda && demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
+               zeldaRoomNo == other.zeldaRoomNo &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
                std::strcmp(cutName, other.cutName) == 0 &&
@@ -212,8 +214,8 @@ struct CutsceneDiagnosticsSnapshot {
     bool operator!=(const CutsceneDiagnosticsSnapshot& other) const { return !(*this == other); }
 };
 
-static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScreen,
-                                                 bool inScriptedCutscene,
+static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* trackedZelda,
+                                                 bool titleScreen, bool inScriptedCutscene,
                                                  bool storyHoZeldaActive) {
     if (!kDiagnosticLoggingEnabled) {
         return;
@@ -231,6 +233,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
+    snapshot.zeldaRoomNo = trackedZelda != nullptr ? fopAcM_GetRoomNo(trackedZelda) : -1;
     SafeStringCopyTruncate(snapshot.stageName, dComIfGp_getStartStageName());
     SafeStringCopyTruncate(snapshot.eventName, dComIfGp_getEventManager().getRunEventName());
     SafeStringCopyTruncate(snapshot.demoArcName, dStage_roomControl_c::getDemoArcName());
@@ -251,14 +254,14 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
 
     mods::log::info(
         "cutscene diagnostics: stage='{}' event='{}' demoArc='{}' cutName='{}' demoStaffId={} "
-        "room={} layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} "
+        "room={} zeldaRoom={} layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} "
         "inScriptedCutscene={} alwaysHiddenCutscene={} showInCutscenesToggle={} "
         "hideSpawnedZelda={} hasSpawnedZelda={}",
         snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
-        snapshot.demoStaffId, snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode,
-        snapshot.titleScreen, snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene,
-        snapshot.alwaysHiddenCutscene, snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda,
-        snapshot.hasSpawnedZelda);
+        snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.layerNo,
+        snapshot.horseDemoMode, snapshot.titleScreen, snapshot.storyHoZeldaActive,
+        snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
+        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
 }
 
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -579,7 +582,7 @@ static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
 
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+    if (!is_spawned_zelda(zelda)) {
         return;
     }
 
@@ -588,7 +591,21 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    force_reins_to_normal_pos(zelda, horse);
+    // Unlike daHorse_c (which refreshes its own room number every tick from ground collision in
+    // setRoomInfo()), HoZelda's room number is only ever set once at spawn time and never
+    // refreshed afterward. Since she's always co-located with the horse, her stored room number
+    // goes stale as soon as the horse crosses into a new room while she keeps riding along -
+    // this causes the engine's room-based visibility/activation system to stop drawing her model
+    // for the brief window before some other event happens to correct it, even though her actor
+    // is never deleted. Keep her room number in sync with the horse's every tick to prevent this.
+    s8 horseRoomNo = fopAcM_GetRoomNo(horse);
+    if (fopAcM_GetRoomNo(zelda) != horseRoomNo) {
+        fopAcM_SetRoomNo(zelda, horseRoomNo);
+    }
+
+    if (s_hideSpawnedZeldaInCutscene) {
+        force_reins_to_normal_pos(zelda, horse);
+    }
 }
 
 DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);
@@ -1722,8 +1739,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         s_hideSpawnedZeldaInCutscene = false;
     }
 
-    log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
-                                         storyHoZeldaActive);
+    log_cutscene_diagnostics_if_changed(horse, trackedZelda, is_title_screen(),
+                                         inScriptedCutscene, storyHoZeldaActive);
 
     return MOD_OK;
 }
