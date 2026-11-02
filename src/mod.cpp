@@ -191,6 +191,7 @@ struct CutsceneDiagnosticsSnapshot {
     int roomNo = -1;
     int layerNo = -1;
     int zeldaRoomNo = -1;
+    int horseRoomNo = -1;
     char eventName[64] = {0};
     char demoArcName[64] = {0};
     char cutName[64] = {0};
@@ -205,7 +206,7 @@ struct CutsceneDiagnosticsSnapshot {
                hideSpawnedZelda == other.hideSpawnedZelda &&
                hasSpawnedZelda == other.hasSpawnedZelda && demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
-               zeldaRoomNo == other.zeldaRoomNo &&
+               zeldaRoomNo == other.zeldaRoomNo && horseRoomNo == other.horseRoomNo &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
                std::strcmp(cutName, other.cutName) == 0 &&
@@ -234,6 +235,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
     snapshot.zeldaRoomNo = trackedZelda != nullptr ? fopAcM_GetRoomNo(trackedZelda) : -1;
+    snapshot.horseRoomNo = fopAcM_GetRoomNo(horse);
     SafeStringCopyTruncate(snapshot.stageName, dComIfGp_getStartStageName());
     SafeStringCopyTruncate(snapshot.eventName, dComIfGp_getEventManager().getRunEventName());
     SafeStringCopyTruncate(snapshot.demoArcName, dStage_roomControl_c::getDemoArcName());
@@ -254,13 +256,13 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
 
     mods::log::info(
         "cutscene diagnostics: stage='{}' event='{}' demoArc='{}' cutName='{}' demoStaffId={} "
-        "room={} zeldaRoom={} layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} "
-        "inScriptedCutscene={} alwaysHiddenCutscene={} showInCutscenesToggle={} "
-        "hideSpawnedZelda={} hasSpawnedZelda={}",
+        "room={} zeldaRoom={} horseRoom={} layer={} horseDemoMode={} titleScreen={} "
+        "storyHoZeldaActive={} inScriptedCutscene={} alwaysHiddenCutscene={} "
+        "showInCutscenesToggle={} hideSpawnedZelda={} hasSpawnedZelda={}",
         snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
-        snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.layerNo,
-        snapshot.horseDemoMode, snapshot.titleScreen, snapshot.storyHoZeldaActive,
-        snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
+        snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.horseRoomNo,
+        snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
+        snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
         snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
 }
 
@@ -598,8 +600,14 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     // this causes the engine's room-based visibility/activation system to stop drawing her model
     // for the brief window before some other event happens to correct it, even though her actor
     // is never deleted. Keep her room number in sync with the horse's every tick to prevent this.
+    //
+    // The horse's own ground-collision room lookup can transiently report -1 (no resolvable
+    // room) while crossing certain boundary geometry; daHorse_c::setRoomInfo() guards against
+    // that for its tevStr.room_no field (falling back to the current stay room) but NOT for its
+    // own fopAcM_SetRoomNo() call, so fopAcM_GetRoomNo(horse) can itself briefly read -1. Never
+    // propagate that invalid value onto Zelda - keep her last known-good room instead.
     s8 horseRoomNo = fopAcM_GetRoomNo(horse);
-    if (fopAcM_GetRoomNo(zelda) != horseRoomNo) {
+    if (horseRoomNo >= 0 && fopAcM_GetRoomNo(zelda) != horseRoomNo) {
         fopAcM_SetRoomNo(zelda, horseRoomNo);
     }
 
