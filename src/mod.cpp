@@ -1613,9 +1613,24 @@ static void update_zelda_talk_interaction() {
         return;
     }
 
-    s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
-    if (s_zeldaMsgFlow.checkEndFlow()) {
+    // Temporary diagnostics: doFlow() runs every tick while active, so only log on an actual
+    // state change (the busy flag flipping, or the flow reporting it ended) to avoid spamming the
+    // log every frame, while still showing exactly how far the flow gets each tick it changes.
+    static bool s_lastLoggedBusy = false;
+    bool busyBefore = dMsgObject_isTalkNowCheck();
+    int doFlowResult = s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
+    bool ended = s_zeldaMsgFlow.checkEndFlow();
+    bool busyAfter = dMsgObject_isTalkNowCheck();
+    if (busyAfter != s_lastLoggedBusy || ended) {
+        mods::log::info(
+            "zelda talk: doFlow tick (doFlowResult={}, busy {}->{}, hasMsgProcess={}, ended={})",
+            doFlowResult, busyBefore, busyAfter, s_zeldaMsgFlow.getMsg() != nullptr, ended);
+        s_lastLoggedBusy = busyAfter;
+    }
+
+    if (ended) {
         s_zeldaTalkActive = false;
+        s_lastLoggedBusy = false;
     }
 }
 
