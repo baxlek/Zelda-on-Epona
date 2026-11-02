@@ -15,6 +15,7 @@
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
 #include "d/actor/d_a_player.h"
+#include "d/actor/d_a_suspend.h"
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
@@ -79,12 +80,69 @@ static bool epona_follow_active() {
     return auto_target_enemies_enabled() && epona_follow_dismounted_enabled();
 }
 
-static constexpr bool kDiagnosticLoggingEnabled = false;
+// Temporarily enabled to gather evidence for the Zelda model unload/reload investigation at
+// non-cutscene area boundaries (e.g. Faron Field <-> Kakariko Gorge, southern <-> northern Faron
+// Woods). Only logs on state changes, so overhead/noise is minimal.
+static constexpr bool kDiagnosticLoggingEnabled = true;
 
 static const char* kHoZeldaStageName = "HoZelda";
 
+// daHorse_c's profile (g_profile_HORSE) uses process List ID 4 - see
+// s_appliedListIdOverrideToZelda's comment below for why this matters.
+static constexpr u16 kHorseProcessListId = 4;
+
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
+
+// Diagnostic-only: tracks whether daHoZelda_c::draw() actually ran for the spawned Zelda during
+// the current frame, to determine whether her brief disappearance at room boundaries is caused
+// by her draw() call itself being skipped (vs. her model being drawn but not visible for some
+// other reason). Reset to false at the top of each mod_update() call and set true by the
+// HoZeldaDraw pre-hook.
+static bool s_zeldaDrewThisFrame = false;
+
+// Actor creation (svc_actor->create_actor_from_name -> fopAcM_create) is queued via
+// fpcSCtRq_Request and only actually constructs the actor on a later management tick (see
+// fpcM_IsCreating()), so the actor cannot be looked up and reparented to the stage layer (or have
+// its group overridden - see s_appliedGroupOverrideToZelda below) in the same call that spawned
+// it. This flag lets mod_update() apply fopAcM_setStageLayer() exactly once, as soon as
+// find_spawned_zelda() first reports a fully-created actor.
+static bool s_appliedStageLayerToZelda = false;
+
+// HoZelda's profile places her in fopAc_NPC_e (group 4), the same group ordinary background NPCs
+// use. daSus_c::check() (the engine's per-room "Sus" suspend-zone system, a performance
+// optimization that disables execute()/draw() for background NPCs far from the player) explicitly
+// exempts fopAc_PLAYER_e (1) and fopAc_UNK_GROUP_5_e (5) actors from ever being suspended - the
+// horse's own profile uses group 5, which is why she's immune but Zelda isn't, even though she's
+// always actively riding along. A post-hook on daSus_c::check() (SusCheck) already clears the
+// resulting status flag for her every frame as a first line of defense, but since she's
+// constantly attached to the horse rather than being a stationary background character, directly
+// matching the horse's group is a more robust fix: it keeps her out of the Sus system entirely,
+// rather than relying on reacting to it every frame. Group 5 is a generic "misc utility actor"
+// bucket used by many unrelated actor types (arrows, boomerangs, mirrors, scene markers, etc.),
+// not something horse-specific, so reusing it for her carries no other behavioral meaning.
+static bool s_appliedGroupOverrideToZelda = false;
+
+// Root cause of the room-boundary disappearance (confirmed via a ground-truth diagnostic hook
+// directly on fopAc_Draw): HoZelda's profile uses process List ID 7 - the single largest, most
+// generic process list in the game, shared by the vast majority of ordinary room-placed NPCs,
+// enemies, and objects (480+ actor types use it, vs. only 16 for the horse's List ID 4). Each
+// room's first-time connect (dScnRoom_Create's objectSetCheck() loop in d_s_room.cpp) inserts
+// every one of that room's newly-placed actors into this same shared list, and that insertion
+// transiently removes the spawned Zelda actor from the per-list draw/execute iteration for 1-2
+// frames, even though her actor_status/actor_condition bits never change and fopAcM_setStageLayer
+// already moved her off any specific room's own layer. The horse's own List ID 4 is a much
+// smaller, non-room-actor list that is never touched by this per-room insertion, which is why she
+// alone disappears while riding through a boundary for the first time, and why turning around and
+// re-crossing the same boundary (no longer "first time" for that room) never reproduces it. Moving
+// her onto the horse's own list exempts her from the rebuild entirely, the same way matching the
+// horse's group exempted her from the Sus suspend-zone system above.
+static bool s_appliedListIdOverrideToZelda = false;
+
+static void apply_zelda_list_id_override(fopAc_ac_c* zelda) {
+    process_priority_class* priority = &((base_process_class*)zelda)->priority;
+    fpcPi_Change(priority, fpcLy_CURRENT_e, kHorseProcessListId, fpcPi_CURRENT_e);
+}
 
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
@@ -177,12 +235,20 @@ struct CutsceneDiagnosticsSnapshot {
     bool showInCutscenesToggle = false;
     bool hideSpawnedZelda = false;
     bool hasSpawnedZelda = false;
+    bool zeldaDrewLastFrame = false;
+    bool horseDrewLastFrame = false;
+    bool zeldaFopAcDrawCalled = false;
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
+    int zeldaRoomNo = -1;
+    int horseRoomNo = -1;
+    u32 zeldaActorStatusAtFopAcDraw = 0;
+    u32 zeldaActorConditionAtFopAcDraw = 0;
     char eventName[64] = {0};
     char demoArcName[64] = {0};
     char cutName[64] = {0};
+    char stageName[64] = {0};
 
     bool operator==(const CutsceneDiagnosticsSnapshot& other) const {
         return horseDemoMode == other.horseDemoMode && titleScreen == other.titleScreen &&
@@ -191,18 +257,31 @@ struct CutsceneDiagnosticsSnapshot {
                alwaysHiddenCutscene == other.alwaysHiddenCutscene &&
                showInCutscenesToggle == other.showInCutscenesToggle &&
                hideSpawnedZelda == other.hideSpawnedZelda &&
-               hasSpawnedZelda == other.hasSpawnedZelda && demoStaffId == other.demoStaffId &&
+               hasSpawnedZelda == other.hasSpawnedZelda &&
+               zeldaDrewLastFrame == other.zeldaDrewLastFrame &&
+               horseDrewLastFrame == other.horseDrewLastFrame &&
+               zeldaFopAcDrawCalled == other.zeldaFopAcDrawCalled &&
+               demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
+               zeldaRoomNo == other.zeldaRoomNo && horseRoomNo == other.horseRoomNo &&
+               zeldaActorStatusAtFopAcDraw == other.zeldaActorStatusAtFopAcDraw &&
+               zeldaActorConditionAtFopAcDraw == other.zeldaActorConditionAtFopAcDraw &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
-               std::strcmp(cutName, other.cutName) == 0;
+               std::strcmp(cutName, other.cutName) == 0 &&
+               std::strcmp(stageName, other.stageName) == 0;
     }
     bool operator!=(const CutsceneDiagnosticsSnapshot& other) const { return !(*this == other); }
 };
 
-static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScreen,
-                                                 bool inScriptedCutscene,
-                                                 bool storyHoZeldaActive) {
+static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* trackedZelda,
+                                                 bool titleScreen, bool inScriptedCutscene,
+                                                 bool storyHoZeldaActive,
+                                                 bool zeldaDrewLastFrame,
+                                                 bool horseDrewLastFrame,
+                                                 bool zeldaFopAcDrawCalled,
+                                                 u32 zeldaActorStatusAtFopAcDraw,
+                                                 u32 zeldaActorConditionAtFopAcDraw) {
     if (!kDiagnosticLoggingEnabled) {
         return;
     }
@@ -216,9 +295,17 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     snapshot.showInCutscenesToggle = show_zelda_in_cutscenes();
     snapshot.hideSpawnedZelda = s_hideSpawnedZeldaInCutscene;
     snapshot.hasSpawnedZelda = s_hasSpawnedZelda;
+    snapshot.zeldaDrewLastFrame = zeldaDrewLastFrame;
+    snapshot.horseDrewLastFrame = horseDrewLastFrame;
+    snapshot.zeldaFopAcDrawCalled = zeldaFopAcDrawCalled;
+    snapshot.zeldaActorStatusAtFopAcDraw = zeldaActorStatusAtFopAcDraw;
+    snapshot.zeldaActorConditionAtFopAcDraw = zeldaActorConditionAtFopAcDraw;
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
+    snapshot.zeldaRoomNo = trackedZelda != nullptr ? fopAcM_GetRoomNo(trackedZelda) : -1;
+    snapshot.horseRoomNo = fopAcM_GetRoomNo(horse);
+    SafeStringCopyTruncate(snapshot.stageName, dComIfGp_getStartStageName());
     SafeStringCopyTruncate(snapshot.eventName, dComIfGp_getEventManager().getRunEventName());
     SafeStringCopyTruncate(snapshot.demoArcName, dStage_roomControl_c::getDemoArcName());
     if (snapshot.demoStaffId >= 0) {
@@ -237,14 +324,19 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     s_lastLoggedSnapshot = snapshot;
 
     mods::log::info(
-        "cutscene diagnostics: event='{}' demoArc='{}' cutName='{}' demoStaffId={} room={} "
-        "layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} inScriptedCutscene={} "
-        "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={} "
-        "hasSpawnedZelda={}",
-        snapshot.eventName, snapshot.demoArcName, snapshot.cutName, snapshot.demoStaffId,
-        snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
+        "cutscene diagnostics: stage='{}' event='{}' demoArc='{}' cutName='{}' demoStaffId={} "
+        "room={} zeldaRoom={} horseRoom={} layer={} horseDemoMode={} titleScreen={} "
+        "storyHoZeldaActive={} inScriptedCutscene={} alwaysHiddenCutscene={} "
+        "showInCutscenesToggle={} hideSpawnedZelda={} hasSpawnedZelda={} zeldaDrewLastFrame={} "
+        "horseDrewLastFrame={} zeldaFopAcDrawCalled={} zeldaActorStatusAtFopAcDraw={:#x} "
+        "zeldaActorConditionAtFopAcDraw={:#x}",
+        snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
+        snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.horseRoomNo,
+        snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
         snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
-        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
+        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda,
+        snapshot.zeldaDrewLastFrame, snapshot.horseDrewLastFrame, snapshot.zeldaFopAcDrawCalled,
+        snapshot.zeldaActorStatusAtFopAcDraw, snapshot.zeldaActorConditionAtFopAcDraw);
 }
 
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -276,6 +368,18 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
 
     s_spawnedZeldaId = newId;
     s_hasSpawnedZelda = true;
+
+    // HoZelda is created attached to the room layer she spawned in (per room_num above), so the
+    // room-based actor culling system deletes her the moment that room's process unloads (e.g.
+    // crossing into an adjacent room/area). daHorse_c avoids this entirely by reparenting itself
+    // to the stage-wide layer via fopAcM_setStageLayer() at the end of its own create() (see
+    // d_a_horse.cpp), which keeps Epona alive across room boundaries without any respawn logic.
+    // We want to do the same for the spawned Zelda, but her actor doesn't exist yet here --
+    // creation is only queued (fpcSCtRq_Request) and finishes on a later management tick -- so
+    // mod_update() applies fopAcM_setStageLayer() once she's actually been created.
+    s_appliedStageLayerToZelda = false;
+    s_appliedGroupOverrideToZelda = false;
+    s_appliedListIdOverrideToZelda = false;
 }
 
 static void remove_spawned_zelda() {
@@ -299,21 +403,84 @@ static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
         (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId) {
         daHorse_c* horse = dComIfGp_getHorseActor();
         mods::log::warn(
-            "spawned HoZelda actor id {} is being deleted via fopAcM_delete; event='{}' "
-            "horseDemoMode={} room={} layer={}",
-            (int)s_spawnedZeldaId, dComIfGp_getEventManager().getRunEventName(),
+            "spawned HoZelda actor id {} is being deleted via fopAcM_delete; stage='{}' "
+            "event='{}' horseDemoMode={} room={} layer={}",
+            (int)s_spawnedZeldaId, dComIfGp_getStartStageName(),
+            dComIfGp_getEventManager().getRunEventName(),
             horse != nullptr && horse->checkHorseDemoMode(), dComIfGp_roomControl_getStayNo(),
             dComIfG_play_c::getLayerNo(0));
     }
     return HOOK_CONTINUE;
 }
 
+// Root cause of Zelda's model briefly unloading/reloading at certain room boundaries (e.g.
+// Faron Field <-> Kakariko Gorge, southern <-> northern Faron Woods): the engine places invisible
+// "Sus" (suspend) zone actors (daSus_c) in some rooms to stop background NPCs from executing or
+// drawing while far from the player, purely as a performance optimization. daSus_c::check() runs
+// once per actor per frame (from inside fopAc_Execute(), before that function's own gate check)
+// and sets/clears status flag fopAcStts_UNK_0x20000000_e based on the actor's position relative
+// to any Sus zones registered for its current room; fopAc_Execute() and fopAc_Draw() both skip
+// the actor entirely (without even invoking its own execute()/draw() virtuals) whenever that flag
+// is set. daSus_c::check() explicitly exempts fopAc_PLAYER_e (1) and fopAc_UNK_GROUP_5_e (5)
+// actors - the horse's profile uses group 5, so it's naturally immune - but HoZelda's profile
+// uses fopAc_NPC_e (4), so she gets caught by the same zones real background NPCs were meant for,
+// even though she's actively riding along with the player. Unlike the horse, there is no per-tick
+// position-based opt-out for her, so the fix force-clears the flag for the spawned Zelda actor
+// specifically, immediately after each check, before fopAc_Execute's gate re-reads it.
+DEFINE_HOOK(static_cast<void (*)(fopAc_ac_c*)>(&daSus_c::check), SusCheck);
+
+static void on_sus_check_post(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (is_spawned_zelda(actor)) {
+        fopAcM_OffStatus(actor, fopAcStts_UNK_0x20000000_e);
+    }
+}
+
 DEFINE_HOOK(&daHorse_c::callHorseSubstance, HorseCallSubstance);
+DEFINE_HOOK(&daHorse_c::draw, HorseDraw);
+
+// Diagnostic-only, mirrors s_zeldaDrewThisFrame: determines whether the horse's own draw() ever
+// gets skipped the same way Zelda's does during a room-boundary crossing, to tell apart a
+// generic room-connect-based draw suppression (which would affect the horse too) from something
+// specific to the spawned HoZelda actor.
+static bool s_horseDrewThisFrame = false;
+
+static HookAction on_horse_draw_pre(ModContext*, void* args, void*, void*) {
+    s_horseDrewThisFrame = true;
+    (void)args;
+    return HOOK_CONTINUE;
+}
 
 static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, void*) {
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     if (is_spawned_zelda_attached(horse)) {
         horse->setZeldaActor(nullptr);
+    }
+    return HOOK_CONTINUE;
+}
+
+// Ground-truth diagnostic: fopAc_Draw() is the per-actor dispatcher that decides whether to call
+// an actor's own draw() virtual at all each frame (daHoZelda_c::draw() is only ever invoked from
+// inside it, gated on moveApproval()/actor_status). Every previously attempted fix has targeted a
+// specific status bit that can make this gate fail (fopAcStts_UNK_0x20000000_e via daSus_c zones,
+// fopAcStts_NODRAW_e via d_camera.cpp's hideActor()) without resolving the user's symptom, which
+// means either a different, not-yet-catalogued status bit is involved, or fopAc_Draw is never
+// being invoked for her at all that frame (e.g. she's transiently absent from whatever process
+// iteration normally reaches her). This hook records the actor_status/actor_condition seen by
+// fopAc_Draw itself, and whether it ran for her at all, so the next diagnostic log can show
+// definitively which of those two cases is actually happening instead of guessing further.
+DEFINE_HOOK_SYMBOL("fopAc_Draw", int(void*), FopAcDrawDiag);
+
+static bool s_zeldaFopAcDrawCalledThisFrame = false;
+static u32 s_zeldaActorStatusAtFopAcDraw = 0;
+static u32 s_zeldaActorConditionAtFopAcDraw = 0;
+
+static HookAction on_fopac_draw_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (is_spawned_zelda(actor)) {
+        s_zeldaFopAcDrawCalledThisFrame = true;
+        s_zeldaActorStatusAtFopAcDraw = actor->actor_status;
+        s_zeldaActorConditionAtFopAcDraw = actor->actor_condition;
     }
     return HOOK_CONTINUE;
 }
@@ -515,6 +682,46 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
 }
 
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
+DEFINE_HOOK(&daHoZelda_c::draw, HoZeldaDraw);
+
+// Unlike daHorse_c (which refreshes its own room number every tick from ground collision in
+// setRoomInfo()), HoZelda's room number is only ever set once at spawn time and never refreshed
+// afterward. Since she's always co-located with the horse, her stored room number goes stale as
+// soon as the horse crosses into a new room while she keeps riding along - this causes the
+// engine's room-based visibility/activation system to stop drawing her model for the brief
+// window before some other event happens to correct it, even though her actor is never deleted.
+// Keep her room number in sync with the horse's to prevent this.
+//
+// The horse's own ground-collision room lookup can transiently report -1 (no resolvable room)
+// while crossing certain boundary geometry; daHorse_c::setRoomInfo() guards against that for its
+// tevStr.room_no field (falling back to the current stay room) but NOT for its own
+// fopAcM_SetRoomNo() call, so fopAcM_GetRoomNo(horse) can itself briefly read -1. Never propagate
+// that invalid value onto Zelda - keep her last known-good room instead.
+static void sync_zelda_room_to_horse(daHoZelda_c* zelda, daHorse_c* horse) {
+    s8 horseRoomNo = fopAcM_GetRoomNo(horse);
+    if (horseRoomNo >= 0 && fopAcM_GetRoomNo(zelda) != horseRoomNo) {
+        fopAcM_SetRoomNo(zelda, horseRoomNo);
+    }
+}
+
+static HookAction on_hozelda_draw_pre(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda)) {
+        return HOOK_CONTINUE;
+    }
+
+    s_zeldaDrewThisFrame = true;
+
+    // Last line of defense: re-sync Zelda's room number to the horse's immediately before she's
+    // drawn, in case something else mutated it to a stale/invalid value later in the same frame
+    // than the HoZeldaExecute post-hook (see sync_zelda_room_to_horse's comment for why this
+    // matters).
+    daHorse_c* horse = dComIfGp_getHorseActor();
+    if (horse != nullptr) {
+        sync_zelda_room_to_horse(zelda, horse);
+    }
+    return HOOK_CONTINUE;
+}
 
 static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
@@ -554,7 +761,7 @@ static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
 
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+    if (!is_spawned_zelda(zelda)) {
         return;
     }
 
@@ -563,7 +770,11 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    force_reins_to_normal_pos(zelda, horse);
+    sync_zelda_room_to_horse(zelda, horse);
+
+    if (s_hideSpawnedZeldaInCutscene) {
+        force_reins_to_normal_pos(zelda, horse);
+    }
 }
 
 DEFINE_HOOK(&daHorse_c::setReinPosHandSubstance, HorseSetReinPosHandSubstance);
@@ -1392,10 +1603,30 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
                          (int)result);
     }
 
+    result = mods::hook::add_post<SusCheck>(on_sus_check_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook daSus_c::check, Zelda's model may briefly disappear at some room "
+            "boundaries: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_pre<HorseCallSubstance>(on_horse_call_substance_pre);
     if (result != MOD_OK) {
         mods::log::warn("failed to hook horse call, grass whistle may behave oddly: {}",
                          (int)result);
+    }
+
+    result = mods::hook::add_pre<HorseDraw>(on_horse_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook horse draw, diagnostic logging will be incomplete: {}",
+                         (int)result);
+    }
+
+    result = mods::hook::add_pre<FopAcDrawDiag>(on_fopac_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook fopAc_Draw, diagnostic logging will be incomplete: {}", (int)result);
     }
 
     result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
@@ -1425,6 +1656,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook HoZelda execute post, Epona's reins may follow her hand while she's "
             "hidden in cutscenes: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<HoZeldaDraw>(on_hozelda_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda draw, her model may briefly disappear at some room "
+            "boundaries: {}",
             (int)result);
     }
 
@@ -1611,6 +1850,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 MOD_EXPORT ModResult mod_update(ModError*) {
     daHorse_c* horse = dComIfGp_getHorseActor();
 
+    // Capture whether Zelda's draw() ran at any point since the last mod_update() call (i.e.
+    // during the previous frame's draw pass), then reset for this frame's tracking.
+    bool zeldaDrewLastFrame = s_zeldaDrewThisFrame;
+    s_zeldaDrewThisFrame = false;
+    bool horseDrewLastFrame = s_horseDrewThisFrame;
+    s_horseDrewThisFrame = false;
+    bool zeldaFopAcDrawCalledLastFrame = s_zeldaFopAcDrawCalledThisFrame;
+    s_zeldaFopAcDrawCalledThisFrame = false;
+    u32 zeldaActorStatusAtFopAcDraw = s_zeldaActorStatusAtFopAcDraw;
+    u32 zeldaActorConditionAtFopAcDraw = s_zeldaActorConditionAtFopAcDraw;
+
     if (!s_observedInitialHorseState) {
         s_observedInitialHorseState = true;
         s_safeToModifyEpona = (horse == nullptr);
@@ -1638,6 +1888,21 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     bool hadSpawnedZeldaBeforeRefresh = s_hasSpawnedZelda;
     s32 roomNo = dComIfGp_roomControl_getStayNo();
     fopAc_ac_c* trackedZelda = find_spawned_zelda();
+
+    if (trackedZelda != nullptr && !s_appliedStageLayerToZelda) {
+        fopAcM_setStageLayer(trackedZelda);
+        s_appliedStageLayerToZelda = true;
+    }
+
+    if (trackedZelda != nullptr && !s_appliedGroupOverrideToZelda) {
+        trackedZelda->group = fopAc_UNK_GROUP_5_e;
+        s_appliedGroupOverrideToZelda = true;
+    }
+
+    if (trackedZelda != nullptr && !s_appliedListIdOverrideToZelda) {
+        apply_zelda_list_id_override(trackedZelda);
+        s_appliedListIdOverrideToZelda = true;
+    }
 
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
         s_zeldaLostInSameRoom = (roomNo == s_lastKnownZeldaRoomNo);
@@ -1692,8 +1957,12 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         s_hideSpawnedZeldaInCutscene = false;
     }
 
-    log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
-                                         storyHoZeldaActive);
+    log_cutscene_diagnostics_if_changed(horse, trackedZelda, is_title_screen(),
+                                         inScriptedCutscene, storyHoZeldaActive,
+                                         zeldaDrewLastFrame, horseDrewLastFrame,
+                                         zeldaFopAcDrawCalledLastFrame,
+                                         zeldaActorStatusAtFopAcDraw,
+                                         zeldaActorConditionAtFopAcDraw);
 
     return MOD_OK;
 }
@@ -1701,10 +1970,14 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
     mods::hook::uninstall<ActorDelete>();
+    mods::hook::uninstall<SusCheck>();
     mods::hook::uninstall<HorseCallSubstance>();
+    mods::hook::uninstall<HorseDraw>();
+    mods::hook::uninstall<FopAcDrawDiag>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
+    mods::hook::uninstall<HoZeldaDraw>();
     mods::hook::uninstall<HorseSetReinPosHandSubstance>();
     mods::hook::uninstall<HoZeldaSetAnm>();
     mods::hook::uninstall<HoZeldaSetNeckAngle>();
