@@ -1427,25 +1427,58 @@ static ModResult register_zelda_talk_flow() {
         MESSAGE_LANGUAGE_JAPANESE,
     };
 
-    mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
-    builder.text("It's nice to ride along like this, Link. Thank you for bringing me with you.");
+    // Registers i_text as a single message page, for every supported language, and returns its
+    // message id. The underlying RegisteredMessage handles are kept alive for the mod's lifetime
+    // in s_zeldaTalkMessages (register_message()'s returned handle owns the BMG entry).
+    auto register_page = [&](std::string_view i_text, MessageId& o_id) -> ModResult {
+        mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
+        builder.text(i_text);
 
-    std::vector<mods::flow::MessageVariant> variants;
-    variants.reserve(kAllLanguages.size());
-    for (MessageLanguage language : kAllLanguages) {
-        variants.push_back(builder.build(language));
-    }
+        std::vector<mods::flow::MessageVariant> variants;
+        variants.reserve(kAllLanguages.size());
+        for (MessageLanguage language : kAllLanguages) {
+            variants.push_back(builder.build(language));
+        }
 
-    auto message = mods::flow::register_message(kZeldaTalkMessageGroup, variants);
-    if (!message) {
-        return message.result();
+        auto message = mods::flow::register_message(kZeldaTalkMessageGroup, variants);
+        if (!message) {
+            return message.result();
+        }
+        o_id = message.id();
+        s_zeldaTalkMessages.push_back(std::move(message));
+        return MOD_OK;
+    };
+
+    // Placeholder dialogue: a short, clearly-labeled multi-page conversation, mainly so the
+    // interaction (and the faux lip-sync that plays alongside it) has something real to test
+    // in-game. Each page is its own node so the player pages through it with the action button
+    // exactly like any other NPC conversation, and the last page's node points at the special
+    // mods::flow::kEnd sentinel, which naturally closes the message window and hands control
+    // back to normal gameplay once the player dismisses it -- no extra closing logic needed.
+    MessageId page1Id = 0;
+    MessageId page2Id = 0;
+    MessageId page3Id = 0;
+    ModResult result = register_page(
+        "Oh! I didn't expect you to come speak with me like this, Link.", page1Id);
+    if (result == MOD_OK) {
+        result = register_page(
+            "This is only a placeholder conversation for now, but it proves you can talk to me "
+            "anytime you're on foot nearby, just by locking onto me first.",
+            page2Id);
     }
-    MessageId greetingId = message.id();
-    s_zeldaTalkMessages.push_back(std::move(message));
+    if (result == MOD_OK) {
+        result = register_page(
+            "Go on, press that button once more whenever you're ready to end our chat.", page3Id);
+    }
+    if (result != MOD_OK) {
+        return result;
+    }
 
     mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
-    const auto greeting = graph.add_message(greetingId).next(mods::flow::kEnd);
-    s_zeldaTalkNodeId = greeting;
+    const auto page3 = graph.add_message(page3Id).next(mods::flow::kEnd);
+    const auto page2 = graph.add_message(page2Id).next(page3);
+    const auto page1 = graph.add_message(page1Id).next(page2);
+    s_zeldaTalkNodeId = page1;
 
     s_zeldaTalkGraph = graph.commit();
     return s_zeldaTalkGraph.result();
