@@ -1060,14 +1060,19 @@ static void on_horse_execute_post(ModContext*, void* args, void*, void*) {
 // both turned out to be far too small a fraction of the engine's real distance scale.
 static constexpr f32 kEponaFollowDistance = 1000.0f;
 
-// Ceiling on the forward stick magnitude we ever feed her while following. Forward speed target
-// is normalMaxSpeed * padStickValue^2, and daHorse_c::setMoveAnime() blends into a full running
-// "dash burst" animation once that target crosses fastwalk_to_run_rate; combined with riderless
-// horses always using the hard/quick m_hio->m.stopping_deceleration rate to slow down (rather
-// than a gentle coast), braking from that speed looked like an unintended "skid". Capping well
-// below 1.0 keeps her at a brisk walk/jog at most, so she never reaches that run animation and a
-// quick stop from a walk doesn't look like a skid.
-static constexpr f32 kEponaFollowMaxStickValue = 0.7f;
+// Ceiling on the forward stick magnitude we ever feed her while following (1.0 = full speed). The
+// key defense against the earlier "skidding" stop is giving her plenty of room to decelerate
+// gradually as she nears Link, not capping her top speed -- see kEponaFollowSpeedPeakDistance.
+static constexpr f32 kEponaFollowMaxStickValue = 1.0f;
+
+// Distance at which Epona's commanded speed ramps all the way up to kEponaFollowMaxStickValue.
+// Beyond this (and up to kEponaFollowMaxDistance below) she keeps approaching at full speed. The
+// long run from kEponaFollowDistance up to here gives her plenty of room to decelerate smoothly
+// as Link gets closer again, rather than needing to brake hard from full speed right at the
+// standoff distance -- riderless horses always use the game's hard/quick stopping_deceleration
+// rate rather than a gentle coast, so that abrupt a stop from full speed looked like an
+// unintended "skid".
+static constexpr f32 kEponaFollowSpeedPeakDistance = 3500.0f;
 
 // Beyond this distance Epona gives up following entirely (as if the feature were off) rather than
 // keep trying to close in from arbitrarily far away.
@@ -1178,10 +1183,11 @@ static void on_horse_set_stick_data_post(ModContext*, void* args, void*, void*) 
     }
 
     // Scale her commanded speed by how far over the standoff distance Link currently is, relative
-    // to the full span out to the give-up distance -- the farther away he is (up to the point she
-    // gives up entirely), the harder she tries to close the gap, up to kEponaFollowMaxStickValue.
-    f32 magnitude = (distXZ - kEponaFollowDistance) / (kEponaFollowMaxDistance - kEponaFollowDistance) *
-                     kEponaFollowMaxStickValue;
+    // to the span out to kEponaFollowSpeedPeakDistance -- the farther away he is, the harder she
+    // tries to close the gap, up to kEponaFollowMaxStickValue once she's that far out. Beyond the
+    // peak distance (and up to the give-up distance) she holds at full commanded speed.
+    f32 magnitude = (distXZ - kEponaFollowDistance) /
+                    (kEponaFollowSpeedPeakDistance - kEponaFollowDistance) * kEponaFollowMaxStickValue;
     horse->m_padStickValue = magnitude > kEponaFollowMaxStickValue ? kEponaFollowMaxStickValue : magnitude;
 
     // Without a real rider, daHorse_c::procWait() unconditionally zeroes any speed
@@ -1445,12 +1451,13 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     followControl.kind = UI_CONTROL_TOGGLE;
     followControl.label = "Epona follows when dismounted";
     followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
-                              "face him and walking over (never a full gallop) once he's more "
-                              "than about 1000 units away (half the clawshot's maximum range), "
-                              "stopping at that distance. The farther away he is, the faster she "
-                              "closes in, up to a brisk walk. She keeps turning to face him down "
-                              "to 750 units, then holds completely still. If he gets more than "
-                              "about 5000 units away, she gives up following "
+                              "face him and walking over once he's more than about 1000 units "
+                              "away (half the clawshot's maximum range), stopping at that "
+                              "distance. The farther away he is, the faster she closes in, "
+                              "reaching full speed by about 3500 units away so she has room to "
+                              "slow back down smoothly as she approaches. She keeps turning to "
+                              "face him down to 750 units, then holds completely still. If he "
+                              "gets more than about 5000 units away, she gives up following "
                               "until he comes back closer. Requires "
                               "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;

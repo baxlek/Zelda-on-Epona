@@ -172,14 +172,14 @@ archery duel, where she rides alone) is never touched or duplicated.
 > waiting wherever he left her. While it's on, and Link is more than about 1000 units away (half the
 > clawshot's maximum range), she first turns in place to face him, then walks toward him once she's roughly
 > facing his direction, stopping once she closes to that distance. Her approach speed scales with how far
-> away Link is -- barely a crawl right past the 1000-unit mark, ramping up to a brisk walk (never a full
-> gallop) as he approaches the 5000-unit give-up distance below. She keeps turning to face him down to 750
-> units, then holds completely still -- no walking, no turning -- so Link can walk up and mount her without
-> her fidgeting. She deliberately never breaks into a full gallop while following: riderless horses always
-> brake with the game's hard "quick stop" deceleration rather than coasting gently, so chasing at full speed
-> made her brake look like an unintended skid every time she closed the distance. If Link somehow gets more
-> than about 5000 units away, she gives up following entirely until he comes back within range. Since this
-> only makes sense alongside her other combat behavior, it requires the **Zelda active in
+> away Link is -- barely a crawl right past the 1000-unit mark, ramping up to full speed by about 3500 units
+> away. She keeps turning to face him down to 750 units, then holds completely still -- no walking, no
+> turning -- so Link can walk up and mount her without her fidgeting. The long, gradual ramp (rather than a
+> hard speed cap) is what keeps her from "skidding" to a stop: riderless horses always brake with the game's
+> hard "quick stop" deceleration rather than coasting gently, so without enough room to slow down naturally
+> as she approaches, even a moderate top speed braked abruptly and looked like an unintended skid. If Link
+> somehow gets more than about 5000 units away, she gives up following entirely until he comes back within
+> range. Since this only makes sense alongside her other combat behavior, it requires the **Zelda active in
 > combat** toggle above to also be on, and is dimmed out in the Mods window otherwise. Rather than driving her
 > position directly, the mod feeds her the same "virtual stick input" real player steering (and the
 > horse-call grass whistle) already use, so her walk/trot animation, acceleration, turning, and wall collision
