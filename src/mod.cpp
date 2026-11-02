@@ -1544,6 +1544,24 @@ static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* a
     return HOOK_SKIP_ORIGINAL;
 }
 
+DEFINE_HOOK(&dMsgFlow_c::setNodeIndex, MsgFlowSetNodeIndex);
+
+// Temporary diagnostic: dMsgFlow_c::setNodeIndex(0xFFFF, ...) is the ONLY place that marks a flow
+// "ended" (checkEndFlow()'s backing field) outside of .remove() (which we never call on
+// s_zeldaMsgFlow while active) or the kill-message-flag path (already ruled out via the previous
+// diagnostic). Confirming whether -- and with what previous node index -- this is actually being
+// hit for OUR flow instance specifically pinpoints whether a node/message resolution failure
+// (not yet otherwise visible) is what is actually ending the conversation on its first tick.
+static HookAction on_msg_flow_set_node_index_pre(ModContext*, void* args, void*, void*) {
+    dMsgFlow_c* self = mods::arg<dMsgFlow_c*>(args, 0);
+    u16 nodeIdx = mods::arg<u16>(args, 1);
+    if (self == &s_zeldaMsgFlow && nodeIdx == 0xFFFF) {
+        mods::log::info("zelda talk: setNodeIndex(0xFFFF) called, abandoning node {}",
+            (int)self->mNodeIdx);
+    }
+    return HOOK_CONTINUE;
+}
+
 // Whether Zelda is currently allowed to be targeted/talked to at all: dismounted, not hidden for
 // a cutscene, and no scripted event running. Does not look at the lock-on state itself, since
 // this is also what drives whether the engine will let her be locked onto for this purpose in
@@ -1918,6 +1936,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     // rule out a resolution failure as the reason her dialogue window never opens.
     mods::log::info("zelda talk: message group hook install result = {}", (int)result);
 
+    result = mods::hook::add_pre<MsgFlowSetNodeIndex>(on_msg_flow_set_node_index_pre);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to hook flow node-index diagnostics: {}", (int)result);
+    }
+
     result = register_zelda_talk_flow();
     if (result != MOD_OK) {
         mods::log::warn(
@@ -2085,6 +2108,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
     mods::hook::uninstall<MsgObjectChangeFlowGroupLocal>();
+    mods::hook::uninstall<MsgFlowSetNodeIndex>();
     mods::hook::uninstall<OrderTalkEvent>();
     s_orderTalkEventHookInstalled = false;
     return MOD_OK;
