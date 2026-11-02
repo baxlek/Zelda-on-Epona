@@ -1528,6 +1528,17 @@ static HookAction on_msg_object_change_flow_group_local_pre(ModContext*, void* a
     // common group ourselves here, matching where we registered her greeting, mirroring exactly
     // what the original function's own "common flow" branch would have done.
     dMsgObject_c* self = mods::arg<dMsgObject_c*>(args, 0);
+
+    // Temporary diagnostic: confirms this hook actually fires and shows what group it's
+    // overriding away from, to rule out (or confirm) a hook-installation/resolution problem as
+    // the reason the group never actually ends up forced to common (0).
+    static s16 s_lastLoggedGroup = -2;
+    if (self->mCurrentGroupID != kZeldaTalkMessageGroup && self->mCurrentGroupID != s_lastLoggedGroup) {
+        mods::log::info("zelda talk: forcing msg group {} -> {}", self->mCurrentGroupID,
+            (int)kZeldaTalkMessageGroup);
+        s_lastLoggedGroup = self->mCurrentGroupID;
+    }
+
     self->mFlowChk = 1;
     dMsgObject_c::changeGroup(kZeldaTalkMessageGroup);
     return HOOK_SKIP_ORIGINAL;
@@ -1876,6 +1887,9 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             "unavailable: {}",
             (int)result);
     }
+    // Temporary diagnostic: confirms this specific (member-function) hook actually installed, to
+    // rule out a resolution failure as the reason her dialogue window never opens.
+    mods::log::info("zelda talk: message group hook install result = {}", (int)result);
 
     result = register_zelda_talk_flow();
     if (result != MOD_OK) {
