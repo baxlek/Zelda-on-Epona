@@ -212,11 +212,14 @@ struct CutsceneDiagnosticsSnapshot {
     bool hasSpawnedZelda = false;
     bool zeldaDrewLastFrame = false;
     bool horseDrewLastFrame = false;
+    bool zeldaFopAcDrawCalled = false;
     int demoStaffId = -1;
     int roomNo = -1;
     int layerNo = -1;
     int zeldaRoomNo = -1;
     int horseRoomNo = -1;
+    u32 zeldaActorStatusAtFopAcDraw = 0;
+    u32 zeldaActorConditionAtFopAcDraw = 0;
     char eventName[64] = {0};
     char demoArcName[64] = {0};
     char cutName[64] = {0};
@@ -232,9 +235,12 @@ struct CutsceneDiagnosticsSnapshot {
                hasSpawnedZelda == other.hasSpawnedZelda &&
                zeldaDrewLastFrame == other.zeldaDrewLastFrame &&
                horseDrewLastFrame == other.horseDrewLastFrame &&
+               zeldaFopAcDrawCalled == other.zeldaFopAcDrawCalled &&
                demoStaffId == other.demoStaffId &&
                roomNo == other.roomNo && layerNo == other.layerNo &&
                zeldaRoomNo == other.zeldaRoomNo && horseRoomNo == other.horseRoomNo &&
+               zeldaActorStatusAtFopAcDraw == other.zeldaActorStatusAtFopAcDraw &&
+               zeldaActorConditionAtFopAcDraw == other.zeldaActorConditionAtFopAcDraw &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
                std::strcmp(cutName, other.cutName) == 0 &&
@@ -247,7 +253,10 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
                                                  bool titleScreen, bool inScriptedCutscene,
                                                  bool storyHoZeldaActive,
                                                  bool zeldaDrewLastFrame,
-                                                 bool horseDrewLastFrame) {
+                                                 bool horseDrewLastFrame,
+                                                 bool zeldaFopAcDrawCalled,
+                                                 u32 zeldaActorStatusAtFopAcDraw,
+                                                 u32 zeldaActorConditionAtFopAcDraw) {
     if (!kDiagnosticLoggingEnabled) {
         return;
     }
@@ -263,6 +272,9 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
     snapshot.hasSpawnedZelda = s_hasSpawnedZelda;
     snapshot.zeldaDrewLastFrame = zeldaDrewLastFrame;
     snapshot.horseDrewLastFrame = horseDrewLastFrame;
+    snapshot.zeldaFopAcDrawCalled = zeldaFopAcDrawCalled;
+    snapshot.zeldaActorStatusAtFopAcDraw = zeldaActorStatusAtFopAcDraw;
+    snapshot.zeldaActorConditionAtFopAcDraw = zeldaActorConditionAtFopAcDraw;
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
@@ -291,13 +303,15 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, fopAc_ac_c* tr
         "room={} zeldaRoom={} horseRoom={} layer={} horseDemoMode={} titleScreen={} "
         "storyHoZeldaActive={} inScriptedCutscene={} alwaysHiddenCutscene={} "
         "showInCutscenesToggle={} hideSpawnedZelda={} hasSpawnedZelda={} zeldaDrewLastFrame={} "
-        "horseDrewLastFrame={}",
+        "horseDrewLastFrame={} zeldaFopAcDrawCalled={} zeldaActorStatusAtFopAcDraw={:#x} "
+        "zeldaActorConditionAtFopAcDraw={:#x}",
         snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
         snapshot.demoStaffId, snapshot.roomNo, snapshot.zeldaRoomNo, snapshot.horseRoomNo,
         snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
         snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
         snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda,
-        snapshot.zeldaDrewLastFrame, snapshot.horseDrewLastFrame);
+        snapshot.zeldaDrewLastFrame, snapshot.horseDrewLastFrame, snapshot.zeldaFopAcDrawCalled,
+        snapshot.zeldaActorStatusAtFopAcDraw, snapshot.zeldaActorConditionAtFopAcDraw);
 }
 
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -415,6 +429,32 @@ static HookAction on_horse_call_substance_pre(ModContext*, void* args, void*, vo
     daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
     if (is_spawned_zelda_attached(horse)) {
         horse->setZeldaActor(nullptr);
+    }
+    return HOOK_CONTINUE;
+}
+
+// Ground-truth diagnostic: fopAc_Draw() is the per-actor dispatcher that decides whether to call
+// an actor's own draw() virtual at all each frame (daHoZelda_c::draw() is only ever invoked from
+// inside it, gated on moveApproval()/actor_status). Every previously attempted fix has targeted a
+// specific status bit that can make this gate fail (fopAcStts_UNK_0x20000000_e via daSus_c zones,
+// fopAcStts_NODRAW_e via d_camera.cpp's hideActor()) without resolving the user's symptom, which
+// means either a different, not-yet-catalogued status bit is involved, or fopAc_Draw is never
+// being invoked for her at all that frame (e.g. she's transiently absent from whatever process
+// iteration normally reaches her). This hook records the actor_status/actor_condition seen by
+// fopAc_Draw itself, and whether it ran for her at all, so the next diagnostic log can show
+// definitively which of those two cases is actually happening instead of guessing further.
+DEFINE_HOOK_SYMBOL("fopAc_Draw", int(void*), FopAcDrawDiag);
+
+static bool s_zeldaFopAcDrawCalledThisFrame = false;
+static u32 s_zeldaActorStatusAtFopAcDraw = 0;
+static u32 s_zeldaActorConditionAtFopAcDraw = 0;
+
+static HookAction on_fopac_draw_pre(ModContext*, void* args, void*, void*) {
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (is_spawned_zelda(actor)) {
+        s_zeldaFopAcDrawCalledThisFrame = true;
+        s_zeldaActorStatusAtFopAcDraw = actor->actor_status;
+        s_zeldaActorConditionAtFopAcDraw = actor->actor_condition;
     }
     return HOOK_CONTINUE;
 }
@@ -1557,6 +1597,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
                          (int)result);
     }
 
+    result = mods::hook::add_pre<FopAcDrawDiag>(on_fopac_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook fopAc_Draw, diagnostic logging will be incomplete: {}", (int)result);
+    }
+
     result = mods::hook::add_post<HoZeldaSetMatrix>(on_hozelda_set_matrix_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1784,6 +1830,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     s_zeldaDrewThisFrame = false;
     bool horseDrewLastFrame = s_horseDrewThisFrame;
     s_horseDrewThisFrame = false;
+    bool zeldaFopAcDrawCalledLastFrame = s_zeldaFopAcDrawCalledThisFrame;
+    s_zeldaFopAcDrawCalledThisFrame = false;
+    u32 zeldaActorStatusAtFopAcDraw = s_zeldaActorStatusAtFopAcDraw;
+    u32 zeldaActorConditionAtFopAcDraw = s_zeldaActorConditionAtFopAcDraw;
 
     if (!s_observedInitialHorseState) {
         s_observedInitialHorseState = true;
@@ -1878,7 +1928,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     log_cutscene_diagnostics_if_changed(horse, trackedZelda, is_title_screen(),
                                          inScriptedCutscene, storyHoZeldaActive,
-                                         zeldaDrewLastFrame, horseDrewLastFrame);
+                                         zeldaDrewLastFrame, horseDrewLastFrame,
+                                         zeldaFopAcDrawCalledLastFrame,
+                                         zeldaActorStatusAtFopAcDraw,
+                                         zeldaActorConditionAtFopAcDraw);
 
     return MOD_OK;
 }
@@ -1889,6 +1942,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<SusCheck>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HorseDraw>();
+    mods::hook::uninstall<FopAcDrawDiag>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
     mods::hook::uninstall<HoZeldaSetBowModel>();
     mods::hook::uninstall<HoZeldaExecute>();
