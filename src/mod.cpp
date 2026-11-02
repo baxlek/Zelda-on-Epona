@@ -1086,7 +1086,7 @@ static constexpr f32 kEponaFollowResumeMargin = 60.0f;
 // Distance within which Epona holds completely still -- no walking, no turning -- so Link can
 // walk up and mount her without her fidgeting. Between this and kEponaFollowDistance she's still
 // close enough that walking isn't warranted, but she keeps turning to face him.
-static constexpr f32 kEponaFollowStillDistance = 750.0f;
+static constexpr f32 kEponaFollowStillDistance = 650.0f;
 
 // Whether Epona is currently in her "approaching" phase, as opposed to stopped/settled within the
 // follow distance. See kEponaFollowResumeMargin above for why this needs to be sticky across
