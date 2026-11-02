@@ -86,6 +86,13 @@ static const char* kHoZeldaStageName = "HoZelda";
 static ActorId s_spawnedZeldaId = 0;
 static bool s_hasSpawnedZelda = false;
 
+// Actor creation (svc_actor->create_actor_from_name -> fopAcM_create) is queued via
+// fpcSCtRq_Request and only actually constructs the actor on a later management tick (see
+// fpcM_IsCreating()), so the actor cannot be looked up and reparented to the stage layer in the
+// same call that spawned it. This flag lets mod_update() apply fopAcM_setStageLayer() exactly
+// once, as soon as find_spawned_zelda() first reports a fully-created actor.
+static bool s_appliedStageLayerToZelda = false;
+
 static s32 s_lastKnownZeldaRoomNo = -1;
 static bool s_zeldaLostInSameRoom = false;
 
@@ -282,12 +289,10 @@ static void spawn_zelda_on_horse(daHorse_c* horse) {
     // crossing into an adjacent room/area). daHorse_c avoids this entirely by reparenting itself
     // to the stage-wide layer via fopAcM_setStageLayer() at the end of its own create() (see
     // d_a_horse.cpp), which keeps Epona alive across room boundaries without any respawn logic.
-    // Do the same for the spawned Zelda so she survives room transitions instead of flickering
-    // out and being respawned by mod_update().
-    fopAc_ac_c* spawned = nullptr;
-    if (fopAcM_SearchByID((fpc_ProcID)s_spawnedZeldaId, &spawned) && spawned != nullptr) {
-        fopAcM_setStageLayer(spawned);
-    }
+    // We want to do the same for the spawned Zelda, but her actor doesn't exist yet here --
+    // creation is only queued (fpcSCtRq_Request) and finishes on a later management tick -- so
+    // mod_update() applies fopAcM_setStageLayer() once she's actually been created.
+    s_appliedStageLayerToZelda = false;
 }
 
 static void remove_spawned_zelda() {
@@ -1650,6 +1655,11 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     bool hadSpawnedZeldaBeforeRefresh = s_hasSpawnedZelda;
     s32 roomNo = dComIfGp_roomControl_getStayNo();
     fopAc_ac_c* trackedZelda = find_spawned_zelda();
+
+    if (trackedZelda != nullptr && !s_appliedStageLayerToZelda) {
+        fopAcM_setStageLayer(trackedZelda);
+        s_appliedStageLayerToZelda = true;
+    }
 
     if (hadSpawnedZeldaBeforeRefresh && !s_hasSpawnedZelda) {
         s_zeldaLostInSameRoom = (roomNo == s_lastKnownZeldaRoomNo);
