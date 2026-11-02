@@ -1633,8 +1633,15 @@ static void update_zelda_talk_interaction() {
 
         s_zeldaTalkActive = true;
         s_zeldaMsgFlow.init(zelda, s_zeldaTalkNodeId, 0, nullptr);
-        mods::log::info("zelda talk: flow init() called, status now talkNow={}",
-            dMsgObject_isTalkNowCheck());
+        // Temporary diagnostic: init() itself calls setNodeIndex() on our starting node right
+        // away, before doFlow() ever runs. If that first resolution already fails (e.g. the
+        // group-resolution path is wrong after all, or the node/message data itself is
+        // malformed), checkEndFlow() will already read true here, before our very first doFlow()
+        // tick -- telling us the failure is in init()'s own node resolution rather than anything
+        // doFlow()/nodeProc() does afterward.
+        mods::log::info(
+            "zelda talk: flow init() called, status now talkNow={}, already ended={}",
+            dMsgObject_isTalkNowCheck(), s_zeldaMsgFlow.checkEndFlow());
         return;
     }
 
