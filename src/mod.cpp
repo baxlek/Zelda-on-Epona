@@ -79,7 +79,10 @@ static bool epona_follow_active() {
     return auto_target_enemies_enabled() && epona_follow_dismounted_enabled();
 }
 
-static constexpr bool kDiagnosticLoggingEnabled = false;
+// Temporarily enabled to gather evidence for the Zelda model unload/reload investigation at
+// non-cutscene area boundaries (e.g. Faron Field <-> Kakariko Gorge, southern <-> northern Faron
+// Woods). Only logs on state changes, so overhead/noise is minimal.
+static constexpr bool kDiagnosticLoggingEnabled = true;
 
 static const char* kHoZeldaStageName = "HoZelda";
 
@@ -190,6 +193,7 @@ struct CutsceneDiagnosticsSnapshot {
     char eventName[64] = {0};
     char demoArcName[64] = {0};
     char cutName[64] = {0};
+    char stageName[64] = {0};
 
     bool operator==(const CutsceneDiagnosticsSnapshot& other) const {
         return horseDemoMode == other.horseDemoMode && titleScreen == other.titleScreen &&
@@ -202,7 +206,8 @@ struct CutsceneDiagnosticsSnapshot {
                roomNo == other.roomNo && layerNo == other.layerNo &&
                std::strcmp(eventName, other.eventName) == 0 &&
                std::strcmp(demoArcName, other.demoArcName) == 0 &&
-               std::strcmp(cutName, other.cutName) == 0;
+               std::strcmp(cutName, other.cutName) == 0 &&
+               std::strcmp(stageName, other.stageName) == 0;
     }
     bool operator!=(const CutsceneDiagnosticsSnapshot& other) const { return !(*this == other); }
 };
@@ -226,6 +231,7 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     snapshot.demoStaffId = horse->m_demoStaffId;
     snapshot.roomNo = dComIfGp_roomControl_getStayNo();
     snapshot.layerNo = dComIfG_play_c::getLayerNo(0);
+    SafeStringCopyTruncate(snapshot.stageName, dComIfGp_getStartStageName());
     SafeStringCopyTruncate(snapshot.eventName, dComIfGp_getEventManager().getRunEventName());
     SafeStringCopyTruncate(snapshot.demoArcName, dStage_roomControl_c::getDemoArcName());
     if (snapshot.demoStaffId >= 0) {
@@ -244,14 +250,15 @@ static void log_cutscene_diagnostics_if_changed(daHorse_c* horse, bool titleScre
     s_lastLoggedSnapshot = snapshot;
 
     mods::log::info(
-        "cutscene diagnostics: event='{}' demoArc='{}' cutName='{}' demoStaffId={} room={} "
-        "layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} inScriptedCutscene={} "
-        "alwaysHiddenCutscene={} showInCutscenesToggle={} hideSpawnedZelda={} "
-        "hasSpawnedZelda={}",
-        snapshot.eventName, snapshot.demoArcName, snapshot.cutName, snapshot.demoStaffId,
-        snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode, snapshot.titleScreen,
-        snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene, snapshot.alwaysHiddenCutscene,
-        snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda, snapshot.hasSpawnedZelda);
+        "cutscene diagnostics: stage='{}' event='{}' demoArc='{}' cutName='{}' demoStaffId={} "
+        "room={} layer={} horseDemoMode={} titleScreen={} storyHoZeldaActive={} "
+        "inScriptedCutscene={} alwaysHiddenCutscene={} showInCutscenesToggle={} "
+        "hideSpawnedZelda={} hasSpawnedZelda={}",
+        snapshot.stageName, snapshot.eventName, snapshot.demoArcName, snapshot.cutName,
+        snapshot.demoStaffId, snapshot.roomNo, snapshot.layerNo, snapshot.horseDemoMode,
+        snapshot.titleScreen, snapshot.storyHoZeldaActive, snapshot.inScriptedCutscene,
+        snapshot.alwaysHiddenCutscene, snapshot.showInCutscenesToggle, snapshot.hideSpawnedZelda,
+        snapshot.hasSpawnedZelda);
 }
 
 static void* judge_other_hozelda(fopAc_ac_c* i_actor, void*) {
@@ -316,9 +323,10 @@ static HookAction on_actor_delete_pre(ModContext*, void* args, void*, void*) {
         (ActorId)fopAcM_GetID(actor) == s_spawnedZeldaId) {
         daHorse_c* horse = dComIfGp_getHorseActor();
         mods::log::warn(
-            "spawned HoZelda actor id {} is being deleted via fopAcM_delete; event='{}' "
-            "horseDemoMode={} room={} layer={}",
-            (int)s_spawnedZeldaId, dComIfGp_getEventManager().getRunEventName(),
+            "spawned HoZelda actor id {} is being deleted via fopAcM_delete; stage='{}' "
+            "event='{}' horseDemoMode={} room={} layer={}",
+            (int)s_spawnedZeldaId, dComIfGp_getStartStageName(),
+            dComIfGp_getEventManager().getRunEventName(),
             horse != nullptr && horse->checkHorseDemoMode(), dComIfGp_roomControl_getStayNo(),
             dComIfG_play_c::getLayerNo(0));
     }
