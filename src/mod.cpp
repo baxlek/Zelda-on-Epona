@@ -1670,24 +1670,35 @@ static void update_zelda_talk_interaction() {
         return;
     }
 
-    // Temporary diagnostics: doFlow() runs every tick while active, so only log on an actual
-    // state change (the busy flag flipping, or the flow reporting it ended) to avoid spamming the
-    // log every frame, while still showing exactly how far the flow gets each tick it changes.
+    // Temporary diagnostics: doFlow() runs every tick while active. Besides logging on an actual
+    // state change (the busy flag flipping, or the flow reporting it ended), also force a log for
+    // the first several ticks after activation unconditionally -- a silent, permanently-stuck
+    // steady state (busy never becomes true, never ends, nothing else changes) is itself a
+    // meaningful symptom that the gated log would otherwise hide entirely. mMsg/field_0x25 are
+    // logged raw since fopMsgM_messageSet()'s singleton message actor returns 0 (not the
+    // fpcM_ERROR_PROCESS_ID_e sentinel 0xFFFFFFFF) when it's not currently in its "preparing"
+    // mode, which setNormalMsg() cannot distinguish from a real process id.
     static bool s_lastLoggedBusy = false;
+    static int s_ticksSinceActivation = 0;
     bool busyBefore = dMsgObject_isTalkNowCheck();
     int doFlowResult = s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
     bool ended = s_zeldaMsgFlow.checkEndFlow();
     bool busyAfter = dMsgObject_isTalkNowCheck();
-    if (busyAfter != s_lastLoggedBusy || ended) {
+    bool forceLog = s_ticksSinceActivation < 5;
+    if (busyAfter != s_lastLoggedBusy || ended || forceLog) {
         mods::log::info(
-            "zelda talk: doFlow tick (doFlowResult={}, busy {}->{}, hasMsgProcess={}, ended={})",
-            doFlowResult, busyBefore, busyAfter, s_zeldaMsgFlow.getMsg() != nullptr, ended);
+            "zelda talk: doFlow tick (doFlowResult={}, busy {}->{}, hasMsgProcess={}, ended={}, "
+            "mMsg={:#x}, field_0x25={}, heapLockFlag={})",
+            doFlowResult, busyBefore, busyAfter, s_zeldaMsgFlow.getMsg() != nullptr, ended,
+            s_zeldaMsgFlow.mMsg, (int)s_zeldaMsgFlow.field_0x25, (int)dComIfGp_isHeapLockFlag());
         s_lastLoggedBusy = busyAfter;
     }
+    s_ticksSinceActivation++;
 
     if (ended) {
         s_zeldaTalkActive = false;
         s_lastLoggedBusy = false;
+        s_ticksSinceActivation = 0;
     }
 }
 
