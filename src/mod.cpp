@@ -1557,6 +1557,24 @@ static void stop_zelda_talk_heal_effect() {
     s_zeldaTalkHealEffectFramesLeft = -1;
 }
 
+// Re-issues both particle_set() calls against their existing handles, anchored to the player's
+// current position. This MUST be called every tick the effect is meant to keep playing:
+// dPa_control_c::level_c::execute() (d_particle.cpp) stops and tears down ("cuts") any "level"
+// emitter whose handle isn't re-submitted via particle_set() that same tick to refresh its
+// onActive() flag -- it survives at most one extra frame on its own. Every native example of
+// this pattern (e.g. daAlink_c::setBottleEffect(), called once per execute() tick) re-calls
+// setEmitter()/particle_set() every frame for exactly this reason; a one-shot call like our
+// original implementation gets torn down almost immediately, which is why the trail never
+// appeared to play.
+static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
+    cXyz pos = player->current.pos;
+    pos.y += kZeldaTalkHealEffectHeight;
+    s_zeldaTalkHealGlowEmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlowEmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
+    s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY02_STAR, &pos, nullptr, nullptr);
+}
+
 // Restores 8 hearts (dComIfGp_setItemLifeCount(), the same call item_func_RECOVER_FAILY() makes
 // for a native bottled fairy) and spawns the glow/star particles daObj_Yousei_c -- the bottled
 // fairy actor itself -- wears on her own body (d_a_obj_yousei.cpp's ID_ZF_J_FAIRY00_GLOW /
@@ -1564,13 +1582,7 @@ static void stop_zelda_talk_heal_effect() {
 // only the cosmetic sparkle trail was wanted, not the fairy.
 static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
     dComIfGp_setItemLifeCount(kZeldaTalkHealAmount, 0);
-
-    cXyz pos = player->current.pos;
-    pos.y += kZeldaTalkHealEffectHeight;
-    s_zeldaTalkHealGlowEmitterId = dComIfGp_particle_set(
-        s_zeldaTalkHealGlowEmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
-    s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
-        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY02_STAR, &pos, nullptr, nullptr);
+    refresh_zelda_talk_heal_effect(player);
     s_zeldaTalkHealEffectFramesLeft = kZeldaTalkHealEffectDurationFrames;
 }
 
@@ -1917,8 +1929,13 @@ static void update_zelda_mouth_animation(bool talking) {
 // against s_zeldaTalkPage1MessageId (rather than just zelda_talk_is_active()) so page 2 -- which
 // shares the same event/flow -- is never mistaken for page 1.
 static void update_zelda_talk_heal_effect() {
-    if (s_zeldaTalkHealEffectFramesLeft >= 0 && --s_zeldaTalkHealEffectFramesLeft < 0) {
-        stop_zelda_talk_heal_effect();
+    if (s_zeldaTalkHealEffectFramesLeft >= 0) {
+        if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
+            refresh_zelda_talk_heal_effect(player);
+        }
+        if (--s_zeldaTalkHealEffectFramesLeft < 0) {
+            stop_zelda_talk_heal_effect();
+        }
     }
 
     static bool s_wasTyping = false;
