@@ -1627,15 +1627,23 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         proxy->current.pos = companion->current.pos;
         proxy->current.angle.y = companion->shape_angle.y;
         proxy->shape_angle.y = companion->shape_angle.y;
-        // daNpc_Zelda_c::setAttnPos() derives attention_info.position (the actual lock-on
-        // target point) from mCurAngle.y, not shape_angle.y -- it's only ever set once at
-        // create() time from the spawn angle and is otherwise meant to be updated by the NPC's
-        // own (unused, since we drive her position directly) walk/turn logic. Left unsynced, it
-        // stays frozen at the companion's spawn-time facing, so the computed attention point
-        // rotates further away from her as she turns while riding, making lock-on increasingly
-        // unreliable the longer she rides facing away from that original angle.
+        // daNpc_Zelda_c::setAttnPos() (called earlier this same tick, inside execute()) derives
+        // attention_info.position from mCurAngle.y, not shape_angle.y -- it's only ever set once
+        // at create() time from the spawn angle otherwise, so keep it in sync too for the sake of
+        // setAttnPos()'s other (cosmetic, head/eye-tracking) uses of it.
         proxy->mCurAngle.y = companion->shape_angle.y;
         fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
+
+        // Override the lock-on target point directly instead of trusting setAttnPos()'s own
+        // computation for it: that native math rotates a small local bust offset through
+        // mCurAngle.y via a from-scratch matrix (daNpc_Zelda_c::setAttnPos(), the
+        // "acStack_3c.set(0,170,10); YrotS(mCurAngle.y); multVec(...)" sequence), which is an
+        // extra, unverified source of uncertainty for a value this entire feature's usability
+        // hinges on. A pure yaw rotation can never change the vertical component regardless, so
+        // just use the companion's own position plus that same fixed bust-height offset
+        // directly -- simpler, and immune to any sign/reference-angle mistake in the rotation.
+        proxy->attention_info.position = companion->current.pos;
+        proxy->attention_info.position.y += 170.0f;
     }
 
     proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
@@ -1647,15 +1655,33 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     }
 
     // TEMPORARY diagnostic logging to track down a lock-on regression; throttled to ~1/sec.
+    // This mirrors dAttention_c::calcWeight()'s/check_distace()'s own gating logic (distance,
+    // angle-select, and the per-dist_table-entry vertical window mUpperY/mLowerY) so we can see
+    // directly, from the same numbers the engine itself uses, whether our proxy is being rejected
+    // as a lock-on candidate by that vertical-window check versus something else entirely.
     static u32 s_proxyDiagCounter = 0;
     if (companion != nullptr && (++s_proxyDiagCounter % 30) == 0) {
-        mods::log::info(
-            "zelda talk: proxy diag (eligible={}, flags={:#x}, attnPos=({:.1f},{:.1f},{:.1f}), "
-            "pos=({:.1f},{:.1f},{:.1f}), curAngle=({},{},{}), shapeAngleY={}, companionShapeY={})",
-            eligible, (unsigned)proxy->attention_info.flags, proxy->attention_info.position.x,
-            proxy->attention_info.position.y, proxy->attention_info.position.z, proxy->current.pos.x,
-            proxy->current.pos.y, proxy->current.pos.z, proxy->mCurAngle.x, proxy->mCurAngle.y,
-            proxy->mCurAngle.z, proxy->shape_angle.y, companion->shape_angle.y);
+        daPy_py_c* diagPlayer = daPy_getLinkPlayerActorClass();
+        u8 talkDistIdx = proxy->attention_info.distances[fopAc_attn_TALK_e];
+        dist_entry& talkDist = dAttention_c::getDistTable(talkDistIdx);
+        if (diagPlayer != nullptr) {
+            cXyz playerAttnPos = diagPlayer->attention_info.position;
+            cXyz delta = proxy->attention_info.position - playerAttnPos;
+            mods::log::info(
+                "zelda talk: proxy diag (eligible={}, flags={:#x}, attnPos=({:.1f},{:.1f},{:.1f}), "
+                "playerAttnPos=({:.1f},{:.1f},{:.1f}), deltaY={:.1f}, deltaXZ={:.1f}, "
+                "talkDistIdx={}, mDistMax={:.1f}, mUpperY={:.1f}, mLowerY={:.1f})",
+                eligible, (unsigned)proxy->attention_info.flags, proxy->attention_info.position.x,
+                proxy->attention_info.position.y, proxy->attention_info.position.z, playerAttnPos.x,
+                playerAttnPos.y, playerAttnPos.z, delta.y, delta.absXZ(), talkDistIdx,
+                talkDist.mDistMax, talkDist.mUpperY, talkDist.mLowerY);
+        } else {
+            mods::log::info(
+                "zelda talk: proxy diag (eligible={}, flags={:#x}, talkDistIdx={}, mDistMax={:.1f}, "
+                "mUpperY={:.1f}, mLowerY={:.1f}, no player actor)",
+                eligible, (unsigned)proxy->attention_info.flags, talkDistIdx, talkDist.mDistMax,
+                talkDist.mUpperY, talkDist.mLowerY);
+        }
     }
 }
 
