@@ -1524,18 +1524,18 @@ static MessageId s_zeldaTalkPage1MessageId = 0;
 
 // How long (in the engine's actual 30Hz tick domain) page 1 holds the player's continue input
 // once typing finishes, via the input_after_delay() tag registered on it below -- long enough for
-// the heal particle trail (and its accompanying Z2SE_FAIRY_S_LV/Z2SE_FAIRY_S_FLY_RTT sounds,
-// which run roughly 4 seconds) to actually be heard/seen in full before the conversation can move
-// on. ~4 seconds.
-static constexpr u16 kZeldaTalkHealEffectDelayFrames = 120;
+// the heal particle trail (and its accompanying Z2SE_FAIRY_S_LV/Z2SE_FAIRY_S_FLY_RTT sounds) to
+// actually be heard/seen before the conversation can move on, without making the player wait too
+// long in dialogue. ~2 seconds.
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 60;
 
-// How long the heal particle trail itself keeps emitting before we stop it. Matches the length of
-// its accompanying flight sounds (Z2SE_FAIRY_S_LV's loop plus the Z2SE_FAIRY_S_FLY_RTT whoosh),
-// which run roughly 4 seconds -- the same ~120-tick duration daObjYOUSEI_c::MoveAction()'s own
-// spiral runs for at the engine's real 30Hz tick rate. Matches the input delay above so the
+// How long the heal particle trail itself keeps emitting before we stop it (which also stops its
+// accompanying Z2SE_FAIRY_S_LV loop via stop_zelda_talk_heal_effect()'s seStop() call, cutting
+// both off together). Shorter than daObjYOUSEI_c::MoveAction()'s own ~120-tick (4 second) native
+// spiral so the player isn't held in dialogue too long; matches the input delay above so the
 // spiral finishes closing in right as the player becomes able to advance, rather than getting cut
 // off mid-spin or lingering after input unlocks.
-static constexpr s32 kZeldaTalkHealEffectDurationFrames = 120;
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 60;
 
 // 8 hearts, in the quarter-heart units dComIfGp_setItemLifeCount() expects -- the same amount
 // item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
