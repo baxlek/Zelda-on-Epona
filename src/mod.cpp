@@ -24,6 +24,7 @@
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_event_manager.h"
+#include "d/d_msg_class.h"
 #include "d/d_msg_flow.h"
 #include "d/d_msg_object.h"
 #include "d/d_particle.h"
@@ -1584,16 +1585,20 @@ static ModResult register_zelda_talk_flow() {
         MESSAGE_LANGUAGE_JAPANESE,
     };
 
-    // Registers i_text as a single message page, for every supported language, and returns its
-    // message id. The underlying RegisteredMessage handles are kept alive for the mod's lifetime
-    // in s_zeldaTalkMessages (register_message()'s returned handle owns the BMG entry).
-    auto register_page = [&](std::string_view i_text, MessageId& o_id) -> ModResult {
-        mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
-        builder.text(i_text);
-
+    // Registers a single message page, for every supported language, and returns its message id.
+    // i_configure fills in the page's content/style on a fresh MessageBuilder (e.g. via .text()
+    // and/or tag helpers like .player_name()); it's invoked once per language, but tag bytes
+    // (MSGTAG_PLAYER_NAME, MSGTAG_HORSE_NAME, ...) are resolved by the engine at display time
+    // from the current save data, not baked in per-language here. The underlying
+    // RegisteredMessage handles are kept alive for the mod's lifetime in s_zeldaTalkMessages
+    // (register_message()'s returned handle owns the BMG entry).
+    auto register_page = [&](auto&& i_configure, MessageId& o_id) -> ModResult {
         std::vector<mods::flow::MessageVariant> variants;
         variants.reserve(kAllLanguages.size());
         for (MessageLanguage language : kAllLanguages) {
+            mods::flow::MessageBuilder builder{
+                mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
+            i_configure(builder);
             variants.push_back(builder.build(language));
         }
 
@@ -1606,34 +1611,36 @@ static ModResult register_zelda_talk_flow() {
         return MOD_OK;
     };
 
-    // Placeholder dialogue: a short, clearly-labeled multi-page conversation, mainly so the
-    // interaction (and the faux lip-sync that plays alongside it) has something real to test
-    // in-game. Each page is its own node so the player pages through it with the action button
-    // exactly like any other NPC conversation, and the last page's node points at the special
+    // Two-page greeting. <player_name>/<horse_name> are embedded as raw BMG tags
+    // (MSGTAG_PLAYER_NAME via .player_name(), MSGTAG_HORSE_NAME via raw_tag()) rather than text
+    // fetched from dComIfGs_getPlayerName()/dComIfGs_getHorseName() up front, so the name shown
+    // always reflects whichever save is actually loaded when the player talks to her, not
+    // whichever save (if any) happened to be loaded back when the mod registered this message.
+    // Each page is its own node so the player pages through it with the action button exactly
+    // like any other NPC conversation, and the last page's node points at the special
     // mods::flow::kEnd sentinel, which naturally closes the message window and hands control
     // back to normal gameplay once the player dismisses it -- no extra closing logic needed.
     MessageId page1Id = 0;
     MessageId page2Id = 0;
-    MessageId page3Id = 0;
     ModResult result = register_page(
-        "Oh! I didn't expect you to come speak with me like this, Link.", page1Id);
+        [](mods::flow::MessageBuilder& builder) {
+            builder.text("Greetings, ").player_name().text("!\nI pray you are in good health?");
+        },
+        page1Id);
     if (result == MOD_OK) {
         result = register_page(
-            "This is only a placeholder conversation for now, but it proves you can talk to me "
-            "anytime you're on foot nearby, just by locking onto me first.",
+            [](mods::flow::MessageBuilder& builder) {
+                builder.raw_tag(0, MSGTAG_HORSE_NAME, {})
+                    .text(" and I are ready to depart\nwhenever you are.");
+            },
             page2Id);
-    }
-    if (result == MOD_OK) {
-        result = register_page(
-            "Go on, press that button once more whenever you're ready to end our chat.", page3Id);
     }
     if (result != MOD_OK) {
         return result;
     }
 
     mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
-    const auto page3 = graph.add_message(page3Id).next(mods::flow::kEnd);
-    const auto page2 = graph.add_message(page2Id).next(page3);
+    const auto page2 = graph.add_message(page2Id).next(mods::flow::kEnd);
     const auto page1 = graph.add_message(page1Id).next(page2);
     s_zeldaTalkNodeId = page1;
 
