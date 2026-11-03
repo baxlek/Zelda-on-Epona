@@ -604,9 +604,35 @@ static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
     horse->setReinPosNormal();
 }
 
+// Forward-declared: defined further down alongside the rest of the NPC-talk-proxy machinery, but
+// needed here so the companion's own execute() post-hook can re-sync the proxy immediately (see
+// on_hozelda_execute_post()'s comment below for why).
+static fopAc_ac_c* find_zelda_npc_proxy();
+static void sync_zelda_npc_proxy_from_companion(daNpc_Zelda_c* proxy, fopAc_ac_c* companion);
+
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+    if (!is_spawned_zelda(zelda)) {
+        return;
+    }
+
+    // Re-sync the invisible talk proxy's position/attention data right now, as early as possible
+    // after the companion's own position is finalized for this tick, instead of waiting for the
+    // proxy's own Execute() (whenever in the per-frame actor-execution order the engine happens
+    // to run it) to pick it up. Previously, whenever the engine ran the proxy's Execute() before
+    // the companion's for a given tick, the proxy was left reading the companion's PREVIOUS-tick
+    // position -- a one-frame-stale target. While Epona stood still that lag was invisible (the
+    // position doesn't change tick to tick), but while she was moving (player-ridden, or
+    // autonomously following while dismounted -- see PR #31), it created a persistent, visible
+    // gap between the proxy's logical (lock-on) position and the companion's actual rendered
+    // position, which was then large enough to throw off check_flontofplayer()'s facing-angle
+    // gate at normal conversation range, making her impossible to L-target while moving at all.
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    if (proxy != nullptr) {
+        sync_zelda_npc_proxy_from_companion(static_cast<daNpc_Zelda_c*>(proxy), zelda);
+    }
+
+    if (!s_hideSpawnedZeldaInCutscene) {
         return;
     }
 
@@ -1635,6 +1661,50 @@ static void dump_dist_table_once() {
     }
 }
 
+// Glues the invisible proxy's position/angle/room/attention-point to the companion's own,
+// current-tick values. Factored out so it can be called from TWO places: the companion's own
+// execute() post-hook (as soon as the companion's position is final for this tick, while Epona
+// may still be mid-stride that same frame) and the proxy's own execute() post-hook (a safety-net
+// re-sync, in case the companion's hook ran before the proxy existed yet this tick). Calling it
+// twice in one tick is harmless -- it's a pure copy, not an accumulation -- and ensures whichever
+// of the two actors' Execute() the engine happens to run LAST this tick, the proxy never ends up
+// a whole frame stale relative to the companion by the time dAttention_c's lock-on candidate
+// scan runs. A single frame of staleness while Epona is moving (autonomously following, or being
+// ridden) was previously enough positional lag between the logical (proxy) and visual (companion
+// model) target points to throw off check_flontofplayer()'s facing-angle gate at close range,
+// even though the lag was imperceptible (and inconsequential) while she stood still.
+static void sync_zelda_npc_proxy_from_companion(daNpc_Zelda_c* proxy, fopAc_ac_c* companion) {
+    proxy->current.pos = companion->current.pos;
+    proxy->current.angle.y = companion->shape_angle.y;
+    proxy->shape_angle.y = companion->shape_angle.y;
+    // daNpc_Zelda_c::setAttnPos() (called earlier this same tick, inside execute()) derives
+    // attention_info.position from mCurAngle.y, not shape_angle.y -- it's only ever set once
+    // at create() time from the spawn angle otherwise, so keep it in sync too for the sake of
+    // setAttnPos()'s other (cosmetic, head/eye-tracking) uses of it.
+    proxy->mCurAngle.y = companion->shape_angle.y;
+    fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
+
+    // Override the lock-on target point directly instead of trusting setAttnPos()'s own
+    // computation for it (that native math rotates a small local bust offset through
+    // mCurAngle.y via a from-scratch matrix, an extra unverified source of uncertainty for a
+    // value this entire feature's usability hinges on), or re-deriving our own Y offset from
+    // scratch. The real, visible daHoZelda_c companion already recomputes its own
+    // attention_info.position natively every tick in setBowModel()
+    // (current.pos.y + 80.0f -- see d_a_hozelda.cpp), and the pre-proxy implementation of
+    // this feature targeted that real actor directly and was reliably lock-on-able. Reuse
+    // that exact value instead of our own +170.0f guess (which put the proxy's attention
+    // point ~90 units higher than the companion's own, pushing the real-world vertical gap
+    // to a dismounted player's own attention point past most dist_table windows).
+    proxy->attention_info.position = companion->attention_info.position;
+
+    // The proxy's class (daNpc_Zelda_c) defaults attention_info.distances[TALK_e] to a
+    // dist_table entry (index 219: mDistMax=300, mUpperY=300, mLowerY=-300) sized for a
+    // normal ground-level NPC. Override to dist_table[18] (mDistMax=500, mUpperY=800,
+    // mLowerY=-800, mAngleSelect=0x0, i.e. no facing-direction restriction at all), a more
+    // generous entry, for extra margin now that the Y-offset bug above is also fixed.
+    proxy->attention_info.distances[fopAc_attn_TALK_e] = 18;
+}
+
 static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     daNpc_Zelda_c* proxy = mods::arg<daNpc_Zelda_c*>(args, 0);
     if (!is_zelda_npc_proxy(proxy)) {
@@ -1647,35 +1717,7 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
 
     if (companion != nullptr) {
-        proxy->current.pos = companion->current.pos;
-        proxy->current.angle.y = companion->shape_angle.y;
-        proxy->shape_angle.y = companion->shape_angle.y;
-        // daNpc_Zelda_c::setAttnPos() (called earlier this same tick, inside execute()) derives
-        // attention_info.position from mCurAngle.y, not shape_angle.y -- it's only ever set once
-        // at create() time from the spawn angle otherwise, so keep it in sync too for the sake of
-        // setAttnPos()'s other (cosmetic, head/eye-tracking) uses of it.
-        proxy->mCurAngle.y = companion->shape_angle.y;
-        fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
-
-        // Override the lock-on target point directly instead of trusting setAttnPos()'s own
-        // computation for it (that native math rotates a small local bust offset through
-        // mCurAngle.y via a from-scratch matrix, an extra unverified source of uncertainty for a
-        // value this entire feature's usability hinges on), or re-deriving our own Y offset from
-        // scratch. The real, visible daHoZelda_c companion already recomputes its own
-        // attention_info.position natively every tick in setBowModel()
-        // (current.pos.y + 80.0f -- see d_a_hozelda.cpp), and the pre-proxy implementation of
-        // this feature targeted that real actor directly and was reliably lock-on-able. Reuse
-        // that exact value instead of our own +170.0f guess (which put the proxy's attention
-        // point ~90 units higher than the companion's own, pushing the real-world vertical gap
-        // to a dismounted player's own attention point past most dist_table windows).
-        proxy->attention_info.position = companion->attention_info.position;
-
-        // The proxy's class (daNpc_Zelda_c) defaults attention_info.distances[TALK_e] to a
-        // dist_table entry (index 219: mDistMax=300, mUpperY=300, mLowerY=-300) sized for a
-        // normal ground-level NPC. Override to dist_table[18] (mDistMax=500, mUpperY=800,
-        // mLowerY=-800, mAngleSelect=0x0, i.e. no facing-direction restriction at all), a more
-        // generous entry, for extra margin now that the Y-offset bug above is also fixed.
-        proxy->attention_info.distances[fopAc_attn_TALK_e] = 18;
+        sync_zelda_npc_proxy_from_companion(proxy, companion);
     }
 
     proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
