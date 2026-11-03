@@ -1227,6 +1227,54 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
     horse->initHorseMtx();
 }
 
+// Whether a scripted event is currently running with our invisible talk proxy as its partner --
+// true as soon as the player presses the talk button on lock-on, well before any text is
+// actually on screen. This is deliberately broader than "dialogue text is visible" (see
+// zelda_talk_is_active() below, which also requires dMsgObject_isTalkNowCheck()): real NPCs
+// (daNpc_Zelda_c::talk(), d_a_npc_zelda.cpp) start turning to face the player during this same
+// window, before their first line of dialogue appears, and we want Epona's facing correction
+// below to begin at the same moment.
+static bool zelda_talk_event_active() {
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    return proxy != nullptr && dComIfGp_event_runCheck() && dComIfGp_getEvent()->getPt2() == proxy;
+}
+
+// daHoZelda_c's own faux head-tracking (set_neck_angle_auto_target(), above) only turns her neck
+// to look at the player when they fall within roughly a 90-degree cone of her current facing
+// (zelda->shape_angle.y, which mirrors Epona's own via setMatrix()); talked to from outside that
+// cone (e.g. approached/locked-on from behind), her neck can't turn far enough and she can't
+// visually look at the player for the whole conversation, unlike a normal standalone NPC who'd
+// simply turn their body to face whoever they're talking to. Zelda has no body of her own to
+// turn -- she's rigidly attached to Epona's root matrix -- so rotate Epona instead, but only by
+// the minimum amount needed to bring the player back inside that head-tracking cone, not all the
+// way around to directly facing them.
+static constexpr s16 kZeldaTalkHeadTrackCone = 0x4000;
+
+static constexpr s16 kZeldaTalkFaceTurnMax = 0x800;
+static constexpr s16 kZeldaTalkFaceTurnMin = 0x40;
+
+static void on_horse_talk_face_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (horse == nullptr || player == nullptr || !zelda_talk_event_active()) {
+        return;
+    }
+
+    s16 bearingToPlayer = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    s16 diff = bearingToPlayer - horse->shape_angle.y;
+    if (diff > kZeldaTalkHeadTrackCone) {
+        diff = kZeldaTalkHeadTrackCone;
+    } else if (diff < -kZeldaTalkHeadTrackCone) {
+        diff = -kZeldaTalkHeadTrackCone;
+    }
+    s16 target = bearingToPlayer - diff;
+
+    cLib_addCalcAngleS(&horse->shape_angle.y, target, 5, kZeldaTalkFaceTurnMax,
+                        kZeldaTalkFaceTurnMin);
+    horse->current.angle.y = horse->shape_angle.y;
+    horse->initHorseMtx();
+}
+
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
@@ -1770,8 +1818,7 @@ static void sync_zelda_npc_proxy_lifecycle(fopAc_ac_c* companion) {
 // proxy (as opposed to some other NPC's, or none at all) -- used to gate the companion's faux
 // lip-sync below.
 static bool zelda_talk_is_active() {
-    fopAc_ac_c* proxy = find_zelda_npc_proxy();
-    return proxy != nullptr && dMsgObject_isTalkNowCheck() && dComIfGp_getEvent()->getPt2() == proxy;
+    return zelda_talk_event_active() && dMsgObject_isTalkNowCheck();
 }
 
 // Drives s_zeldaMouthAngle (applied every frame by hozelda_mouth_joint_callback(), see its
@@ -1974,6 +2021,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to hook Epona's execute() for the dismounted-follow facing correction: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HorseExecute>(on_horse_talk_face_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the Zelda-talk facing correction, she won't "
+            "turn to let Zelda look at Link if he talks to her from behind: {}",
             (int)result);
     }
 
