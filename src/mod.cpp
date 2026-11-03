@@ -1246,9 +1246,10 @@ static bool zelda_talk_event_active() {
 // visually look at the player for the whole conversation, unlike a normal standalone NPC who'd
 // simply turn their body to face whoever they're talking to. Zelda has no body of her own to
 // turn -- she's rigidly attached to Epona's root matrix -- so rotate Epona instead, but only by
-// the minimum amount needed to bring the player back inside that head-tracking cone, not all the
-// way around to directly facing them.
-static constexpr s16 kZeldaTalkHeadTrackCone = 0x4000;
+// the minimum amount needed to bring the player within a tighter 50-degree cone of her facing,
+// not all the way around to directly facing them -- a comfortable margin inside the native
+// 90-degree engagement threshold rather than sitting right at its edge.
+static constexpr s16 kZeldaTalkHeadTrackCone = static_cast<s16>(0x8000 * 50 / 180);
 
 static constexpr s16 kZeldaTalkFaceTurnMax = 0x800;
 static constexpr s16 kZeldaTalkFaceTurnMin = 0x40;
