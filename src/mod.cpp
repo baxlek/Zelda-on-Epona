@@ -1662,6 +1662,16 @@ static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
                              -1.0f, 0);
 }
 
+// Z2SpeechMgr2's voice-bank "speaker" id (see its playOneShotVoice(), called per-character while
+// a message types out): speaker id 0 -- the default when a message's style doesn't set one --
+// makes it bail out immediately without playing anything, which is why Zelda's dialogue here was
+// silent. Any nonzero id that isn't one of playOneShotVoice()'s special-cased speaker/mood
+// combinations (Midna's 21, or the various animal/named-NPC ids like 3/29/30/32/35/37/38/47/
+// 69-74/107/112/113, each of which only fires for specific moods we never request) falls through
+// to its generic per-character "typing" click (Z2SE_MESSAGE_SE_COMMON) -- the same blip sound
+// virtually every human NPC's dialogue uses.
+static constexpr uint8_t kZeldaTalkSpeakerId = 1;
+
 static ActorId s_zeldaNpcProxyId = 0;
 static bool s_hasZeldaNpcProxy = false;
 
@@ -1743,8 +1753,9 @@ static ModResult register_zelda_talk_flow() {
         std::vector<mods::flow::MessageVariant> variants;
         variants.reserve(kAllLanguages.size());
         for (MessageLanguage language : kAllLanguages) {
-            mods::flow::MessageBuilder builder{
-                mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_TALK)};
+            mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}
+                                                    .box_kind(MESSAGE_BOX_TALK)
+                                                    .speaker(kZeldaTalkSpeakerId)};
             i_configure(builder);
             variants.push_back(builder.build(language));
         }
