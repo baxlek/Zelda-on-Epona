@@ -1667,6 +1667,17 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         // directly -- simpler, and immune to any sign/reference-angle mistake in the rotation.
         proxy->attention_info.position = companion->current.pos;
         proxy->attention_info.position.y += 170.0f;
+
+        // The proxy's class (daNpc_Zelda_c) defaults attention_info.distances[TALK_e] to a
+        // dist_table entry (index 219: mDistMax=300, mUpperY=300, mLowerY=-300) sized for a
+        // normal ground-level NPC. Our companion sits on Epona's back, so her attention point
+        // sits roughly 300-1100+ units above a dismounted player's own attention point depending
+        // on terrain -- comfortably outside that +-300 vertical window most of the time, which is
+        // why lock-on was failing almost everywhere despite otherwise-correct eligibility flags.
+        // Override to dist_table[18] (mDistMax=500, mUpperY=800, mLowerY=-800, mAngleSelect=0x0,
+        // i.e. no facing-direction restriction at all), a generous entry built for exactly this
+        // kind of tall/elevated target.
+        proxy->attention_info.distances[fopAc_attn_TALK_e] = 18;
     }
 
     proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
