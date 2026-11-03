@@ -1743,6 +1743,26 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
             companion != nullptr ? companion->current.pos.x : 0.0f,
             companion != nullptr ? companion->current.pos.y : 0.0f,
             companion != nullptr ? companion->current.pos.z : 0.0f);
+
+        // dAttention_c itself: mAttnBlockTimer is a native cutscene-camera lock-SUPPRESSION
+        // countdown (set to 30 by d_camera.cpp whenever checkCutHeadProc() is true, e.g. during
+        // a scripted camera head-focus); while nonzero, dAttention_c::Run() returns immediately
+        // every tick WITHOUT calling makeList()/SelectAttention() at all -- i.e. lock-on is
+        // completely inert engine-wide, not just for our proxy. If this is ever observed stuck
+        // nonzero well after Epona has stopped moving, that (not our own flags/position/dist
+        // table) is the real root cause. mLockTargetID/mLockonCount/mLockOnList[0] show what the
+        // engine's own candidate search currently considers, independent of our eligibility calc.
+        dAttention_c* attn = dComIfGp_getAttention();
+        if (attn != nullptr) {
+            fopAc_ac_c* lockOn0 = attn->GetLockonList(0) != nullptr
+                                      ? attn->GetLockonList(0)->getActor()
+                                      : nullptr;
+            mods::log::info(
+                "zelda talk: attention diag -- mAttnBlockTimer={}, mLockTargetID={:#x}, "
+                "mLockonCount={}, lockOnList0Actor={}, lockOnList0IsProxy={}",
+                attn->mAttnBlockTimer, (unsigned)attn->mLockTargetID, attn->GetLockonCount(),
+                (void*)lockOn0, lockOn0 == proxy);
+        }
     }
     if (companion != nullptr && (s_proxyDiagCounter % 30) == 0) {
         daPy_py_c* diagPlayer = daPy_getLinkPlayerActorClass();
