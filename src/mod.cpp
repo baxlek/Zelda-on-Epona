@@ -1639,10 +1639,23 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     }
 
     proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
-    if (companion != nullptr && zelda_talk_may_be_targeted(companion, player)) {
+    bool eligible = companion != nullptr && zelda_talk_may_be_targeted(companion, player);
+    if (eligible) {
         proxy->attention_info.flags |= fopAc_AttnFlag_TALK_e;
     } else {
         proxy->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
+    }
+
+    // TEMPORARY diagnostic logging to track down a lock-on regression; throttled to ~1/sec.
+    static u32 s_proxyDiagCounter = 0;
+    if (companion != nullptr && (++s_proxyDiagCounter % 30) == 0) {
+        mods::log::info(
+            "zelda talk: proxy diag (eligible={}, flags={:#x}, attnPos=({:.1f},{:.1f},{:.1f}), "
+            "pos=({:.1f},{:.1f},{:.1f}), curAngle=({},{},{}), shapeAngleY={}, companionShapeY={})",
+            eligible, (unsigned)proxy->attention_info.flags, proxy->attention_info.position.x,
+            proxy->attention_info.position.y, proxy->attention_info.position.z, proxy->current.pos.x,
+            proxy->current.pos.y, proxy->current.pos.z, proxy->mCurAngle.x, proxy->mCurAngle.y,
+            proxy->mCurAngle.z, proxy->shape_angle.y, companion->shape_angle.y);
     }
 }
 
