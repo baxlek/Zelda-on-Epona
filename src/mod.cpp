@@ -1524,17 +1524,19 @@ static MessageId s_zeldaTalkPage1MessageId = 0;
 
 // How long (in the same ~60Hz tick domain daPy_addCalcShort()/cLib_addCalcAngleS() already use
 // elsewhere in this file) page 1 holds the player's continue input once typing finishes, via the
-// input_after_delay() tag registered on it below -- long enough for the heal particle trail to
-// actually be seen before the conversation can move on. ~1 second.
-static constexpr u16 kZeldaTalkHealEffectDelayFrames = 60;
+// input_after_delay() tag registered on it below -- long enough for the heal particle trail (and
+// its accompanying Z2SE_FAIRY_S_LV/Z2SE_FAIRY_S_FLY_RTT sounds, which run roughly 4 seconds) to
+// actually be heard/seen in full before the conversation can move on. ~4 seconds.
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 240;
 
-// How long the heal particle trail itself keeps emitting before we stop it. Matches
-// daObjYOUSEI_c::MoveAction() (d_a_obj_yousei.cpp) -- the real "fairy flies out of the bottle and
-// spirals in toward the player" sequence -- which runs its spiral for roughly 120 frames (2
-// seconds) before the fairy reaches the player. Matches the input delay above so the spiral
-// finishes closing in right as the player becomes able to advance, rather than getting cut off
-// mid-spin or lingering after input unlocks.
-static constexpr s32 kZeldaTalkHealEffectDurationFrames = 60;
+// How long the heal particle trail itself keeps emitting before we stop it. Matches the length of
+// its accompanying flight sounds (Z2SE_FAIRY_S_LV's loop plus the Z2SE_FAIRY_S_FLY_RTT whoosh),
+// which run roughly 4 seconds -- longer than daObjYOUSEI_c::MoveAction()'s own ~120-frame (2
+// second) spiral, since here the particle trail exists to visually match the sound rather than
+// the other way around. Matches the input delay above so the spiral finishes closing in right as
+// the player becomes able to advance, rather than getting cut off mid-spin or lingering after
+// input unlocks.
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 240;
 
 // 8 hearts, in the quarter-heart units dComIfGp_setItemLifeCount() expects -- the same amount
 // item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
