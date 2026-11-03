@@ -16,6 +16,8 @@
 #include "d/actor/d_a_e_sh.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
+#include "d/actor/d_a_npc.h"
+#include "d/actor/d_a_npc_zelda.h"
 #include "d/actor/d_a_player.h"
 #include "d/d_attention.h"
 #include "d/d_cc_d.h"
@@ -1393,30 +1395,109 @@ static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval,
 // that icon would visually and functionally collide with Epona's own "mount" prompt, since Zelda
 // is always within mounting distance of the horse she rides on. Always enabled, no toggle.
 //
-// To get the native "Speak" action-button prompt to show up while (and only while) Z-targeting
-// her, and to make her Z-targetable for this purpose at all, we toggle two per-actor fields every
-// tick: attention_info.flags's fopAc_AttnFlag_TALK_e bit (dAttention_c::calcWeight() only ever
-// considers an actor for the lock-on "talk" weight/type if this bit is set in its attention_info
-// flags -- see loc_type_tbl in d_attention.cpp) and eventInfo's dEvtCnd_CANTALK_e condition
-// (calcWeight() zeroes the weight for TALK_e/SPEAK_e types unless this condition bit is set).
-// Both are left off whenever she isn't currently eligible (mounted, hidden, mid-cutscene), which
-// makes her completely un-targetable for this interaction outside of those moments -- not just
-// "ignored by our own trigger code" but actually invisible to the engine's own lock-on logic.
+// Rather than hand-rolling a conversation (manually ticking a dMsgFlow_c, forcing
+// dComIfGp_event_runCheck(), neutralizing raw pad state, etc. -- all of which turned out to be an
+// unreliable, ever-growing pile of special cases), this spawns a second, completely invisible
+// daNpc_Zelda_c actor (a real, genuinely talk-capable vanilla NPC class) co-located with the
+// visible companion every tick, and lets the *real* NPC-talk pipeline drive everything: Z-locking
+// it (gated to only be possible while dismounted and otherwise eligible, see
+// on_npc_zelda_execute_post() below) lets daAlink_c::orderTalk() call the real
+// fopAcM_orderTalkEvent() on it when the action button is pressed, exactly like any other NPC;
+// from there, the proxy's own inherited daNpcT_c::evtProc()/evtTalk()/talk() state machine
+// autonomously drives its mFlow (redirected to our custom BMG content via the
+// dMsgFlow_c::getInitNodeIndex() hook below) every tick via its own Execute() call, with zero
+// further mod intervention needed -- including camera framing, pause-menu gating, reticle
+// hiding, and freezing the player's movement/combat input, all for free, since the engine can't
+// tell this apart from a real NPC conversation.
 //
-// While her dialogue is on screen, a faux lip-sync also drives her model's dedicated mouth joint
-// (see hozelda_mouth_joint_callback() and update_zelda_mouth_animation() further down), since her
-// model has no authored talk animation of its own for the generic engine-wide mechanism to drive.
+// The proxy is kept purely invisible/non-physical (Draw()/setCollision() hooked to skip their
+// real work entirely) and is positionally glued to the companion every tick, so from the
+// player's perspective they appear to be locking onto and talking to the companion herself.
+//
+// While her dialogue is on screen, a faux lip-sync also drives the *companion's* model's
+// dedicated mouth joint (see hozelda_mouth_joint_callback() and update_zelda_mouth_animation()
+// further down), since neither her model nor the invisible proxy's has an authored talk
+// animation for the generic engine-wide mechanism to drive, and only the companion is ever
+// actually seen.
 
 // BMG message group our custom greeting is registered under. Group 0 is the always-resident
 // "common" message archive (the same one Midna's menu uses), so it resolves correctly no matter
 // which field/stage Zelda is approached in.
 static constexpr u16 kZeldaTalkMessageGroup = 0;
 
+// Synthetic flow id encoded into the proxy's spawn angle.x (see daNpc_Zelda_c::getFlowNodeNo(),
+// which reads it back as mFlowNodeNo) and later passed straight through to
+// dMsgFlow_c::init()/getInitNodeIndex() by her own native talk() state. It intentionally falls in
+// dMsgObject_changeFlowGroup()'s "common group" range ([3000, 0x8000)) so the engine's own
+// group-resolution logic binds everything to kZeldaTalkMessageGroup correctly on its own, and
+// intentionally doesn't match any real vanilla flow label, which is exactly what makes
+// getInitNodeIndex() hookable: its own lookup for this id always misses, giving us a clean,
+// unambiguous point to redirect to our actual registered starting node instead.
+static constexpr u16 kZeldaTalkFlowId = 0x7000;
+
 static mods::flow::Graph s_zeldaTalkGraph;
 static std::vector<mods::flow::RegisteredMessage> s_zeldaTalkMessages;
 static u16 s_zeldaTalkNodeId = 0;
-static dMsgFlow_c s_zeldaMsgFlow;
-static bool s_zeldaTalkActive = false;
+
+static ActorId s_zeldaNpcProxyId = 0;
+static bool s_hasZeldaNpcProxy = false;
+
+static fopAc_ac_c* find_zelda_npc_proxy() {
+    if (!s_hasZeldaNpcProxy) {
+        return nullptr;
+    }
+
+    if (fpcM_IsCreating((fpc_ProcID)s_zeldaNpcProxyId)) {
+        return nullptr;
+    }
+
+    fopAc_ac_c* actor = nullptr;
+    fopAcM_SearchByID((fpc_ProcID)s_zeldaNpcProxyId, &actor);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_NPC_ZELDA_e) {
+        s_hasZeldaNpcProxy = false;
+        return nullptr;
+    }
+    return actor;
+}
+
+static bool is_zelda_npc_proxy(const fopAc_ac_c* actor) {
+    return s_hasZeldaNpcProxy && actor != nullptr &&
+           (ActorId)fopAcM_GetID(actor) == s_zeldaNpcProxyId;
+}
+
+static void spawn_zelda_npc_proxy(fopAc_ac_c* companion) {
+    ActorSpawnParams params{};
+    params.parameters = 0;
+    params.argument = 0;
+    params.room_num = fopAcM_GetRoomNo(companion);
+    params.position = {companion->current.pos.x, companion->current.pos.y,
+                        companion->current.pos.z};
+    // angle.x doubles as the proxy's own flow-id field (see daNpc_Zelda_c::getFlowNodeNo()),
+    // read once at create() time -- encode our synthetic flow id here instead of a real facing
+    // pitch, matching the Dawnlight mod's own hub-NPC spawn convention.
+    params.angle = {(int16_t)kZeldaTalkFlowId, companion->shape_angle.y, 0};
+    params.scale = {1.0f, 1.0f, 1.0f};
+
+    ActorId newId = 0;
+    ModResult result = svc_actor->create_actor(mod_ctx, fpcNm_NPC_ZELDA_e, &params, &newId);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to spawn Zelda NPC talk proxy: {}", (int)result);
+        return;
+    }
+
+    s_zeldaNpcProxyId = newId;
+    s_hasZeldaNpcProxy = true;
+    mods::log::info("zelda talk: NPC proxy spawned (id={:#x})", (unsigned)newId);
+}
+
+static void remove_zelda_npc_proxy() {
+    if (!s_hasZeldaNpcProxy) {
+        return;
+    }
+
+    svc_actor->delete_actor(mod_ctx, s_zeldaNpcProxyId);
+    s_hasZeldaNpcProxy = false;
+}
 
 static ModResult register_zelda_talk_flow() {
     static constexpr std::array kAllLanguages{
@@ -1485,174 +1566,124 @@ static ModResult register_zelda_talk_flow() {
     return s_zeldaTalkGraph.result();
 }
 
-DEFINE_HOOK(&fopAcM_orderTalkEvent, OrderTalkEvent);
-
-// The real engine root cause of "no textbox + softlock": setting fopAc_AttnFlag_TALK_e (needed
-// to make the native "Speak" action-button prompt show up at all, see
-// update_zelda_talk_eligibility() below) also makes the generic player code
-// (daAlink_c::orderTalk(), see its BUTTON_STATUS_SPEAK branch) treat her exactly like any other
-// talk-capable NPC: every time the action button is pressed while she's the current target, it
-// unconditionally calls fopAcM_orderTalkEvent(), which in turn queues a real dEvt_type_TALK_e
-// event order through the full scripted event/demo system (dComIfGp_event_order()) -- completely
-// independent of our own manual dMsgFlow-based trigger below. Since Zelda was never set up as a
-// legitimate talk-event actor pair for that system (no registered event script targets her), that
-// order can never resolve: it silently blocks player control waiting on an event that will never
-// complete, while no window ever opens, which is exactly the hang/softlock this was causing.
-// Skipping the original call here (returning zero, its own "couldn't order" value) keeps her
-// permanently invisible to that system while leaving our own lock-on + button-press handling in
-// update_zelda_talk_interaction() as the only thing that ever drives her conversation.
-static HookAction on_order_talk_event_pre(ModContext*, void* args, void*, void*) {
-    fopAc_ac_c* talkPartner = mods::arg<fopAc_ac_c*>(args, 1);
-    if (is_spawned_zelda(talkPartner)) {
+// daNpc_Zelda_c::Draw() renders her actual geometry; skip it unconditionally for our proxy so
+// she's never visible, without touching mHide/mNoDraw (daNpc_Zelda_c::beforeMove() zeroes
+// attention_info.flags whenever either of those is set, which would silently undo the
+// targetability gating in on_npc_zelda_execute_post() below).
+static HookAction on_npc_zelda_draw_pre(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* actor = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (is_zelda_npc_proxy(actor)) {
         return HOOK_SKIP_ORIGINAL;
     }
     return HOOK_CONTINUE;
 }
 
-// Real NPC dialogue is always backed by a genuine dComIfGp_event_order() event, and
-// daAlink_c::checkEventRun() (== dComIfGp_event_runCheck() || checkPlayerDemoMode()) is the single
-// check nearly all of the player's own movement/combat/item code gates on to decide whether the
-// player is "busy" with a conversation/cutscene and should ignore normal input. Our Zelda
-// conversation deliberately never goes through that event pipeline (see the fopAcM_orderTalkEvent
-// hook above), so without this, nothing ever tells the player's own code a conversation is
-// happening at all, and they remain completely free to move/fight/etc. the whole time her message
-// window is open.
-//
-// daAlink_c::checkEventRun() itself is a trivial one-line wrapper around
-// dComIfGp_event_runCheck() with no DUSK_NOINLINE attribute, called from 40+ sites within its own
-// translation unit (d_a_alink.cpp) -- in a RelWithDebInfo build the optimizer inlines it away at
-// every one of those call sites, leaving no actual call instruction left anywhere for an
-// address-patching hook to intercept (confirmed: the hook installed with no error, but the player
-// remained completely free to move during testing). dComIfGp_event_runCheck() itself, however, is
-// explicitly marked DUSK_NOINLINE in its header declaration, which keeps a real, hookable call
-// site alive -- hook that instead. Forcing it to report true while our flow is active freezes the
-// player exactly the way they would for any other NPC's dialogue.
-//
-// Temporary diagnostics: logs exactly once per conversation (reset alongside s_zeldaTalkActive in
-// update_zelda_talk_interaction()) the first time this handler actually runs while active, so a
-// real play-test can distinguish "the hook never fires at all" from "it fires, but checkEventRun()
-// returning true doesn't stop the player regardless."
-static bool s_loggedEventRunCheckHookFired = false;
+DEFINE_HOOK(&daNpc_Zelda_c::Draw, NpcZeldaDraw);
 
-static HookAction on_com_ifgp_event_run_check_pre(ModContext*, void*, void*, void* retval) {
-    if (s_zeldaTalkActive) {
-        if (!s_loggedEventRunCheckHookFired) {
-            mods::log::info("zelda talk: event-run-check hook fired, forcing checkEventRun()=true");
-            s_loggedEventRunCheckHookFired = true;
-        }
-        if (retval != nullptr) {
-            *static_cast<BOOL*>(retval) = true;
-        }
+// daNpc_Zelda_c::setCollision() registers a real world collision cylinder every tick (unless
+// mHide is set, which we can't use -- see the Draw() hook above); skip it entirely for our proxy
+// so she can't physically push Link or Epona around while invisibly co-located with the
+// companion.
+static HookAction on_npc_zelda_set_collision_pre(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* actor = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (is_zelda_npc_proxy(actor)) {
         return HOOK_SKIP_ORIGINAL;
     }
     return HOOK_CONTINUE;
 }
 
-DEFINE_HOOK(&dComIfGp_event_runCheck, ComIfGpEventRunCheck);
+DEFINE_HOOK(&daNpc_Zelda_c::setCollision, NpcZeldaSetCollision);
 
-// Belt-and-suspenders fallback for the hook above: force-freeze the player directly at the one
-// place in daAlink_c::setStickData() that actually reads the controller for the frame, instead of
-// relying on checkEventRun() correctly reporting true everywhere its ~40 call sites expect. Even
-// if the event-run-check hook above is for whatever reason not taking effect at runtime (its
-// installation is logged, but has not yet been confirmed to actually stop the player in practice),
-// this guarantees mStickValue/mMoveValue/mItemTrigger/mItemButton can never be repopulated from
-// real input while our conversation is active, matching setStickData()'s own checkEventRun()==true
-// branch (which leaves them at the zeroed/demo-only values set earlier in the same function).
-static void on_alink_set_stick_data_post(ModContext*, void* args, void*, void*) {
-    if (!s_zeldaTalkActive) {
-        return;
-    }
-    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    if (link == nullptr) {
-        return;
-    }
-    link->mStickValue = 0.0f;
-    link->mMoveValue = 0.0f;
-    link->mItemTrigger = 0;
-    link->mItemButton = 0;
-}
-
-DEFINE_HOOK(&daAlink_c::setStickData, AlinkSetStickData);
-
-// Whether the above hook is actually installed. If it failed to install for some reason, making
-// Zelda targetable/talkable via fopAc_AttnFlag_TALK_e would reintroduce the softlock it exists to
-// prevent, so zelda_talk_may_be_targeted() refuses to ever make her eligible without it.
-static bool s_orderTalkEventHookInstalled = false;
-
-// dMsgFlow_c::init(partner, i_flowID, ...) does two separate things with i_flowID that both
-// matter for which BMG "group" our dialogue ends up resolving against: it calls
-// dMsgObject_changeFlowGroup(i_flowID), AND (TARGET_PC only) it independently re-binds whatever
-// dMsgObject_getMsgDtPtr() currently returns to flow_group(i_flowID) -- its own private helper,
-// not something we can hook. Both of those only ever treat i_flowID as "common" (forcing the
-// shared group 0, where we registered Zelda's conversation) when it falls in [3000, 0x8000); our
-// mod-registered node id (>= 0x8000, e.g. 32782) never qualifies, so passing it directly as
-// i_flowID made init()'s own unconditional second bind_resource() call re-bind the active message
-// data back to whatever group the *current stage* happens to use instead of our common group --
-// silently corrupting node resolution for the rest of the conversation (our message node then
-// got misread as a leftover/garbage vanilla "event" node, explaining the setNodeIndex(0) ->
-// setNodeIndex(0xFFFF) abandonment sequence seen in testing). We previously tried to patch around
-// this with a changeFlowGroupLocal hook forcing mCurrentGroupID to 0, but that only ever affected
-// the *first* bind (inside changeGroupLocal()); init()'s own second, independent bind_resource()
-// call always ran right after it with the wrong group regardless, so the hook never actually
-// fixed anything.
-//
-// Instead, we call init() with a synthetic id in that common-flow range so the engine's own
-// logic binds everything to group 0 correctly on its own (removing the need for that hook
-// entirely), then immediately redirect to our real starting node once init() is done. Since this
-// id intentionally doesn't match any real vanilla flow label, init()'s own getInitNodeIndex()
-// lookup for it fails and marks the flow "ended" (checkEndFlow() reads true); we clear that back
-// off before redirecting.
-static constexpr u16 kZeldaTalkFlowId = 0x7000;
-
-DEFINE_HOOK(&dMsgFlow_c::setNodeIndex, MsgFlowSetNodeIndex);
-
-// Temporary diagnostic: dMsgFlow_c::setNodeIndex(0xFFFF, ...) is the ONLY place that marks a flow
-// "ended" (checkEndFlow()'s backing field) outside of .remove() (which we never call on
-// s_zeldaMsgFlow while active) or the kill-message-flag path (already ruled out via the previous
-// diagnostic). The previous round of this diagnostic showed the abandoned node was already 0,
-// not our actual starting node id (32782) -- meaning an earlier, successful setNodeIndex() call
-// already happened THIS SAME TICK before the final abandoning call, which the 0xFFFF-only filter
-// didn't catch. Log every call for our flow instance (there are only ever a handful per tick) to
-// see the complete sequence of node transitions leading up to the abandonment.
-static HookAction on_msg_flow_set_node_index_pre(ModContext*, void* args, void*, void*) {
-    dMsgFlow_c* self = mods::arg<dMsgFlow_c*>(args, 0);
-    u16 nodeIdx = mods::arg<u16>(args, 1);
-    if (self == &s_zeldaMsgFlow) {
-        mods::log::info(
-            "zelda talk: setNodeIndex({}) called (previous mNodeIdx={}, field_0x25={}, "
-            "field_0x26={}, mMsg={})",
-            (int)nodeIdx, (int)self->mNodeIdx, (int)self->field_0x25, (int)self->field_0x26,
-            (unsigned)self->mMsg);
-    }
-    return HOOK_CONTINUE;
-}
-
-// Whether Zelda is currently allowed to be targeted/talked to at all: dismounted, not hidden for
-// a cutscene, and no scripted event running. Does not look at the lock-on state itself, since
-// this is also what drives whether the engine will let her be locked onto for this purpose in
-// the first place.
+// Whether the proxy is currently allowed to be targeted/talked to at all: the companion must
+// exist, the player must be dismounted, Zelda mustn't be hidden for a cutscene, and no scripted
+// event (including her own conversation, once started) may already be running.
 static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
-    if (zelda == nullptr || player == nullptr || player->checkHorseRide() ||
-        !s_orderTalkEventHookInstalled) {
+    if (zelda == nullptr || player == nullptr || player->checkHorseRide()) {
         return false;
     }
     return !s_hideSpawnedZeldaInCutscene && !dComIfGp_event_runCheck();
 }
 
-// Keeps Zelda's native lock-on "talk" eligibility in sync with zelda_talk_may_be_targeted() every
-// tick, so the engine's own "Speak" action-button prompt only ever appears while she's actually
-// allowed to be talked to, and Z-targeting her is otherwise impossible for this purpose.
-static void update_zelda_talk_eligibility(fopAc_ac_c* zelda, bool eligible) {
-    if (zelda == nullptr) {
+// Keeps the invisible proxy glued to the companion every tick, and keeps its native lock-on
+// "talk" eligibility in sync with zelda_talk_may_be_targeted(), so the engine's own "Speak"
+// action-button prompt only ever appears while she's actually allowed to be talked to.
+//
+// daNpc_Zelda_c::setParam() (called earlier this same tick, from execute()) unconditionally
+// turns both fopAc_AttnFlag_SPEAK_e (the proximity "talk" icon -- which would visually collide
+// with Epona's own "mount" prompt) and fopAc_AttnFlag_TALK_e (the lock-on-only eligibility we
+// actually want) back on; this runs synchronously right after that within the same Execute()
+// call, so nothing outside it (in particular dAttention_c's own lock-on candidate search) ever
+// observes the transient over-permissive state setParam() leaves behind.
+static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* proxy = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (!is_zelda_npc_proxy(proxy)) {
         return;
     }
-    if (eligible) {
-        zelda->attention_info.flags |= fopAc_AttnFlag_TALK_e;
-        zelda->eventInfo.onCondition(dEvtCnd_CANTALK_e);
-    } else {
-        zelda->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
-        zelda->eventInfo.offCondition(dEvtCnd_CANTALK_e);
+
+    fopAc_ac_c* companion = find_spawned_zelda();
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+
+    if (companion != nullptr) {
+        proxy->current.pos = companion->current.pos;
+        proxy->shape_angle.y = companion->shape_angle.y;
+        fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
     }
+
+    proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
+    if (companion != nullptr && zelda_talk_may_be_targeted(companion, player)) {
+        proxy->attention_info.flags |= fopAc_AttnFlag_TALK_e;
+    } else {
+        proxy->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
+    }
+}
+
+DEFINE_HOOK(&daNpc_Zelda_c::Execute, NpcZeldaExecute);
+
+// dMsgFlow_c::init(partner, i_flowID, ...) (called by the proxy's own native talk() state via
+// initTalk(mFlowNodeNo, ...), with mFlowNodeNo read once at create() time from our synthetic
+// kZeldaTalkFlowId spawn angle, see spawn_zelda_npc_proxy()) ends with
+// setNodeIndex(getInitNodeIndex(mFlow), ...). Since kZeldaTalkFlowId intentionally doesn't match
+// any real vanilla flow label, the real getInitNodeIndex() lookup for it always misses; intercept
+// it here and hand back our actual registered starting node instead, exactly once per
+// conversation.
+static HookAction on_msg_flow_get_init_node_index_pre(ModContext*, void* args, void* retval, void*) {
+    dMsgFlow_c* self = mods::arg<dMsgFlow_c*>(args, 0);
+    u16 flowId = mods::arg<u16>(args, 1);
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    if (proxy != nullptr && flowId == kZeldaTalkFlowId &&
+        self == &static_cast<daNpc_Zelda_c*>(proxy)->mFlow) {
+        if (retval != nullptr) {
+            *static_cast<u16*>(retval) = s_zeldaTalkNodeId;
+        }
+        mods::log::info(
+            "zelda talk: flow redirect fired, starting at node {}", (int)s_zeldaTalkNodeId);
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&dMsgFlow_c::getInitNodeIndex, MsgFlowGetInitNodeIndex);
+
+// Spawns/despawns the invisible talk proxy alongside the companion's own lifecycle: she only
+// needs to exist while the companion does, and self-heals (via find_zelda_npc_proxy()'s own
+// liveness check) if the engine ever deletes her out from under us.
+static void sync_zelda_npc_proxy_lifecycle(fopAc_ac_c* companion) {
+    find_zelda_npc_proxy();
+    if (companion == nullptr) {
+        remove_zelda_npc_proxy();
+        return;
+    }
+    if (!s_hasZeldaNpcProxy) {
+        spawn_zelda_npc_proxy(companion);
+    }
+}
+
+// Whether the conversation currently on screen is specifically the one we drive through the
+// proxy (as opposed to some other NPC's, or none at all) -- used to gate the companion's faux
+// lip-sync below.
+static bool zelda_talk_is_active() {
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    return proxy != nullptr && dMsgObject_isTalkNowCheck() && dComIfGp_getEvent()->getPt2() == proxy;
 }
 
 // Drives s_zeldaMouthAngle (applied every frame by hozelda_mouth_joint_callback(), see its
@@ -1668,185 +1699,9 @@ static void update_zelda_mouth_animation(bool talking) {
 }
 
 static void update_zelda_talk_interaction() {
-    fopAc_ac_c* zelda = find_spawned_zelda();
-    daPy_py_c* player = daPy_getLinkPlayerActorClass();
-    bool eligible = zelda_talk_may_be_targeted(zelda, player);
-    update_zelda_talk_eligibility(zelda, eligible);
-    update_zelda_mouth_animation(s_zeldaTalkActive);
-
-    if (!s_zeldaTalkActive) {
-        dAttention_c* attention = dComIfGp_getAttention();
-        bool lockedOnZelda = zelda != nullptr && attention->LockonTruth() &&
-            attention->LockonTarget(0) == zelda;
-        bool triggered = mDoCPd_c::getTrigA(PAD_1);
-
-        // Temporary diagnostics: logs exactly once per button press made while locked onto Zelda,
-        // regardless of which gate ends up blocking it, so a real play-test pinpoints exactly why
-        // dialogue isn't opening in the field.
-        if (lockedOnZelda && triggered) {
-            mods::log::info(
-                "zelda talk: button press while locked on (eligible={}, nodeId={}, busy={})",
-                eligible, (int)s_zeldaTalkNodeId, dMsgObject_isTalkNowCheck());
-        }
-
-        if (s_zeldaTalkNodeId == 0 || !eligible || !lockedOnZelda || !triggered ||
-            dMsgObject_isTalkNowCheck()) {
-            return;
-        }
-
-        // dMsgFlow_c::doFlow() unconditionally kills the flow it's given -- before ever
-        // attempting to open a message window -- whenever dMsgObject_isKillMessageFlag() reads
-        // true that tick (see its field_0x26/field_0x27 early-out). That flag lives on the
-        // engine-wide dMsgObject_c singleton (shared by every flow in the game, not just ours),
-        // gets set any time some other system aborts a conversation (pause menu opening, a
-        // scripted event starting, another NPC's flow being torn down, ...), and is only ever
-        // consumed/cleared by dMsgObject_c::_execute() -- which itself only runs while an actual
-        // message window process is alive. That means a stale flag set before we ever had a
-        // window open can never self-clear, silently killing our very first doFlow() tick (the
-        // exact doFlowResult=1/ended=true symptom seen in testing) without ever touching the
-        // group-resolution path at all. Clear it ourselves right before init() so a leftover kill
-        // request from something unrelated can't swallow our conversation before it starts.
-        dMsgObject_c* msgObjectClass = dMsgObject_getMsgObjectClass();
-        bool killFlagWasSet =
-            msgObjectClass != nullptr && msgObjectClass->isKillMessageFlagLocal();
-        if (killFlagWasSet) {
-            msgObjectClass->offKillMessageFlagLocal();
-        }
-        mods::log::info("zelda talk: kill-message flag before init() was {}", killFlagWasSet);
-
-        s_zeldaTalkActive = true;
-        s_loggedEventRunCheckHookFired = false;
-        // Vanilla's own dAttention_c::execute() auto-releases lock-on once checkEventRun() reads
-        // true (see its "mAttnStatus = EState_NONE; ...; freeAttention();" branch), but that's
-        // one more mechanism relying on indirect cascading rather than something directly
-        // observed to work in this mod's testing. Release it ourselves right away too, so the
-        // L-target reticle on Zelda can't linger on screen for even a frame once the conversation
-        // starts, regardless of exactly why the vanilla path alone wasn't enough.
-        dComIfGp_getAttention()->freeAttention();
-        // Use the synthetic "common flow" id here (see kZeldaTalkFlowId's comment) purely so the
-        // engine's own group-resolution logic binds everything to our common message group (0)
-        // correctly on its own. It doesn't correspond to any real vanilla flow, so init()'s own
-        // getInitNodeIndex() lookup for it fails and marks the flow ended; clear that back off
-        // and jump straight to our actual registered starting node now that the message group is
-        // correctly bound.
-        s_zeldaMsgFlow.init(zelda, kZeldaTalkFlowId, 0, nullptr);
-        s_zeldaMsgFlow.field_0x26 = 0;
-        s_zeldaMsgFlow.setNodeIndex(s_zeldaTalkNodeId, nullptr);
-        // dMsgObject_c::waitProc() only opens the message window once either a "talk camera" has
-        // actually focused on the speaker (dComIfGp_checkCameraAttentionStatus(..., 4)) or this
-        // camera-cancel flag is set; the normal fopAcM_orderTalkEvent()/event pipeline sets up
-        // that talk-camera focus for us, but our flow bypasses that pipeline entirely, so
-        // waitProc() would otherwise stall forever waiting for a camera transition that never
-        // happens. Force the same bypass vanilla "demo" messages use (see
-        // dMsgObject_c::setMessageIndexDemo()) so the window opens immediately; the engine clears
-        // this flag back off on its own once the conversation's cleanup runs.
-        dMsgObject_onCameraCancelFlag();
-        mods::log::info(
-            "zelda talk: flow init() called, status now talkNow={}, already ended={}",
-            dMsgObject_isTalkNowCheck(), s_zeldaMsgFlow.checkEndFlow());
-        return;
-    }
-
-    if (zelda == nullptr) {
-        s_zeldaMsgFlow.remove();
-        s_zeldaTalkActive = false;
-        return;
-    }
-
-    // Temporary diagnostics: doFlow() runs every tick while active. Besides logging on an actual
-    // state change (the busy flag flipping, or the flow reporting it ended), also force a log for
-    // the first several ticks after activation unconditionally -- a silent, permanently-stuck
-    // steady state (busy never becomes true, never ends, nothing else changes) is itself a
-    // meaningful symptom that the gated log would otherwise hide entirely. mMsg/field_0x25 are
-    // logged raw since fopMsgM_messageSet()'s singleton message actor returns 0 (not the
-    // fpcM_ERROR_PROCESS_ID_e sentinel 0xFFFFFFFF) when it's not currently in its "preparing"
-    // mode, which setNormalMsg() cannot distinguish from a real process id.
-    static bool s_lastLoggedBusy = false;
-    static int s_ticksSinceActivation = 0;
-    bool busyBefore = dMsgObject_isTalkNowCheck();
-
-    // Keep lock-on released every tick, not just once at activation, in case anything reacquires
-    // it while we're talking (see the comment where this is first called, at conversation start).
-    dAttention_c* attention = dComIfGp_getAttention();
-    attention->freeAttention();
-
-    // Temporary diagnostics: dAttention_c::execute()'s own checkEventRun()-gated branch should
-    // force mAttnStatus back to EState_NONE and keep LockonTarget(0) permanently NULL every tick
-    // our hook reports checkEventRun()==true -- meaning our freeAttention() call above should be
-    // entirely redundant with vanilla behavior, and the reticle should vanish (after at most a few
-    // fade-out frames) regardless. If it's still locked onto Zelda right after we called
-    // freeAttention() ourselves, that's direct proof something is re-acquiring the lock later the
-    // same frame (i.e. d_attention.cpp's own call to checkEventRun() isn't seeing our forced
-    // value, mirroring the exact same failure mode daAlink_c::checkEventRun() had).
-    static bool s_lastLoggedStillLocked = false;
-    bool stillLockedOnZelda = zelda != nullptr && attention->LockonTruth() &&
-        attention->LockonTarget(0) == zelda;
-    if (stillLockedOnZelda != s_lastLoggedStillLocked) {
-        mods::log::info(
-            "zelda talk: lock-on state right after freeAttention() this tick: stillLockedOnZelda={}",
-            stillLockedOnZelda);
-        s_lastLoggedStillLocked = stillLockedOnZelda;
-    }
-
-    // Our checkEventRun() hook and daAlink_c::setStickData() post-hook only block the player's own
-    // movement/combat processing and the real event system's own menu-gating logic -- but neither
-    // actually stops the Start button or D-pad (item wheel / map) triggers from reaching the pause
-    // menu's own FSM, nor the C-stick from reaching the camera, since both read straight off the
-    // raw mDoCPd_c pad struct rather than going through anything we've hooked. Opening the pause
-    // menu, item wheel, or map screen mid-conversation corrupts the UI and has been observed to
-    // softlock the game (and SIGSEGV on a subsequent reset), so zero out exactly those raw fields
-    // on the shared pad struct every tick while talking: C-stick (camera), Start, and the D-pad
-    // directions. A/B/X/Y/Z/L/R are deliberately left untouched so dMsgObject_c::isSend() (which
-    // reads the same struct) still sees real A/B presses to advance/end the conversation.
-    interface_of_controller_pad& pad = mDoCPd_c::getCpadInfo(PAD_1);
-    pad.mCStickPosX = 0.0f;
-    pad.mCStickPosY = 0.0f;
-    pad.mCStickValue = 0.0f;
-    pad.mCStickAngle = 0;
-    constexpr u32 kBlockedButtonMask =
-        PAD_BUTTON_START | PAD_BUTTON_UP | PAD_BUTTON_DOWN | PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT;
-    pad.mPressedButtonFlags &= ~kBlockedButtonMask;
-    pad.mButtonFlags &= ~kBlockedButtonMask;
-
-    // Temporary diagnostics: log the exact raw hardware trigger state dMsgObject_c::isSend() reads
-    // (mDoCPd_c::getTrigA/getTrigB) every tick it's nonzero, to directly confirm whether real
-    // button input is what's driving each setNodeIndex() transition logged by
-    // on_msg_flow_set_node_index_pre -- including the final page, which has been auto-closing
-    // without an apparent press even now that the player is fully frozen.
-    bool rawTrigA = mDoCPd_c::getTrigA(PAD_1);
-    bool rawTrigB = mDoCPd_c::getTrigB(PAD_1);
-    if (rawTrigA || rawTrigB) {
-        mods::log::info("zelda talk: raw hw trigger this tick (A={}, B={})", rawTrigA, rawTrigB);
-    }
-
-    int doFlowResult = s_zeldaMsgFlow.doFlow(zelda, nullptr, 0);
-    bool ended = s_zeldaMsgFlow.checkEndFlow();
-    bool busyAfter = dMsgObject_isTalkNowCheck();
-    bool forceLog = s_ticksSinceActivation < 5;
-    if (busyAfter != s_lastLoggedBusy || ended || forceLog) {
-        mods::log::info(
-            "zelda talk: doFlow tick (doFlowResult={}, busy {}->{}, hasMsgProcess={}, ended={}, "
-            "mMsg={:#x}, field_0x25={}, heapLockFlag={})",
-            doFlowResult, busyBefore, busyAfter, s_zeldaMsgFlow.getMsg() != nullptr, ended,
-            s_zeldaMsgFlow.mMsg, (int)s_zeldaMsgFlow.field_0x25, (int)dComIfGp_isHeapLockFlag());
-        s_lastLoggedBusy = busyAfter;
-    }
-    s_ticksSinceActivation++;
-
-    if (ended) {
-        // The flow object itself considers the conversation over as soon as the last node is
-        // abandoned (setNodeIndex(0xFFFF)), but that alone never tells the underlying
-        // dMsgObject_c singleton to actually tear down -- remove() is what sets its
-        // kill-message flag (dMsgObject_onKillMessageFlag()), which is what its own _execute()
-        // reads to finally close the window and drop back to idle. Without this,
-        // dMsgObject_isTalkNowCheck() ("busy") stays stuck true forever even though our flow has
-        // already moved on, leaving the UI looking like the conversation never ended.
-        s_zeldaMsgFlow.remove();
-        s_zeldaTalkActive = false;
-        s_lastLoggedBusy = false;
-        s_ticksSinceActivation = 0;
-        s_lastLoggedStillLocked = false;
-    }
+    fopAc_ac_c* companion = find_spawned_zelda();
+    sync_zelda_npc_proxy_lifecycle(companion);
+    update_zelda_mouth_animation(zelda_talk_is_active());
 }
 
 static bool is_epona_follow_control_disabled(ModContext*, void*) {
@@ -2074,38 +1929,35 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
-    result = mods::hook::add_pre<OrderTalkEvent>(on_order_talk_event_pre);
-    s_orderTalkEventHookInstalled = result == MOD_OK;
+    result = mods::hook::add_pre<NpcZeldaDraw>(on_npc_zelda_draw_pre);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook talk-event ordering, talking to Zelda while dismounted will be "
-            "unavailable: {}",
+            "failed to hook the Zelda NPC talk proxy's draw call, an invisible duplicate Zelda "
+            "may become visible: {}",
             (int)result);
     }
 
-    result = mods::hook::add_pre<MsgFlowSetNodeIndex>(on_msg_flow_set_node_index_pre);
-    if (result != MOD_OK) {
-        mods::log::warn("failed to hook flow node-index diagnostics: {}", (int)result);
-    }
-
-    result = mods::hook::add_pre<ComIfGpEventRunCheck>(on_com_ifgp_event_run_check_pre);
-    // Temporary diagnostics: logged unconditionally (not just on failure) so a real play-test can
-    // directly confirm the install actually succeeded, rather than inferring it from the absence
-    // of the warning below.
-    mods::log::info("zelda talk: event-run-check hook install result = {}", (int)result);
+    result = mods::hook::add_pre<NpcZeldaSetCollision>(on_npc_zelda_set_collision_pre);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook player event-run check, player will be able to move/fight during "
-            "Zelda's dialogue: {}",
+            "failed to hook the Zelda NPC talk proxy's collision setup, an invisible duplicate "
+            "Zelda may physically push Link/Epona around: {}",
             (int)result);
     }
 
-    result = mods::hook::add_post<AlinkSetStickData>(on_alink_set_stick_data_post);
-    mods::log::info("zelda talk: player stick-freeze hook install result = {}", (int)result);
+    result = mods::hook::add_post<NpcZeldaExecute>(on_npc_zelda_execute_post);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to hook player stick-data, player will be able to move/fight during Zelda's "
-            "dialogue: {}",
+            "failed to hook the Zelda NPC talk proxy's execute(), talking to Zelda while "
+            "dismounted will be unavailable: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<MsgFlowGetInitNodeIndex>(on_msg_flow_get_init_node_index_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook the message flow's starting-node lookup, talking to Zelda while "
+            "dismounted will open an empty/incorrect conversation: {}",
             (int)result);
     }
 
@@ -2259,10 +2111,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
-    if (s_zeldaTalkActive) {
-        s_zeldaMsgFlow.remove();
-        s_zeldaTalkActive = false;
-    }
+    remove_zelda_npc_proxy();
     s_zeldaTalkGraph.reset();
     s_zeldaTalkMessages.clear();
     mods::hook::uninstall<ActorDelete>();
@@ -2275,11 +2124,10 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
-    mods::hook::uninstall<MsgFlowSetNodeIndex>();
-    mods::hook::uninstall<OrderTalkEvent>();
-    mods::hook::uninstall<ComIfGpEventRunCheck>();
-    mods::hook::uninstall<AlinkSetStickData>();
-    s_orderTalkEventHookInstalled = false;
+    mods::hook::uninstall<NpcZeldaDraw>();
+    mods::hook::uninstall<NpcZeldaSetCollision>();
+    mods::hook::uninstall<NpcZeldaExecute>();
+    mods::hook::uninstall<MsgFlowGetInitNodeIndex>();
     return MOD_OK;
 }
 }
