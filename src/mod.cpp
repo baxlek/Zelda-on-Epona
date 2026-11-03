@@ -2463,6 +2463,19 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         s_hideSpawnedZeldaInCutscene = false;
     }
 
+    // Her own talk event runs through the same dComIfGp_event_runCheck()/isOrderOK() machinery
+    // native scripted cutscenes do (see zelda_talk_event_active()'s own dComIfGp_event_runCheck()
+    // check above), which is why checkHorseDemoMode() -- and therefore inScriptedCutscene above
+    // -- also reports true for the entire duration of her dialogue: Epona isn't registered as
+    // this synthetic event's "staff", so daHorse_c::setDemoData() treats it exactly like being
+    // sidelined for an unrelated cutscene. Unconditionally keep her visible while she's actually
+    // the one talking, regardless of the "Show Zelda During Cutscenes" setting -- that setting
+    // was never meant to apply to her own dialogue, and hiding her mid-conversation would be
+    // jarring.
+    if (zelda_talk_event_active()) {
+        s_hideSpawnedZeldaInCutscene = false;
+    }
+
     log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
                                          storyHoZeldaActive);
 
