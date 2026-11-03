@@ -1515,6 +1515,65 @@ static mods::flow::Graph s_zeldaTalkGraph;
 static std::vector<mods::flow::RegisteredMessage> s_zeldaTalkMessages;
 static u16 s_zeldaTalkNodeId = 0;
 
+// Page 1's registered id, kept around so update_zelda_talk_heal_effect() (further down) can tell
+// -- by comparing it against the live msg_class's msg_idx -- whether the conversation is
+// currently showing page 1 specifically, as opposed to page 2 or no conversation at all.
+static MessageId s_zeldaTalkPage1MessageId = 0;
+
+// How long (in the same ~60Hz tick domain daPy_addCalcShort()/cLib_addCalcAngleS() already use
+// elsewhere in this file) page 1 holds the player's continue input once typing finishes, via the
+// input_after_delay() tag registered on it below -- long enough for the heal particle trail to
+// actually be seen before the conversation can move on. ~1.5 seconds.
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 90;
+
+// How long the heal particle trail itself keeps emitting before we stop it. Deliberately shorter
+// than the input delay above so the trail has already been running for a moment (rather than
+// just appearing) by the time the player becomes able to advance.
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 75;
+
+// 8 hearts, in the quarter-heart units dComIfGp_setItemLifeCount() expects -- the same amount
+// item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
+static constexpr f32 kZeldaTalkHealAmount = 32.0f;
+
+// Roughly chest height, so the glow/star trail wraps the player's body instead of pooling at
+// their feet.
+static constexpr f32 kZeldaTalkHealEffectHeight = 50.0f;
+
+// Handles for the two particle emitters below, tracked the same way daAlink_c's own effect
+// fields are (e.g. field_0x31c4 in d_a_alink.h): 0 means "no emitter yet / already stopped",
+// otherwise dComIfGp_particle_getEmitter() resolves it back to a live JPABaseEmitter.
+static u32 s_zeldaTalkHealGlowEmitterId = 0;
+static u32 s_zeldaTalkHealStarEmitterId = 0;
+// Countdown until stop_zelda_talk_heal_effect() is called; -1 while the effect isn't playing.
+static s32 s_zeldaTalkHealEffectFramesLeft = -1;
+
+static void stop_zelda_talk_heal_effect() {
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlowEmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealStarEmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    s_zeldaTalkHealEffectFramesLeft = -1;
+}
+
+// Restores 8 hearts (dComIfGp_setItemLifeCount(), the same call item_func_RECOVER_FAILY() makes
+// for a native bottled fairy) and spawns the glow/star particles daObj_Yousei_c -- the bottled
+// fairy actor itself -- wears on her own body (d_a_obj_yousei.cpp's ID_ZF_J_FAIRY00_GLOW /
+// ID_ZF_J_FAIRY02_STAR emitters), anchored to the player instead of an actual fairy actor, since
+// only the cosmetic sparkle trail was wanted, not the fairy.
+static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
+    dComIfGp_setItemLifeCount(kZeldaTalkHealAmount, 0);
+
+    cXyz pos = player->current.pos;
+    pos.y += kZeldaTalkHealEffectHeight;
+    s_zeldaTalkHealGlowEmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlowEmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
+    s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY02_STAR, &pos, nullptr, nullptr);
+    s_zeldaTalkHealEffectFramesLeft = kZeldaTalkHealEffectDurationFrames;
+}
+
 static ActorId s_zeldaNpcProxyId = 0;
 static bool s_hasZeldaNpcProxy = false;
 
@@ -1622,9 +1681,16 @@ static ModResult register_zelda_talk_flow() {
     // back to normal gameplay once the player dismisses it -- no extra closing logic needed.
     MessageId page1Id = 0;
     MessageId page2Id = 0;
+    // input_after_delay() emits MSGTAG_BOXATLEAST (group 0, type 54): the engine keeps page 1's
+    // box up and ignores the player's continue input until kZeldaTalkHealEffectDelayFrames have
+    // elapsed, giving update_zelda_talk_heal_effect()'s particle trail (triggered the instant
+    // typing finishes, see below) a moment to actually play before the player can page past it.
     ModResult result = register_page(
         [](mods::flow::MessageBuilder& builder) {
-            builder.text("Greetings, ").player_name().text("!\nI pray you are in good health?");
+            builder.text("Greetings, ")
+                .player_name()
+                .text("!\nI pray you are in good health?")
+                .input_after_delay(kZeldaTalkHealEffectDelayFrames);
         },
         page1Id);
     if (result == MOD_OK) {
@@ -1638,6 +1704,7 @@ static ModResult register_zelda_talk_flow() {
     if (result != MOD_OK) {
         return result;
     }
+    s_zeldaTalkPage1MessageId = page1Id;
 
     mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
     const auto page2 = graph.add_message(page2Id).next(mods::flow::kEnd);
@@ -1841,10 +1908,46 @@ static void update_zelda_mouth_animation(bool talking) {
     daPy_addCalcShort(&s_zeldaMouthAngle, target, 3, 0x1000, 0x100);
 }
 
+// Ticks the countdown started by trigger_zelda_talk_heal_effect(), and fires that effect itself
+// exactly once per page-1 display, the instant its text finishes typing out: msg_class::mode
+// transitions away from fopMsg_MODE_MSG_TYPING_e (0x06, "actively revealing characters") the
+// same tick the last character appears -- the same mode value daNpcT_c::ctrlMsgAnm() reads for
+// real NPCs' lip-sync -- so watching for that falling edge, rather than guessing a frame count,
+// catches "done typing" regardless of text length or the player's text-speed setting. Compared
+// against s_zeldaTalkPage1MessageId (rather than just zelda_talk_is_active()) so page 2 -- which
+// shares the same event/flow -- is never mistaken for page 1.
+static void update_zelda_talk_heal_effect() {
+    if (s_zeldaTalkHealEffectFramesLeft >= 0 && --s_zeldaTalkHealEffectFramesLeft < 0) {
+        stop_zelda_talk_heal_effect();
+    }
+
+    static bool s_wasTyping = false;
+    static bool s_effectFiredThisPage = false;
+
+    msg_class* msg_p = dMsgObject_c::getActor();
+    bool onPage1 = zelda_talk_event_active() && msg_p != nullptr &&
+                   msg_p->msg_idx == s_zeldaTalkPage1MessageId;
+    if (!onPage1) {
+        s_wasTyping = false;
+        s_effectFiredThisPage = false;
+        return;
+    }
+
+    bool isTyping = msg_p->mode == fopMsg_MODE_MSG_TYPING_e;
+    if (s_wasTyping && !isTyping && !s_effectFiredThisPage) {
+        if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
+            trigger_zelda_talk_heal_effect(player);
+        }
+        s_effectFiredThisPage = true;
+    }
+    s_wasTyping = isTyping;
+}
+
 static void update_zelda_talk_interaction() {
     fopAc_ac_c* companion = find_spawned_zelda();
     sync_zelda_npc_proxy_lifecycle(companion);
     update_zelda_mouth_animation(zelda_talk_is_active());
+    update_zelda_talk_heal_effect();
 }
 
 static bool is_epona_follow_control_disabled(ModContext*, void*) {
