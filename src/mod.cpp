@@ -1665,16 +1665,27 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         u8 talkDistIdx = proxy->attention_info.distances[fopAc_attn_TALK_e];
         dist_entry& talkDist = dAttention_c::getDistTable(talkDistIdx);
         if (diagPlayer != nullptr) {
-            cXyz playerAttnPos = diagPlayer->attention_info.position;
-            cXyz delta = proxy->attention_info.position - playerAttnPos;
+            // Replicate dAttention_c::setOwnerAttentionPos()/SelectAttention()'s own reference
+            // point and angle math exactly, so angle/invAngle below are the very same values
+            // check_flontofplayer() (the mAngleSelect "must be in front" gate) would receive.
+            cXyz ownerAttnPos = diagPlayer->attention_info.position;
+            if (fopAcM_GetName(diagPlayer) == fpcNm_ALINK_e) {
+                ownerAttnPos.y -= daPy_py_c::getAttentionOffsetY();
+            }
+            cXyz delta = proxy->attention_info.position - ownerAttnPos;
+            cSGlobe globe(delta);
+            s16 angle = (cSAngle(globe.U()) - fopAcM_GetShapeAngle_p(diagPlayer)->y).Val();
+            s16 invAngle = (cSAngle(globe.U().Inv()) - fopAcM_GetShapeAngle_p(proxy)->y).Val();
             mods::log::info(
                 "zelda talk: proxy diag (eligible={}, flags={:#x}, attnPos=({:.1f},{:.1f},{:.1f}), "
-                "playerAttnPos=({:.1f},{:.1f},{:.1f}), deltaY={:.1f}, deltaXZ={:.1f}, "
-                "talkDistIdx={}, mDistMax={:.1f}, mUpperY={:.1f}, mLowerY={:.1f})",
+                "ownerAttnPos=({:.1f},{:.1f},{:.1f}), deltaY={:.1f}, deltaXZ={:.1f}, "
+                "talkDistIdx={}, mDistMax={:.1f}, mUpperY={:.1f}, mLowerY={:.1f}, mAngleSelect={:#x}, "
+                "angle={}, invAngle={})",
                 eligible, (unsigned)proxy->attention_info.flags, proxy->attention_info.position.x,
-                proxy->attention_info.position.y, proxy->attention_info.position.z, playerAttnPos.x,
-                playerAttnPos.y, playerAttnPos.z, delta.y, delta.absXZ(), talkDistIdx,
-                talkDist.mDistMax, talkDist.mUpperY, talkDist.mLowerY);
+                proxy->attention_info.position.y, proxy->attention_info.position.z, ownerAttnPos.x,
+                ownerAttnPos.y, ownerAttnPos.z, delta.y, delta.absXZ(), talkDistIdx,
+                talkDist.mDistMax, talkDist.mUpperY, talkDist.mLowerY, talkDist.mAngleSelect, angle,
+                invAngle);
         } else {
             mods::log::info(
                 "zelda talk: proxy diag (eligible={}, flags={:#x}, talkDistIdx={}, mDistMax={:.1f}, "
