@@ -1692,7 +1692,17 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     // directly, from the same numbers the engine itself uses, whether our proxy is being rejected
     // as a lock-on candidate by that vertical-window check versus something else entirely.
     static u32 s_proxyDiagCounter = 0;
-    if (companion != nullptr && (++s_proxyDiagCounter % 30) == 0) {
+    ++s_proxyDiagCounter;
+    if ((s_proxyDiagCounter % 30) == 0) {
+        mods::log::info(
+            "zelda talk: proxy diag -- proxyPos=({:.1f},{:.1f},{:.1f}), "
+            "companionFound={}, companionPos=({:.1f},{:.1f},{:.1f})",
+            proxy->current.pos.x, proxy->current.pos.y, proxy->current.pos.z, companion != nullptr,
+            companion != nullptr ? companion->current.pos.x : 0.0f,
+            companion != nullptr ? companion->current.pos.y : 0.0f,
+            companion != nullptr ? companion->current.pos.z : 0.0f);
+    }
+    if (companion != nullptr && (s_proxyDiagCounter % 30) == 0) {
         daPy_py_c* diagPlayer = daPy_getLinkPlayerActorClass();
         u8 talkDistIdx = proxy->attention_info.distances[fopAc_attn_TALK_e];
         dist_entry& talkDist = dAttention_c::getDistTable(talkDistIdx);
