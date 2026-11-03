@@ -1526,8 +1526,8 @@ static MessageId s_zeldaTalkPage1MessageId = 0;
 // once typing finishes, via the input_after_delay() tag registered on it below -- long enough for
 // the heal particle trail (and its accompanying Z2SE_FAIRY_S_LV/Z2SE_FAIRY_S_FLY_RTT sounds) to
 // actually be heard/seen before the conversation can move on, without making the player wait too
-// long in dialogue. ~2 seconds.
-static constexpr u16 kZeldaTalkHealEffectDelayFrames = 60;
+// long in dialogue. ~3 seconds.
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 90;
 
 // How long the heal particle trail itself keeps emitting before we stop it (which also stops its
 // accompanying Z2SE_FAIRY_S_LV loop via stop_zelda_talk_heal_effect()'s seStop() call, cutting
@@ -1535,7 +1535,7 @@ static constexpr u16 kZeldaTalkHealEffectDelayFrames = 60;
 // spiral so the player isn't held in dialogue too long; matches the input delay above so the
 // spiral finishes closing in right as the player becomes able to advance, rather than getting cut
 // off mid-spin or lingering after input unlocks.
-static constexpr s32 kZeldaTalkHealEffectDurationFrames = 60;
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 90;
 
 // 8 hearts, in the quarter-heart units dComIfGp_setItemLifeCount() expects -- the same amount
 // item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
@@ -1662,15 +1662,19 @@ static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
                              -1.0f, 0);
 }
 
-// Z2SpeechMgr2's voice-bank "speaker" id (see its playOneShotVoice(), called per-character while
-// a message types out): speaker id 0 -- the default when a message's style doesn't set one --
-// makes it bail out immediately without playing anything, which is why Zelda's dialogue here was
-// silent. Any nonzero id that isn't one of playOneShotVoice()'s special-cased speaker/mood
-// combinations (Midna's 21, or the various animal/named-NPC ids like 3/29/30/32/35/37/38/47/
-// 69-74/107/112/113, each of which only fires for specific moods we never request) falls through
-// to its generic per-character "typing" click (Z2SE_MESSAGE_SE_COMMON) -- the same blip sound
-// virtually every human NPC's dialogue uses.
-static constexpr uint8_t kZeldaTalkSpeakerId = 1;
+// Z2SpeechMgr2's voice-bank "speaker" id, which gates TWO separate native sound systems:
+//   - jmessage_tSequenceProcessor::do_character()'s one-shot messageSePlay() -> playOneShotVoice()
+//     (a per-message "mood grunt", gated only on speaker_mood being set -- we don't use this).
+//   - jmessage_tMeasureProcessor::do_end()'s Z2GetSpeechMgr2()->setString(..., speaker, mood),
+//     which is the REAL per-character typing click: Z2SpeechMgr2::setString() maps speaker ids
+//     0-3 to mVoice=99 and returns immediately (permanently disabling the per-character sound for
+//     the rest of that message -- the bug an earlier id of 1 accidentally hit), while any id
+//     outside its big per-NPC-archetype table (e.g. Midna's 0x13/0x15, Goron's 0xe, etc.) falls
+//     through to its `default: mVoice = 11` bucket, which setTextCount() (called every tick as
+//     more characters become visible) uses to play Z2SE_SY_TEXT_OUT -- the same generic
+//     per-character click ordinary human NPCs use. 5 is simply an id that doesn't appear anywhere
+//     in either native table, landing cleanly in that default/generic bucket.
+static constexpr uint8_t kZeldaTalkSpeakerId = 5;
 
 static ActorId s_zeldaNpcProxyId = 0;
 static bool s_hasZeldaNpcProxy = false;
