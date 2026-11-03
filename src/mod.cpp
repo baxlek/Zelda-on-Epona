@@ -1658,25 +1658,23 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
 
         // Override the lock-on target point directly instead of trusting setAttnPos()'s own
-        // computation for it: that native math rotates a small local bust offset through
-        // mCurAngle.y via a from-scratch matrix (daNpc_Zelda_c::setAttnPos(), the
-        // "acStack_3c.set(0,170,10); YrotS(mCurAngle.y); multVec(...)" sequence), which is an
-        // extra, unverified source of uncertainty for a value this entire feature's usability
-        // hinges on. A pure yaw rotation can never change the vertical component regardless, so
-        // just use the companion's own position plus that same fixed bust-height offset
-        // directly -- simpler, and immune to any sign/reference-angle mistake in the rotation.
-        proxy->attention_info.position = companion->current.pos;
-        proxy->attention_info.position.y += 170.0f;
+        // computation for it (that native math rotates a small local bust offset through
+        // mCurAngle.y via a from-scratch matrix, an extra unverified source of uncertainty for a
+        // value this entire feature's usability hinges on), or re-deriving our own Y offset from
+        // scratch. The real, visible daHoZelda_c companion already recomputes its own
+        // attention_info.position natively every tick in setBowModel()
+        // (current.pos.y + 80.0f -- see d_a_hozelda.cpp), and the pre-proxy implementation of
+        // this feature targeted that real actor directly and was reliably lock-on-able. Reuse
+        // that exact value instead of our own +170.0f guess (which put the proxy's attention
+        // point ~90 units higher than the companion's own, pushing the real-world vertical gap
+        // to a dismounted player's own attention point past most dist_table windows).
+        proxy->attention_info.position = companion->attention_info.position;
 
         // The proxy's class (daNpc_Zelda_c) defaults attention_info.distances[TALK_e] to a
         // dist_table entry (index 219: mDistMax=300, mUpperY=300, mLowerY=-300) sized for a
-        // normal ground-level NPC. Our companion sits on Epona's back, so her attention point
-        // sits roughly 300-1100+ units above a dismounted player's own attention point depending
-        // on terrain -- comfortably outside that +-300 vertical window most of the time, which is
-        // why lock-on was failing almost everywhere despite otherwise-correct eligibility flags.
-        // Override to dist_table[18] (mDistMax=500, mUpperY=800, mLowerY=-800, mAngleSelect=0x0,
-        // i.e. no facing-direction restriction at all), a generous entry built for exactly this
-        // kind of tall/elevated target.
+        // normal ground-level NPC. Override to dist_table[18] (mDistMax=500, mUpperY=800,
+        // mLowerY=-800, mAngleSelect=0x0, i.e. no facing-direction restriction at all), a more
+        // generous entry, for extra margin now that the Y-offset bug above is also fixed.
         proxy->attention_info.distances[fopAc_attn_TALK_e] = 18;
     }
 
