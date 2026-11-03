@@ -29,6 +29,7 @@
 #include "d/d_msg_object.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
+#include "SSystem/SComponent/c_math.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
@@ -1523,32 +1524,61 @@ static MessageId s_zeldaTalkPage1MessageId = 0;
 // How long (in the same ~60Hz tick domain daPy_addCalcShort()/cLib_addCalcAngleS() already use
 // elsewhere in this file) page 1 holds the player's continue input once typing finishes, via the
 // input_after_delay() tag registered on it below -- long enough for the heal particle trail to
-// actually be seen before the conversation can move on. ~1.5 seconds.
-static constexpr u16 kZeldaTalkHealEffectDelayFrames = 90;
+// actually be seen before the conversation can move on. ~1 second.
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 60;
 
-// How long the heal particle trail itself keeps emitting before we stop it. Deliberately shorter
-// than the input delay above so the trail has already been running for a moment (rather than
-// just appearing) by the time the player becomes able to advance.
-static constexpr s32 kZeldaTalkHealEffectDurationFrames = 75;
+// How long the heal particle trail itself keeps emitting before we stop it. Matches
+// daObjYOUSEI_c::MoveAction() (d_a_obj_yousei.cpp) -- the real "fairy flies out of the bottle and
+// spirals in toward the player" sequence -- which runs its spiral for roughly 120 frames (2
+// seconds) before the fairy reaches the player. Matches the input delay above so the spiral
+// finishes closing in right as the player becomes able to advance, rather than getting cut off
+// mid-spin or lingering after input unlocks.
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 60;
 
 // 8 hearts, in the quarter-heart units dComIfGp_setItemLifeCount() expects -- the same amount
 // item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
 static constexpr f32 kZeldaTalkHealAmount = 32.0f;
 
-// Roughly chest height, so the glow/star trail wraps the player's body instead of pooling at
-// their feet.
+// Roughly chest height, so the spiral orbits around the player's body instead of their feet.
 static constexpr f32 kZeldaTalkHealEffectHeight = 50.0f;
 
-// Handles for the two particle emitters below, tracked the same way daAlink_c's own effect
+// Orbit radius (in game units) at the start and end of the spiral -- shrinks from wide to tight
+// over the effect's duration, same as daObjYOUSEI_c::MoveAction()'s own radius term
+// (10.0f + 130.0f * (field_0x5d6 / 120.0f)), which spirals the fairy in toward the player rather
+// than holding a fixed distance.
+static constexpr f32 kZeldaTalkHealEffectStartRadius = 140.0f;
+static constexpr f32 kZeldaTalkHealEffectEndRadius = 10.0f;
+
+// Angular velocity, in BinAngle units per tick -- the same magnitude MoveAction() uses
+// (field_0x5dc = -0x1CB8) to spin the fairy around the player as it spirals in. Negated sign
+// doesn't matter cosmetically; what matters is that it's fast enough to read as "circling"
+// rather than "drifting".
+static constexpr s16 kZeldaTalkHealEffectAngularVelocity = -0x1CB8;
+
+// How many frames the spin speed takes to ease in from a standstill, mirroring MoveAction()'s own
+// var_f31 ramp (which reaches 1.0 after (25 frames)/field_0x5d6 of ramp-up).
+static constexpr f32 kZeldaTalkHealEffectSpinRampFrames = 25.0f;
+
+// Handles for the three particle emitters below, tracked the same way daAlink_c's own effect
 // fields are (e.g. field_0x31c4 in d_a_alink.h): 0 means "no emitter yet / already stopped",
-// otherwise dComIfGp_particle_getEmitter() resolves it back to a live JPABaseEmitter.
-static u32 s_zeldaTalkHealGlowEmitterId = 0;
+// otherwise dComIfGp_particle_getEmitter() resolves it back to a live JPABaseEmitter. These three
+// specific IDs (GLOW00/GLOW01/STAR03) are the ones daObjYOUSEI_c::MoveAction() spawns while
+// actually flying/spiraling toward the player -- distinct from BinAction()'s GLOW00/STAR02 pair,
+// which is the fairy's much plainer idle "sitting still in the bottle" glow (the wrong, static
+// effect this code originally copied).
+static u32 s_zeldaTalkHealGlow0EmitterId = 0;
+static u32 s_zeldaTalkHealGlow1EmitterId = 0;
 static u32 s_zeldaTalkHealStarEmitterId = 0;
 // Countdown until stop_zelda_talk_heal_effect() is called; -1 while the effect isn't playing.
 static s32 s_zeldaTalkHealEffectFramesLeft = -1;
+// Current orbit angle (BinAngle units), advanced every tick by refresh_zelda_talk_heal_effect().
+static s16 s_zeldaTalkHealEffectAngle = 0;
 
 static void stop_zelda_talk_heal_effect() {
-    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlowEmitterId)) {
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlow0EmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlow1EmitterId)) {
         emitter->stopDrawParticle();
     }
     if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealStarEmitterId)) {
@@ -1557,33 +1587,50 @@ static void stop_zelda_talk_heal_effect() {
     s_zeldaTalkHealEffectFramesLeft = -1;
 }
 
-// Re-issues both particle_set() calls against their existing handles, anchored to the player's
-// current position. This MUST be called every tick the effect is meant to keep playing:
-// dPa_control_c::level_c::execute() (d_particle.cpp) stops and tears down ("cuts") any "level"
-// emitter whose handle isn't re-submitted via particle_set() that same tick to refresh its
-// onActive() flag -- it survives at most one extra frame on its own. Every native example of
-// this pattern (e.g. daAlink_c::setBottleEffect(), called once per execute() tick) re-calls
-// setEmitter()/particle_set() every frame for exactly this reason; a one-shot call like our
-// original implementation gets torn down almost immediately, which is why the trail never
-// appeared to play.
+// Re-issues all three particle_set() calls against their existing handles, anchored to a point
+// that spirals in around the player -- matching daObjYOUSEI_c::MoveAction()'s own orbit-and-close
+// motion (an XZ offset, rotated by an ever-advancing yaw, whose radius shrinks over the effect's
+// duration), rather than a single static point. This MUST be called every tick the effect is
+// meant to keep playing: dPa_control_c::level_c::execute() (d_particle.cpp) stops and tears down
+// ("cuts") any "level" emitter whose handle isn't re-submitted via particle_set() that same tick
+// to refresh its onActive() flag -- it survives at most one extra frame on its own. Every native
+// example of this pattern (e.g. daAlink_c::setBottleEffect(), called once per execute() tick)
+// re-calls setEmitter()/particle_set() every frame for exactly this reason.
 static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
-    cXyz pos = player->current.pos;
-    pos.y += kZeldaTalkHealEffectHeight;
-    s_zeldaTalkHealGlowEmitterId = dComIfGp_particle_set(
-        s_zeldaTalkHealGlowEmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
+    s32 elapsed = kZeldaTalkHealEffectDurationFrames - s_zeldaTalkHealEffectFramesLeft;
+    f32 spinScale = (f32)elapsed / kZeldaTalkHealEffectSpinRampFrames;
+    if (spinScale > 1.0f) {
+        spinScale = 1.0f;
+    }
+    s_zeldaTalkHealEffectAngle += (s16)(kZeldaTalkHealEffectAngularVelocity * spinScale);
+
+    f32 progress = (f32)s_zeldaTalkHealEffectFramesLeft / (f32)kZeldaTalkHealEffectDurationFrames;
+    f32 radius = kZeldaTalkHealEffectEndRadius +
+                 (kZeldaTalkHealEffectStartRadius - kZeldaTalkHealEffectEndRadius) * progress;
+
+    cXyz offset(radius * cM_ssin(s_zeldaTalkHealEffectAngle), kZeldaTalkHealEffectHeight,
+                radius * cM_scos(s_zeldaTalkHealEffectAngle));
+    cXyz pos = player->current.pos + offset;
+
+    s_zeldaTalkHealGlow0EmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlow0EmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
+    s_zeldaTalkHealGlow1EmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlow1EmitterId, ID_ZF_J_FAIRY01_GLOW, &pos, nullptr, nullptr);
     s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
-        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY02_STAR, &pos, nullptr, nullptr);
+        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY03_STAR, &pos, nullptr, nullptr);
 }
 
 // Restores 8 hearts (dComIfGp_setItemLifeCount(), the same call item_func_RECOVER_FAILY() makes
 // for a native bottled fairy) and spawns the glow/star particles daObj_Yousei_c -- the bottled
-// fairy actor itself -- wears on her own body (d_a_obj_yousei.cpp's ID_ZF_J_FAIRY00_GLOW /
-// ID_ZF_J_FAIRY02_STAR emitters), anchored to the player instead of an actual fairy actor, since
-// only the cosmetic sparkle trail was wanted, not the fairy.
+// fairy actor itself -- wears on her own body while actually flying/healing (MoveAction()'s
+// ID_ZF_J_FAIRY00_GLOW / ID_ZF_J_FAIRY01_GLOW / ID_ZF_J_FAIRY03_STAR emitters), spiraling in
+// around the player instead of an actual fairy actor, since only the cosmetic sparkle trail was
+// wanted, not the fairy.
 static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
     dComIfGp_setItemLifeCount(kZeldaTalkHealAmount, 0);
-    refresh_zelda_talk_heal_effect(player);
+    s_zeldaTalkHealEffectAngle = 0;
     s_zeldaTalkHealEffectFramesLeft = kZeldaTalkHealEffectDurationFrames;
+    refresh_zelda_talk_heal_effect(player);
 }
 
 static ActorId s_zeldaNpcProxyId = 0;
