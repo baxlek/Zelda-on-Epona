@@ -46,6 +46,7 @@
 #include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
+#include "Z2AudioLib/Z2AudioMgr.h"
 #include "Z2AudioLib/Z2SeMgr.h"
 
 DEFINE_MOD();
@@ -1539,8 +1540,17 @@ static constexpr s32 kZeldaTalkHealEffectDurationFrames = 60;
 // item_func_RECOVER_FAILY() (d_item.cpp) grants for drinking a bottled fairy natively.
 static constexpr f32 kZeldaTalkHealAmount = 32.0f;
 
-// Roughly chest height, so the spiral orbits around the player's body instead of their feet.
-static constexpr f32 kZeldaTalkHealEffectHeight = 50.0f;
+// Height (relative to the player's own base position) the spiral starts at -- matches
+// daObjYOUSEI_c::MoveAction()'s own mSpeedVTarget, which begins at 0.0f (level with the player's
+// feet) the instant the fairy leaves the bottle, then climbs every tick thereafter.
+static constexpr f32 kZeldaTalkHealEffectStartHeight = 0.0f;
+
+// Extra clearance above the player's own head-top position (daPy_py_c::getHeadTopPos(), already
+// accounting for standing/crouching/swimming/wolf-form height differences) the spiral's final
+// height targets, so the effect reliably finishes just above the player's head rather than at a
+// fixed, possibly mismatched height -- matching MoveAction()'s own ever-rising mSpeedVTarget,
+// which keeps climbing (not holding a constant height) for the entire spiral.
+static constexpr f32 kZeldaTalkHealEffectEndHeightAboveHead = 20.0f;
 
 // Orbit radius (in game units) at the start and end of the spiral -- shrinks from wide to tight
 // over the effect's duration, same as daObjYOUSEI_c::MoveAction()'s own radius term
@@ -1584,18 +1594,22 @@ static void stop_zelda_talk_heal_effect() {
     if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealStarEmitterId)) {
         emitter->stopDrawParticle();
     }
+    Z2GetAudioMgr()->seStop(Z2SE_FAIRY_S_LV, 0);
     s_zeldaTalkHealEffectFramesLeft = -1;
 }
 
 // Re-issues all three particle_set() calls against their existing handles, anchored to a point
-// that spirals in around the player -- matching daObjYOUSEI_c::MoveAction()'s own orbit-and-close
-// motion (an XZ offset, rotated by an ever-advancing yaw, whose radius shrinks over the effect's
-// duration), rather than a single static point. This MUST be called every tick the effect is
-// meant to keep playing: dPa_control_c::level_c::execute() (d_particle.cpp) stops and tears down
-// ("cuts") any "level" emitter whose handle isn't re-submitted via particle_set() that same tick
-// to refresh its onActive() flag -- it survives at most one extra frame on its own. Every native
-// example of this pattern (e.g. daAlink_c::setBottleEffect(), called once per execute() tick)
-// re-calls setEmitter()/particle_set() every frame for exactly this reason.
+// that spirals in and climbs around the player -- matching daObjYOUSEI_c::MoveAction()'s own
+// orbit-and-close motion (an XZ offset, rotated by an ever-advancing yaw, whose radius shrinks
+// over the effect's duration while its height climbs from the player's feet toward just above
+// their head), rather than a single static point. Also re-issues the fairy's own ambient flight
+// sound (Z2SE_FAIRY_S_LV, the same "level" sound Execute() loops every tick while she's airborne)
+// positioned at that same spiraling point. This MUST be called every tick the effect is meant to
+// keep playing: dPa_control_c::level_c::execute() (d_particle.cpp) stops and tears down ("cuts")
+// any "level" emitter -- and Z2SeMgr's own seStartLevel()/moveLife()-style "level" sounds work the
+// same way -- whose handle/soundID isn't re-submitted that same tick. Every native example of
+// this pattern (e.g. daAlink_c::setBottleEffect(), called once per execute() tick) re-calls
+// setEmitter()/particle_set() every frame for exactly this reason.
 static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
     s32 elapsed = kZeldaTalkHealEffectDurationFrames - s_zeldaTalkHealEffectFramesLeft;
     f32 spinScale = (f32)elapsed / kZeldaTalkHealEffectSpinRampFrames;
@@ -1608,7 +1622,16 @@ static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
     f32 radius = kZeldaTalkHealEffectEndRadius +
                  (kZeldaTalkHealEffectStartRadius - kZeldaTalkHealEffectEndRadius) * progress;
 
-    cXyz offset(radius * cM_ssin(s_zeldaTalkHealEffectAngle), kZeldaTalkHealEffectHeight,
+    f32 elapsedFrac = (f32)elapsed / (f32)kZeldaTalkHealEffectDurationFrames;
+    if (elapsedFrac > 1.0f) {
+        elapsedFrac = 1.0f;
+    }
+    f32 endHeight =
+        (player->getHeadTopPos().y - player->current.pos.y) + kZeldaTalkHealEffectEndHeightAboveHead;
+    f32 height = kZeldaTalkHealEffectStartHeight +
+                 (endHeight - kZeldaTalkHealEffectStartHeight) * elapsedFrac;
+
+    cXyz offset(radius * cM_ssin(s_zeldaTalkHealEffectAngle), height,
                 radius * cM_scos(s_zeldaTalkHealEffectAngle));
     cXyz pos = player->current.pos + offset;
 
@@ -1618,19 +1641,24 @@ static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
         s_zeldaTalkHealGlow1EmitterId, ID_ZF_J_FAIRY01_GLOW, &pos, nullptr, nullptr);
     s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
         s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY03_STAR, &pos, nullptr, nullptr);
+
+    Z2GetAudioMgr()->seStartLevel(Z2SE_FAIRY_S_LV, &pos, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
 }
 
 // Restores 8 hearts (dComIfGp_setItemLifeCount(), the same call item_func_RECOVER_FAILY() makes
-// for a native bottled fairy) and spawns the glow/star particles daObj_Yousei_c -- the bottled
-// fairy actor itself -- wears on her own body while actually flying/healing (MoveAction()'s
-// ID_ZF_J_FAIRY00_GLOW / ID_ZF_J_FAIRY01_GLOW / ID_ZF_J_FAIRY03_STAR emitters), spiraling in
-// around the player instead of an actual fairy actor, since only the cosmetic sparkle trail was
-// wanted, not the fairy.
+// for a native bottled fairy), plays the fairy's own one-shot "release" whoosh
+// (Z2SE_FAIRY_S_FLY_RTT, the same sound daObjYOUSEI_c::CareAction() plays the instant she starts
+// flying toward the player), and spawns the glow/star particles she wears on her own body while
+// actually flying/healing (MoveAction()'s ID_ZF_J_FAIRY00_GLOW / ID_ZF_J_FAIRY01_GLOW /
+// ID_ZF_J_FAIRY03_STAR emitters), spiraling in around the player instead of an actual fairy actor,
+// since only the cosmetic sparkle trail (and its sound) was wanted, not the fairy.
 static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
     dComIfGp_setItemLifeCount(kZeldaTalkHealAmount, 0);
     s_zeldaTalkHealEffectAngle = 0;
     s_zeldaTalkHealEffectFramesLeft = kZeldaTalkHealEffectDurationFrames;
     refresh_zelda_talk_heal_effect(player);
+    Z2GetAudioMgr()->seStart(Z2SE_FAIRY_S_FLY_RTT, &player->current.pos, 0, 0, 1.0f, 1.0f, -1.0f,
+                             -1.0f, 0);
 }
 
 static ActorId s_zeldaNpcProxyId = 0;
