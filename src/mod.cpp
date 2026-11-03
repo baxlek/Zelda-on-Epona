@@ -1728,6 +1728,25 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         proxy->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
     }
 
+    // dAttention_c::calcWeight() ANDs attention_info.flags together with an additional,
+    // separate gate: check_event_condition(TALK_e, eventInfo.getCondition()), which requires
+    // dEvtCnd_CANTALK_e to already be latched onto the actor's eventInfo. The *only* place that
+    // ever sets it (daNpcT_c::evtOrder(), base d_a_npc.cpp) only fires once per tick, strictly
+    // *before* this post-hook runs (it's called from inside daNpc_Zelda_c::Execute() itself, via
+    // the base daNpcT_c::execute()), and only when it sees attention_info.flags already carrying
+    // SPEAK_e/TALK_e -- i.e. the flags *we're setting right here, this same tick, after it
+    // already ran*. And since f_op_actor.cpp's per-actor beforeProc() unconditionally resets
+    // eventInfo's condition bits to just dEvtCnd_CANDEMO_e at the very start of every tick
+    // (before Execute() runs), CANTALK_e isn't sticky across ticks either: it must be
+    // re-latched by something, every single tick, while eligible. Whether evtOrder() itself
+    // actually runs that tick further depends on native per-actor order-wait/event-exec gating
+    // we don't control. Rather than chase that race, latch the bit ourselves, directly and
+    // unconditionally, right after we decide our own eligibility -- removing any dependency on
+    // evtOrder()'s internal timing/gating ever lining up with our flag toggle again.
+    if (eligible) {
+        proxy->eventInfo.onCondition(dEvtCnd_CANTALK_e);
+    }
+
     // TEMPORARY diagnostic logging to track down a lock-on regression; throttled to ~1/sec.
     // This mirrors dAttention_c::calcWeight()'s/check_distace()'s own gating logic (distance,
     // angle-select, and the per-dist_table-entry vertical window mUpperY/mLowerY) so we can see
@@ -1759,9 +1778,11 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
                                       : nullptr;
             mods::log::info(
                 "zelda talk: attention diag -- mAttnBlockTimer={}, mLockTargetID={:#x}, "
-                "mLockonCount={}, lockOnList0Actor={}, lockOnList0IsProxy={}",
+                "mLockonCount={}, lockOnList0Actor={}, lockOnList0IsProxy={}, "
+                "proxyEvtCondition={:#x}, proxyCanTalk={}",
                 attn->mAttnBlockTimer, (unsigned)attn->mLockTargetID, attn->GetLockonCount(),
-                (void*)lockOn0, lockOn0 == proxy);
+                (void*)lockOn0, lockOn0 == proxy, (unsigned)proxy->eventInfo.getCondition(),
+                proxy->eventInfo.chkCondition(dEvtCnd_CANTALK_e) != 0);
         }
     }
     if (companion != nullptr && (s_proxyDiagCounter % 30) == 0) {
