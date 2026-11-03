@@ -1625,7 +1625,16 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
 
     if (companion != nullptr) {
         proxy->current.pos = companion->current.pos;
+        proxy->current.angle.y = companion->shape_angle.y;
         proxy->shape_angle.y = companion->shape_angle.y;
+        // daNpc_Zelda_c::setAttnPos() derives attention_info.position (the actual lock-on
+        // target point) from mCurAngle.y, not shape_angle.y -- it's only ever set once at
+        // create() time from the spawn angle and is otherwise meant to be updated by the NPC's
+        // own (unused, since we drive her position directly) walk/turn logic. Left unsynced, it
+        // stays frozen at the companion's spawn-time facing, so the computed attention point
+        // rotates further away from her as she turns while riding, making lock-on increasingly
+        // unreliable the longer she rides facing away from that original angle.
+        proxy->mCurAngle.y = companion->shape_angle.y;
         fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
     }
 
