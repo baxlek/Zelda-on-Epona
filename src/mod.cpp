@@ -1640,27 +1640,6 @@ static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
 // actually want) back on; this runs synchronously right after that within the same Execute()
 // call, so nothing outside it (in particular dAttention_c's own lock-on candidate search) ever
 // observes the transient over-permissive state setParam() leaves behind.
-// TEMPORARY, one-shot diagnostic: dump the engine's entire (binary, otherwise unreadable)
-// dAttention_c::dist_table so we can see every entry's mDistMax/mUpperY/mLowerY/mAngleSelect
-// values directly, without having to guess at or wait on a specific index's semantics across
-// another round of on-device testing.
-static void dump_dist_table_once() {
-    static bool s_dumped = false;
-    if (s_dumped) {
-        return;
-    }
-    s_dumped = true;
-    for (int i = 0; i < 234; ++i) {
-        dist_entry& e = dAttention_c::getDistTable(i);
-        mods::log::info(
-            "zelda talk: dist_table[{}] = (mDistMax={:.1f}, mDistMaxRelease={:.1f}, "
-            "mDistanceAdjust={:.1f}, mUpperY={:.1f}, mLowerY={:.1f}, mWeight={:.1f}, "
-            "mAngleSelect={:#x})",
-            i, e.mDistMax, e.mDistMaxRelease, e.mDistanceAdjust, e.mUpperY, e.mLowerY, e.mWeight,
-            e.mAngleSelect);
-    }
-}
-
 // Glues the invisible proxy's position/angle/room/attention-point to the companion's own,
 // current-tick values. Factored out so it can be called from TWO places: the companion's own
 // execute() post-hook (as soon as the companion's position is final for this tick, while Epona
@@ -1711,8 +1690,6 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    dump_dist_table_once();
-
     fopAc_ac_c* companion = find_spawned_zelda();
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
 
@@ -1745,79 +1722,6 @@ static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     // evtOrder()'s internal timing/gating ever lining up with our flag toggle again.
     if (eligible) {
         proxy->eventInfo.onCondition(dEvtCnd_CANTALK_e);
-    }
-
-    // TEMPORARY diagnostic logging to track down a lock-on regression; throttled to ~1/sec.
-    // This mirrors dAttention_c::calcWeight()'s/check_distace()'s own gating logic (distance,
-    // angle-select, and the per-dist_table-entry vertical window mUpperY/mLowerY) so we can see
-    // directly, from the same numbers the engine itself uses, whether our proxy is being rejected
-    // as a lock-on candidate by that vertical-window check versus something else entirely.
-    static u32 s_proxyDiagCounter = 0;
-    ++s_proxyDiagCounter;
-    if ((s_proxyDiagCounter % 30) == 0) {
-        mods::log::info(
-            "zelda talk: proxy diag -- proxyPos=({:.1f},{:.1f},{:.1f}), "
-            "companionFound={}, companionPos=({:.1f},{:.1f},{:.1f})",
-            proxy->current.pos.x, proxy->current.pos.y, proxy->current.pos.z, companion != nullptr,
-            companion != nullptr ? companion->current.pos.x : 0.0f,
-            companion != nullptr ? companion->current.pos.y : 0.0f,
-            companion != nullptr ? companion->current.pos.z : 0.0f);
-
-        // dAttention_c itself: mAttnBlockTimer is a native cutscene-camera lock-SUPPRESSION
-        // countdown (set to 30 by d_camera.cpp whenever checkCutHeadProc() is true, e.g. during
-        // a scripted camera head-focus); while nonzero, dAttention_c::Run() returns immediately
-        // every tick WITHOUT calling makeList()/SelectAttention() at all -- i.e. lock-on is
-        // completely inert engine-wide, not just for our proxy. If this is ever observed stuck
-        // nonzero well after Epona has stopped moving, that (not our own flags/position/dist
-        // table) is the real root cause. mLockTargetID/mLockonCount/mLockOnList[0] show what the
-        // engine's own candidate search currently considers, independent of our eligibility calc.
-        dAttention_c* attn = dComIfGp_getAttention();
-        if (attn != nullptr) {
-            fopAc_ac_c* lockOn0 = attn->GetLockonList(0) != nullptr
-                                      ? attn->GetLockonList(0)->getActor()
-                                      : nullptr;
-            mods::log::info(
-                "zelda talk: attention diag -- mAttnBlockTimer={}, mLockTargetID={:#x}, "
-                "mLockonCount={}, lockOnList0Actor={}, lockOnList0IsProxy={}, "
-                "proxyEvtCondition={:#x}, proxyCanTalk={}",
-                attn->mAttnBlockTimer, (unsigned)attn->mLockTargetID, attn->GetLockonCount(),
-                (void*)lockOn0, lockOn0 == proxy, (unsigned)proxy->eventInfo.getCondition(),
-                proxy->eventInfo.chkCondition(dEvtCnd_CANTALK_e) != 0);
-        }
-    }
-    if (companion != nullptr && (s_proxyDiagCounter % 30) == 0) {
-        daPy_py_c* diagPlayer = daPy_getLinkPlayerActorClass();
-        u8 talkDistIdx = proxy->attention_info.distances[fopAc_attn_TALK_e];
-        dist_entry& talkDist = dAttention_c::getDistTable(talkDistIdx);
-        if (diagPlayer != nullptr) {
-            // Replicate dAttention_c::setOwnerAttentionPos()/SelectAttention()'s own reference
-            // point and angle math exactly, so angle/invAngle below are the very same values
-            // check_flontofplayer() (the mAngleSelect "must be in front" gate) would receive.
-            cXyz ownerAttnPos = diagPlayer->attention_info.position;
-            if (fopAcM_GetName(diagPlayer) == fpcNm_ALINK_e) {
-                ownerAttnPos.y -= daPy_py_c::getAttentionOffsetY();
-            }
-            cXyz delta = proxy->attention_info.position - ownerAttnPos;
-            cSGlobe globe(delta);
-            s16 angle = (cSAngle(globe.U()) - fopAcM_GetShapeAngle_p(diagPlayer)->y).Val();
-            s16 invAngle = (cSAngle(globe.U().Inv()) - fopAcM_GetShapeAngle_p(proxy)->y).Val();
-            mods::log::info(
-                "zelda talk: proxy diag (eligible={}, flags={:#x}, attnPos=({:.1f},{:.1f},{:.1f}), "
-                "ownerAttnPos=({:.1f},{:.1f},{:.1f}), deltaY={:.1f}, deltaXZ={:.1f}, "
-                "talkDistIdx={}, mDistMax={:.1f}, mUpperY={:.1f}, mLowerY={:.1f}, mAngleSelect={:#x}, "
-                "angle={}, invAngle={})",
-                eligible, (unsigned)proxy->attention_info.flags, proxy->attention_info.position.x,
-                proxy->attention_info.position.y, proxy->attention_info.position.z, ownerAttnPos.x,
-                ownerAttnPos.y, ownerAttnPos.z, delta.y, delta.absXZ(), talkDistIdx,
-                talkDist.mDistMax, talkDist.mUpperY, talkDist.mLowerY, talkDist.mAngleSelect, angle,
-                invAngle);
-        } else {
-            mods::log::info(
-                "zelda talk: proxy diag (eligible={}, flags={:#x}, talkDistIdx={}, mDistMax={:.1f}, "
-                "mUpperY={:.1f}, mLowerY={:.1f}, no player actor)",
-                eligible, (unsigned)proxy->attention_info.flags, talkDistIdx, talkDist.mDistMax,
-                talkDist.mUpperY, talkDist.mLowerY);
-        }
     }
 }
 
