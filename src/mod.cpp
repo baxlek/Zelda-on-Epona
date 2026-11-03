@@ -1614,11 +1614,34 @@ static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
 // actually want) back on; this runs synchronously right after that within the same Execute()
 // call, so nothing outside it (in particular dAttention_c's own lock-on candidate search) ever
 // observes the transient over-permissive state setParam() leaves behind.
+// TEMPORARY, one-shot diagnostic: dump the engine's entire (binary, otherwise unreadable)
+// dAttention_c::dist_table so we can see every entry's mDistMax/mUpperY/mLowerY/mAngleSelect
+// values directly, without having to guess at or wait on a specific index's semantics across
+// another round of on-device testing.
+static void dump_dist_table_once() {
+    static bool s_dumped = false;
+    if (s_dumped) {
+        return;
+    }
+    s_dumped = true;
+    for (int i = 0; i < 234; ++i) {
+        dist_entry& e = dAttention_c::getDistTable(i);
+        mods::log::info(
+            "zelda talk: dist_table[{}] = (mDistMax={:.1f}, mDistMaxRelease={:.1f}, "
+            "mDistanceAdjust={:.1f}, mUpperY={:.1f}, mLowerY={:.1f}, mWeight={:.1f}, "
+            "mAngleSelect={:#x})",
+            i, e.mDistMax, e.mDistMaxRelease, e.mDistanceAdjust, e.mUpperY, e.mLowerY, e.mWeight,
+            e.mAngleSelect);
+    }
+}
+
 static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
     daNpc_Zelda_c* proxy = mods::arg<daNpc_Zelda_c*>(args, 0);
     if (!is_zelda_npc_proxy(proxy)) {
         return;
     }
+
+    dump_dist_table_once();
 
     fopAc_ac_c* companion = find_spawned_zelda();
     daPy_py_c* player = daPy_getLinkPlayerActorClass();
