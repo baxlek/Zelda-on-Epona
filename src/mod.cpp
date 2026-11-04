@@ -1517,10 +1517,20 @@ static mods::flow::Graph s_zeldaTalkGraph;
 static std::vector<mods::flow::RegisteredMessage> s_zeldaTalkMessages;
 static u16 s_zeldaTalkNodeId = 0;
 
+// Separate starting node for the wolf-form conversation (same graph/group, see
+// register_zelda_talk_flow()); on_msg_flow_get_init_node_index_pre() picks between this and
+// s_zeldaTalkNodeId based on the player's form at the moment the conversation actually starts.
+static u16 s_zeldaTalkWolfNodeId = 0;
+
 // Page 1's registered id, kept around so update_zelda_talk_heal_effect() (further down) can tell
 // -- by comparing it against the live msg_class's msg_idx -- whether the conversation is
 // currently showing page 1 specifically, as opposed to page 2 or no conversation at all.
 static MessageId s_zeldaTalkPage1MessageId = 0;
+
+// One second, in the engine's actual 30Hz tick domain -- used by the wolf-form conversation both
+// for the mid-sentence pause between "Midna." and "Do you really..." and for the pause before
+// "So undignified..." reveals on page 2.
+static constexpr u16 kZeldaTalkWolfPauseFrames = 30;
 
 // How long (in the engine's actual 30Hz tick domain) page 1 holds the player's continue input
 // once typing finishes, via the input_after_delay() tag registered on it below -- long enough for
@@ -1809,10 +1819,47 @@ static ModResult register_zelda_talk_flow() {
     }
     s_zeldaTalkPage1MessageId = page1Id;
 
+    // Separate two-page conversation for when the player approaches her in wolf form, addressed
+    // to Midna rather than the player directly. Page 1 uses pause() (MSGTAG_PAUSE, group 0 type
+    // 7) to insert a one-second beat between "Midna." and "Do you really..." without interrupting
+    // the normal per-character typing/sound on either side of it. Page 2 pairs that same pause
+    // with a raw MSGTAG_INSTANT (group 0 type 1) tag immediately after it: do_isReady()'s typing
+    // pacer processes the stream one token at a time regardless of whether it's a tag or a
+    // character, so the pause fully elapses first (nothing shown), and only once it does does the
+    // instant tag get processed -- at which point it sets the same "reveal everything right now"
+    // batch flag the native press-A/hold-B instant-text shortcuts use, so the rest of the page's
+    // text (just "So undignified...") pops in all at once rather than typing out letter by
+    // letter.
+    MessageId wolfPage1Id = 0;
+    MessageId wolfPage2Id = 0;
+    result = register_page(
+        [](mods::flow::MessageBuilder& builder) {
+            builder.text("Midna.")
+                .pause(kZeldaTalkWolfPauseFrames)
+                .text(" Do you really have to ride\nour hero around like a horse?");
+        },
+        wolfPage1Id);
+    if (result == MOD_OK) {
+        result = register_page(
+            [](mods::flow::MessageBuilder& builder) {
+                builder.pause(kZeldaTalkWolfPauseFrames)
+                    .raw_tag(0, MSGTAG_INSTANT, {})
+                    .text("So undignified...");
+            },
+            wolfPage2Id);
+    }
+    if (result != MOD_OK) {
+        return result;
+    }
+
     mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
     const auto page2 = graph.add_message(page2Id).next(mods::flow::kEnd);
     const auto page1 = graph.add_message(page1Id).next(page2);
     s_zeldaTalkNodeId = page1;
+
+    const auto wolfPage2 = graph.add_message(wolfPage2Id).next(mods::flow::kEnd);
+    const auto wolfPage1 = graph.add_message(wolfPage1Id).next(wolfPage2);
+    s_zeldaTalkWolfNodeId = wolfPage1;
 
     s_zeldaTalkGraph = graph.commit();
     return s_zeldaTalkGraph.result();
@@ -1966,11 +2013,20 @@ static HookAction on_msg_flow_get_init_node_index_pre(ModContext*, void* args, v
     fopAc_ac_c* proxy = find_zelda_npc_proxy();
     if (proxy != nullptr && flowId == kZeldaTalkFlowId &&
         self == &static_cast<daNpc_Zelda_c*>(proxy)->mFlow) {
+        // Pick the wolf-form conversation whenever the player is the one currently talking to
+        // her while transformed (daPy_py_c::checkWolf(), same FLG1_IS_WOLF the game itself uses
+        // to tell Link and Wolf Link apart) -- checked once, right as the conversation starts,
+        // so which node we hand back stays fixed for its whole duration even if the player
+        // somehow transforms mid-conversation.
+        daPy_py_c* player = daPy_getLinkPlayerActorClass();
+        bool isWolf = player != nullptr && player->checkWolf() != 0;
+        u16 startNode = isWolf ? s_zeldaTalkWolfNodeId : s_zeldaTalkNodeId;
         if (retval != nullptr) {
-            *static_cast<u16*>(retval) = s_zeldaTalkNodeId;
+            *static_cast<u16*>(retval) = startNode;
         }
         mods::log::info(
-            "zelda talk: flow redirect fired, starting at node {}", (int)s_zeldaTalkNodeId);
+            "zelda talk: flow redirect fired, starting at node {} (wolf={})", (int)startNode,
+            isWolf);
         return HOOK_SKIP_ORIGINAL;
     }
     return HOOK_CONTINUE;
