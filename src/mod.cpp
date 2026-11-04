@@ -1606,7 +1606,7 @@ static ModResult register_zelda_talk_flow() {
         [](mods::flow::MessageBuilder& builder) {
             builder.text("Midna.")
                 .pause(kZeldaTalkWolfPauseFrames)
-                .text(" Do you really have to ride around\non our hero like that?");
+                .text(" Do you really have to ride\naround on our hero like that?");
         },
         wolfPage1Id);
     if (result == MOD_OK) {
