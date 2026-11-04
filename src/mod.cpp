@@ -1581,7 +1581,7 @@ static ModResult register_zelda_talk_flow() {
         [](mods::flow::MessageBuilder& builder) {
             builder.text("Greetings, ")
                 .player_name()
-                .text("!\nI pray you are in good health?")
+                .text("!\nI pray for your continued safety.")
                 .input_after_delay(kZeldaTalkHealEffectDelayFrames);
         },
         page1Id);
