@@ -6,11 +6,6 @@ comment-free; each entry below is headed by the function, declaration, or branch
 it documents, in the same order it appears in `src/mod.cpp`, so you can match an
 entry back to its original location.
 
-## `epona_follow_active()`
-
-> Follows "Zelda active in combat" so the two toggles move together: Epona stops following the
-> instant combat mode is turned off, even if the follow checkbox itself is still checked.
-
 ## `s_zeldaBackwardBowTarget`
 
 > True while the spawned Zelda's current bow target sits behind her rather than in front, which
