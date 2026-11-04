@@ -93,7 +93,7 @@ static bool epona_follow_dismounted_enabled() {
 }
 
 static bool epona_follow_active() {
-    return auto_target_enemies_enabled() && epona_follow_dismounted_enabled();
+    return epona_follow_dismounted_enabled();
 }
 
 static constexpr bool kDiagnosticLoggingEnabled = false;
@@ -1770,32 +1770,10 @@ static void update_zelda_talk_interaction() {
     update_zelda_talk_heal_effect();
 }
 
-static bool is_epona_follow_control_disabled(ModContext*, void*) {
-    return !auto_target_enemies_enabled();
-}
-
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
-    UiControlDesc control = UI_CONTROL_DESC_INIT;
-    control.kind = UI_CONTROL_TOGGLE;
-    control.label = "Show Zelda during cutscenes";
-    control.help_rml = "When off (default), Zelda is hidden for the duration of scripted story "
-                        "cutscenes and reappears once they end. Cutscenes that already feature "
-                        "their own story-placed Zelda, the horse call/grass whistle, the opening "
-                        "title screen, and area/scene transitions are unaffected either way -- "
-                        "she always stays visible there.";
-    control.binding = UI_BINDING_CONFIG_VAR;
-    control.config_var = g_cvarShowInCutscenes;
-    svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
-
     UiControlDesc autoTargetControl = UI_CONTROL_DESC_INIT;
     autoTargetControl.kind = UI_CONTROL_TOGGLE;
     autoTargetControl.label = "Zelda active in combat";
-    autoTargetControl.help_rml = "When on, Zelda automatically draws her bow and fires Light "
-                                  "Arrows at nearby enemies, the same way she already does at "
-                                  "Ganondorf during the horseback duel. While sharing the saddle "
-                                  "with Link, she can also aim and fire backwards at enemies "
-                                  "behind her if none are ahead. When off (default), she just "
-                                  "rides along passively.";
     autoTargetControl.binding = UI_BINDING_CONFIG_VAR;
     autoTargetControl.config_var = g_cvarAutoTargetEnemies;
     svc_ui->pane_add_control(mod_ctx, panel, &autoTargetControl, nullptr);
@@ -1803,18 +1781,16 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     UiControlDesc followControl = UI_CONTROL_DESC_INIT;
     followControl.kind = UI_CONTROL_TOGGLE;
     followControl.label = "Epona follows when dismounted";
-    followControl.help_rml = "When on, Epona follows Link on foot once he dismounts, turning to "
-                              "face him and walking over at a brisk walk (never a full gallop) "
-                              "once he's more than about 1000 units away (half the clawshot's "
-                              "maximum range), stopping at that distance. She keeps turning to "
-                              "face him down to 750 units, then holds completely still. If he "
-                              "gets more than about 5000 units away, she gives up following "
-                              "until he comes back closer. Requires "
-                              "\"Zelda active in combat\" to be on.";
     followControl.binding = UI_BINDING_CONFIG_VAR;
     followControl.config_var = g_cvarEponaFollowDismounted;
-    followControl.is_disabled = is_epona_follow_control_disabled;
     svc_ui->pane_add_control(mod_ctx, panel, &followControl, nullptr);
+
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_TOGGLE;
+    control.label = "Show Zelda during cutscenes";
+    control.binding = UI_BINDING_CONFIG_VAR;
+    control.config_var = g_cvarShowInCutscenes;
+    svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
     return MOD_OK;
 }
 
