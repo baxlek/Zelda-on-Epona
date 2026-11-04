@@ -172,6 +172,7 @@ static bool is_always_hidden_cutscene() {
         "Demo01_01",
         "Demo01_02",
         "demo02",
+        "demo04",
         "Demo19_02",
         "Demo36_01",
         "Demo36_02",
