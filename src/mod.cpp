@@ -6,32 +6,47 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/actor.h"
 #include "mods/svc/config.h"
+#include "mods/svc/flow.hpp"
 #include "mods/svc/log.hpp"
 #include "mods/svc/ui.h"
 
+#include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_arrow.h"
 #include "d/actor/d_a_b_gnd.h"
 #include "d/actor/d_a_e_sh.h"
 #include "d/actor/d_a_horse.h"
 #include "d/actor/d_a_hozelda.h"
+#include "d/actor/d_a_npc.h"
+#include "d/actor/d_a_npc_zelda.h"
 #include "d/actor/d_a_player.h"
+#include "d/d_attention.h"
 #include "d/d_cc_d.h"
 #include "d/d_cc_uty.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_event_manager.h"
+#include "d/d_msg_class.h"
+#include "d/d_msg_flow.h"
+#include "d/d_msg_object.h"
 #include "d/d_particle.h"
 #include "d/d_stage.h"
+#include "SSystem/SComponent/c_math.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_scene_mng.h"
 #include "f_pc/f_pc_manager.h"
 #include "f_pc/f_pc_name.h"
 #include "helpers/string.hpp"
+#include "JSystem/J3DGraphAnimator/J3DJoint.h"
+#include "JSystem/J3DGraphAnimator/J3DModel.h"
+#include "JSystem/J3DGraphAnimator/J3DModelData.h"
+#include "JSystem/J3DGraphBase/J3DSys.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
+#include "m_Do/m_Do_controller_pad.h"
 #include "m_Do/m_Do_ext.h"
 #include "m_Do/m_Do_mtx.h"
 #include "SSystem/SComponent/c_lib.h"
+#include "Z2AudioLib/Z2AudioMgr.h"
 #include "Z2AudioLib/Z2SeMgr.h"
 
 DEFINE_MOD();
@@ -41,6 +56,8 @@ IMPORT_SERVICE(ActorService, svc_actor);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(LogService, svc_log);
+IMPORT_SERVICE(FlowService, svc_flow);
+IMPORT_SERVICE(MessageService, svc_message);
 
 static ConfigVarHandle g_cvarShowInCutscenes = 0;
 
@@ -155,6 +172,8 @@ static bool is_always_hidden_cutscene() {
         "Demo01_01",
         "Demo01_02",
         "demo02",
+        "demo04",
+        "Demo19_02",
         "Demo36_01",
         "Demo36_02",
         "demo90",
@@ -552,9 +571,21 @@ static void force_reins_to_normal_pos(daHoZelda_c* zelda, daHorse_c* horse) {
     horse->setReinPosNormal();
 }
 
+static fopAc_ac_c* find_zelda_npc_proxy();
+static void sync_zelda_npc_proxy_from_companion(daNpc_Zelda_c* proxy, fopAc_ac_c* companion);
+
 static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
-    if (!is_spawned_zelda(zelda) || !s_hideSpawnedZeldaInCutscene) {
+    if (!is_spawned_zelda(zelda)) {
+        return;
+    }
+
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    if (proxy != nullptr) {
+        sync_zelda_npc_proxy_from_companion(static_cast<daNpc_Zelda_c*>(proxy), zelda);
+    }
+
+    if (!s_hideSpawnedZeldaInCutscene) {
         return;
     }
 
@@ -640,11 +671,6 @@ static void set_anm_auto_target(daHoZelda_c* zelda) {
         } else if (horse_anm_idx == 0xA) {
             *anm_p = 0x13;
         } else if (horse_anm_idx == 0x11) {
-            // ANM_HS_RUN_DASH: Epona's "Lash" speed-burst anim, most noticeable right after a
-            // skidding stop when immediately accelerating again. Vanilla keeps this distinct
-            // from the calmer run anims below (mapped to 0xF, not 0xE); merging it into 0xE
-            // here made Zelda use a body pose that doesn't account for the dash's extra forward
-            // lurch, leaning her head into Link's back.
             *anm_p = 0xF;
         } else if (horse_anm_idx == 0x12 || horse_anm_idx == 0x13) {
             *anm_p = 0xE;
@@ -1149,6 +1175,38 @@ static void on_horse_follow_execute_post(ModContext*, void* args, void*, void*) 
     horse->initHorseMtx();
 }
 
+static bool zelda_talk_event_active() {
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    return proxy != nullptr && dComIfGp_event_runCheck() && dComIfGp_getEvent()->getPt2() == proxy;
+}
+
+static constexpr s16 kZeldaTalkHeadTrackCone = static_cast<s16>(0x8000 * 50 / 180);
+
+static constexpr s16 kZeldaTalkFaceTurnMax = 0x800;
+static constexpr s16 kZeldaTalkFaceTurnMin = 0x40;
+
+static void on_horse_talk_face_execute_post(ModContext*, void* args, void*, void*) {
+    daHorse_c* horse = mods::arg<daHorse_c*>(args, 0);
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+    if (horse == nullptr || player == nullptr || !zelda_talk_event_active()) {
+        return;
+    }
+
+    s16 bearingToPlayer = cLib_targetAngleY(&horse->current.pos, &player->current.pos);
+    s16 diff = bearingToPlayer - horse->shape_angle.y;
+    if (diff > kZeldaTalkHeadTrackCone) {
+        diff = kZeldaTalkHeadTrackCone;
+    } else if (diff < -kZeldaTalkHeadTrackCone) {
+        diff = -kZeldaTalkHeadTrackCone;
+    }
+    s16 target = bearingToPlayer - diff;
+
+    cLib_addCalcAngleS(&horse->shape_angle.y, target, 5, kZeldaTalkFaceTurnMax,
+                        kZeldaTalkFaceTurnMin);
+    horse->current.angle.y = horse->shape_angle.y;
+    horse->initHorseMtx();
+}
+
 static void on_arrow_shooting_post(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
     if (arrow->mArrowType != daArrow_c::ARROW_TYPE_LIGHT || !auto_target_enemies_enabled()) {
@@ -1336,6 +1394,382 @@ static void on_particle_get_rm_id_replace(ModContext*, void* args, void* retval,
     }
 }
 
+static constexpr u16 kZeldaTalkMessageGroup = 0;
+
+static constexpr u16 kZeldaTalkFlowId = 0x7000;
+
+static mods::flow::Graph s_zeldaTalkGraph;
+static std::vector<mods::flow::RegisteredMessage> s_zeldaTalkMessages;
+static u16 s_zeldaTalkNodeId = 0;
+
+static u16 s_zeldaTalkWolfNodeId = 0;
+
+static MessageId s_zeldaTalkPage1MessageId = 0;
+
+static constexpr u16 kZeldaTalkWolfPauseFrames = 30;
+
+static constexpr u16 kZeldaTalkHealEffectDelayFrames = 90;
+
+static constexpr s32 kZeldaTalkHealEffectDurationFrames = 90;
+
+static constexpr f32 kZeldaTalkHealAmount = 32.0f;
+
+static constexpr f32 kZeldaTalkHealEffectStartHeight = 0.0f;
+
+static constexpr f32 kZeldaTalkHealEffectEndHeightAboveHead = 20.0f;
+
+static constexpr f32 kZeldaTalkHealEffectStartRadius = 140.0f;
+static constexpr f32 kZeldaTalkHealEffectEndRadius = 10.0f;
+
+static constexpr s16 kZeldaTalkHealEffectAngularVelocity = -0x1CB8;
+
+static constexpr f32 kZeldaTalkHealEffectSpinRampFrames = 25.0f;
+
+static u32 s_zeldaTalkHealGlow0EmitterId = 0;
+static u32 s_zeldaTalkHealGlow1EmitterId = 0;
+static u32 s_zeldaTalkHealStarEmitterId = 0;
+static s32 s_zeldaTalkHealEffectFramesLeft = -1;
+static s16 s_zeldaTalkHealEffectAngle = 0;
+
+static void stop_zelda_talk_heal_effect() {
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlow0EmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealGlow1EmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    if (JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(s_zeldaTalkHealStarEmitterId)) {
+        emitter->stopDrawParticle();
+    }
+    Z2GetAudioMgr()->seStop(Z2SE_FAIRY_S_LV, 0);
+    s_zeldaTalkHealEffectFramesLeft = -1;
+}
+
+static void refresh_zelda_talk_heal_effect(daPy_py_c* player) {
+    s32 elapsed = kZeldaTalkHealEffectDurationFrames - s_zeldaTalkHealEffectFramesLeft;
+    f32 spinScale = (f32)elapsed / kZeldaTalkHealEffectSpinRampFrames;
+    if (spinScale > 1.0f) {
+        spinScale = 1.0f;
+    }
+    s_zeldaTalkHealEffectAngle += (s16)(kZeldaTalkHealEffectAngularVelocity * spinScale);
+
+    f32 progress = (f32)s_zeldaTalkHealEffectFramesLeft / (f32)kZeldaTalkHealEffectDurationFrames;
+    f32 radius = kZeldaTalkHealEffectEndRadius +
+                 (kZeldaTalkHealEffectStartRadius - kZeldaTalkHealEffectEndRadius) * progress;
+
+    f32 elapsedFrac = (f32)elapsed / (f32)kZeldaTalkHealEffectDurationFrames;
+    if (elapsedFrac > 1.0f) {
+        elapsedFrac = 1.0f;
+    }
+    f32 endHeight =
+        (player->getHeadTopPos().y - player->current.pos.y) + kZeldaTalkHealEffectEndHeightAboveHead;
+    f32 height = kZeldaTalkHealEffectStartHeight +
+                 (endHeight - kZeldaTalkHealEffectStartHeight) * elapsedFrac;
+
+    cXyz offset(radius * cM_ssin(s_zeldaTalkHealEffectAngle), height,
+                radius * cM_scos(s_zeldaTalkHealEffectAngle));
+    cXyz pos = player->current.pos + offset;
+
+    s_zeldaTalkHealGlow0EmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlow0EmitterId, ID_ZF_J_FAIRY00_GLOW, &pos, nullptr, nullptr);
+    s_zeldaTalkHealGlow1EmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealGlow1EmitterId, ID_ZF_J_FAIRY01_GLOW, &pos, nullptr, nullptr);
+    s_zeldaTalkHealStarEmitterId = dComIfGp_particle_set(
+        s_zeldaTalkHealStarEmitterId, ID_ZF_J_FAIRY03_STAR, &pos, nullptr, nullptr);
+
+    Z2GetAudioMgr()->seStartLevel(Z2SE_FAIRY_S_LV, &pos, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
+}
+
+static void trigger_zelda_talk_heal_effect(daPy_py_c* player) {
+    dComIfGp_setItemLifeCount(kZeldaTalkHealAmount, 0);
+    s_zeldaTalkHealEffectAngle = 0;
+    s_zeldaTalkHealEffectFramesLeft = kZeldaTalkHealEffectDurationFrames;
+    refresh_zelda_talk_heal_effect(player);
+    Z2GetAudioMgr()->seStart(Z2SE_FAIRY_S_FLY_RTT, &player->current.pos, 0, 0, 1.0f, 1.0f, -1.0f,
+                             -1.0f, 0);
+}
+
+static constexpr uint8_t kZeldaTalkSpeakerId = 5;
+
+static ActorId s_zeldaNpcProxyId = 0;
+static bool s_hasZeldaNpcProxy = false;
+
+static fopAc_ac_c* find_zelda_npc_proxy() {
+    if (!s_hasZeldaNpcProxy) {
+        return nullptr;
+    }
+
+    if (fpcM_IsCreating((fpc_ProcID)s_zeldaNpcProxyId)) {
+        return nullptr;
+    }
+
+    fopAc_ac_c* actor = nullptr;
+    fopAcM_SearchByID((fpc_ProcID)s_zeldaNpcProxyId, &actor);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_NPC_ZELDA_e) {
+        s_hasZeldaNpcProxy = false;
+        return nullptr;
+    }
+    return actor;
+}
+
+static bool is_zelda_npc_proxy(const fopAc_ac_c* actor) {
+    return s_hasZeldaNpcProxy && actor != nullptr &&
+           (ActorId)fopAcM_GetID(actor) == s_zeldaNpcProxyId;
+}
+
+static void spawn_zelda_npc_proxy(fopAc_ac_c* companion) {
+    ActorSpawnParams params{};
+    params.parameters = 0;
+    params.argument = 0;
+    params.room_num = fopAcM_GetRoomNo(companion);
+    params.position = {companion->current.pos.x, companion->current.pos.y,
+                        companion->current.pos.z};
+    params.angle = {(int16_t)kZeldaTalkFlowId, companion->shape_angle.y, 0};
+    params.scale = {1.0f, 1.0f, 1.0f};
+
+    ActorId newId = 0;
+    ModResult result = svc_actor->create_actor(mod_ctx, fpcNm_NPC_ZELDA_e, &params, &newId);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to spawn Zelda NPC talk proxy: {}", (int)result);
+        return;
+    }
+
+    s_zeldaNpcProxyId = newId;
+    s_hasZeldaNpcProxy = true;
+}
+
+static void remove_zelda_npc_proxy() {
+    if (!s_hasZeldaNpcProxy) {
+        return;
+    }
+
+    svc_actor->delete_actor(mod_ctx, s_zeldaNpcProxyId);
+    s_hasZeldaNpcProxy = false;
+}
+
+static ModResult register_zelda_talk_flow() {
+    static constexpr std::array kAllLanguages{
+        MESSAGE_LANGUAGE_ENGLISH,
+        MESSAGE_LANGUAGE_GERMAN,
+        MESSAGE_LANGUAGE_FRENCH,
+        MESSAGE_LANGUAGE_SPANISH,
+        MESSAGE_LANGUAGE_ITALIAN,
+        MESSAGE_LANGUAGE_JAPANESE,
+    };
+
+    auto register_page = [&](auto&& i_configure, MessageId& o_id) -> ModResult {
+        std::vector<mods::flow::MessageVariant> variants;
+        variants.reserve(kAllLanguages.size());
+        for (MessageLanguage language : kAllLanguages) {
+            mods::flow::MessageBuilder builder{mods::flow::MessageStyle{}
+                                                    .box_kind(MESSAGE_BOX_TALK)
+                                                    .speaker(kZeldaTalkSpeakerId)};
+            i_configure(builder);
+            variants.push_back(builder.build(language));
+        }
+
+        auto message = mods::flow::register_message(kZeldaTalkMessageGroup, variants);
+        if (!message) {
+            return message.result();
+        }
+        o_id = message.id();
+        s_zeldaTalkMessages.push_back(std::move(message));
+        return MOD_OK;
+    };
+
+    MessageId page1Id = 0;
+    MessageId page2Id = 0;
+    ModResult result = register_page(
+        [](mods::flow::MessageBuilder& builder) {
+            builder.text("Greetings, ")
+                .player_name()
+                .text("!\nI pray for your continued safety.")
+                .input_after_delay(kZeldaTalkHealEffectDelayFrames);
+        },
+        page1Id);
+    if (result == MOD_OK) {
+        result = register_page(
+            [](mods::flow::MessageBuilder& builder) {
+                builder.raw_tag(0, MSGTAG_HORSE_NAME, {})
+                    .text(" and I are ready to depart\nwhenever you are.");
+            },
+            page2Id);
+    }
+    if (result != MOD_OK) {
+        return result;
+    }
+    s_zeldaTalkPage1MessageId = page1Id;
+
+    MessageId wolfPage1Id = 0;
+    MessageId wolfPage2Id = 0;
+    result = register_page(
+        [](mods::flow::MessageBuilder& builder) {
+            builder.text("Midna.")
+                .pause(kZeldaTalkWolfPauseFrames)
+                .text(" Do you really have to ride\nour hero around like a horse?");
+        },
+        wolfPage1Id);
+    if (result == MOD_OK) {
+        result = register_page(
+            [](mods::flow::MessageBuilder& builder) {
+                builder.pause(kZeldaTalkWolfPauseFrames)
+                    .raw_tag(0, MSGTAG_INSTANT, {})
+                    .text("So undignified...");
+            },
+            wolfPage2Id);
+    }
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    mods::flow::GraphBuilder graph{kZeldaTalkMessageGroup};
+    const auto page2 = graph.add_message(page2Id).next(mods::flow::kEnd);
+    const auto page1 = graph.add_message(page1Id).next(page2);
+    s_zeldaTalkNodeId = page1;
+
+    const auto wolfPage2 = graph.add_message(wolfPage2Id).next(mods::flow::kEnd);
+    const auto wolfPage1 = graph.add_message(wolfPage1Id).next(wolfPage2);
+    s_zeldaTalkWolfNodeId = wolfPage1;
+
+    s_zeldaTalkGraph = graph.commit();
+    return s_zeldaTalkGraph.result();
+}
+
+static HookAction on_npc_zelda_draw_pre(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* actor = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (is_zelda_npc_proxy(actor)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&daNpc_Zelda_c::Draw, NpcZeldaDraw);
+
+static HookAction on_npc_zelda_set_collision_pre(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* actor = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (is_zelda_npc_proxy(actor)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&daNpc_Zelda_c::setCollision, NpcZeldaSetCollision);
+
+static bool zelda_talk_may_be_targeted(fopAc_ac_c* zelda, daPy_py_c* player) {
+    if (zelda == nullptr || player == nullptr || player->checkHorseRide()) {
+        return false;
+    }
+    return !s_hideSpawnedZeldaInCutscene && !dComIfGp_event_runCheck();
+}
+
+static void sync_zelda_npc_proxy_from_companion(daNpc_Zelda_c* proxy, fopAc_ac_c* companion) {
+    proxy->current.pos = companion->current.pos;
+    proxy->current.angle.y = companion->shape_angle.y;
+    proxy->shape_angle.y = companion->shape_angle.y;
+    proxy->mCurAngle.y = companion->shape_angle.y;
+    fopAcM_SetRoomNo(proxy, fopAcM_GetRoomNo(companion));
+
+    proxy->attention_info.position = companion->attention_info.position;
+
+    proxy->attention_info.distances[fopAc_attn_TALK_e] = 18;
+}
+
+static void on_npc_zelda_execute_post(ModContext*, void* args, void*, void*) {
+    daNpc_Zelda_c* proxy = mods::arg<daNpc_Zelda_c*>(args, 0);
+    if (!is_zelda_npc_proxy(proxy)) {
+        return;
+    }
+
+    fopAc_ac_c* companion = find_spawned_zelda();
+    daPy_py_c* player = daPy_getLinkPlayerActorClass();
+
+    if (companion != nullptr) {
+        sync_zelda_npc_proxy_from_companion(proxy, companion);
+    }
+
+    proxy->attention_info.flags &= ~fopAc_AttnFlag_SPEAK_e;
+    bool eligible = companion != nullptr && zelda_talk_may_be_targeted(companion, player);
+    if (eligible) {
+        proxy->attention_info.flags |= fopAc_AttnFlag_TALK_e;
+    } else {
+        proxy->attention_info.flags &= ~fopAc_AttnFlag_TALK_e;
+    }
+
+    if (eligible) {
+        proxy->eventInfo.onCondition(dEvtCnd_CANTALK_e);
+    }
+}
+
+DEFINE_HOOK(&daNpc_Zelda_c::Execute, NpcZeldaExecute);
+
+static HookAction on_msg_flow_get_init_node_index_pre(ModContext*, void* args, void* retval, void*) {
+    dMsgFlow_c* self = mods::arg<dMsgFlow_c*>(args, 0);
+    u16 flowId = mods::arg<u16>(args, 1);
+    fopAc_ac_c* proxy = find_zelda_npc_proxy();
+    if (proxy != nullptr && flowId == kZeldaTalkFlowId &&
+        self == &static_cast<daNpc_Zelda_c*>(proxy)->mFlow) {
+        daPy_py_c* player = daPy_getLinkPlayerActorClass();
+        bool isWolf = player != nullptr && player->checkWolf() != 0;
+        u16 startNode = isWolf ? s_zeldaTalkWolfNodeId : s_zeldaTalkNodeId;
+        if (retval != nullptr) {
+            *static_cast<u16*>(retval) = startNode;
+        }
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+DEFINE_HOOK(&dMsgFlow_c::getInitNodeIndex, MsgFlowGetInitNodeIndex);
+
+static void sync_zelda_npc_proxy_lifecycle(fopAc_ac_c* companion) {
+    find_zelda_npc_proxy();
+    if (companion == nullptr) {
+        remove_zelda_npc_proxy();
+        return;
+    }
+    if (!s_hasZeldaNpcProxy) {
+        spawn_zelda_npc_proxy(companion);
+    }
+}
+
+static void update_zelda_talk_heal_effect() {
+    if (s_zeldaTalkHealEffectFramesLeft >= 0) {
+        if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
+            refresh_zelda_talk_heal_effect(player);
+        }
+        if (--s_zeldaTalkHealEffectFramesLeft < 0) {
+            stop_zelda_talk_heal_effect();
+        }
+    }
+
+    static bool s_wasTyping = false;
+    static bool s_effectFiredThisPage = false;
+
+    msg_class* msg_p = dMsgObject_c::getActor();
+    bool onPage1 = zelda_talk_event_active() && msg_p != nullptr &&
+                   msg_p->msg_idx == s_zeldaTalkPage1MessageId;
+    if (!onPage1) {
+        s_wasTyping = false;
+        s_effectFiredThisPage = false;
+        return;
+    }
+
+    bool isTyping = msg_p->mode == fopMsg_MODE_MSG_TYPING_e;
+    if (s_wasTyping && !isTyping && !s_effectFiredThisPage) {
+        if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
+            trigger_zelda_talk_heal_effect(player);
+        }
+        s_effectFiredThisPage = true;
+    }
+    s_wasTyping = isTyping;
+}
+
+static void update_zelda_talk_interaction() {
+    fopAc_ac_c* companion = find_spawned_zelda();
+    sync_zelda_npc_proxy_lifecycle(companion);
+    update_zelda_talk_heal_effect();
+}
+
 static bool is_epona_follow_control_disabled(ModContext*, void*) {
     return !auto_target_enemies_enabled();
 }
@@ -1521,6 +1955,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
+    result = mods::hook::add_post<HorseExecute>(on_horse_talk_face_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook Epona's execute() for the Zelda-talk facing correction, she won't "
+            "turn to let Zelda look at Link if he talks to her from behind: {}",
+            (int)result);
+    }
+
     result = mods::hook::add_post<ArrowShooting>(on_arrow_shooting_post);
     if (result != MOD_OK) {
         mods::log::warn(
@@ -1558,6 +2000,46 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook particle resource manager selection, Light Arrow particles outside "
             "the horseback duel will be unavailable: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<NpcZeldaDraw>(on_npc_zelda_draw_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook the Zelda NPC talk proxy's draw call, an invisible duplicate Zelda "
+            "may become visible: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<NpcZeldaSetCollision>(on_npc_zelda_set_collision_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook the Zelda NPC talk proxy's collision setup, an invisible duplicate "
+            "Zelda may physically push Link/Epona around: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<NpcZeldaExecute>(on_npc_zelda_execute_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook the Zelda NPC talk proxy's execute(), talking to Zelda while "
+            "dismounted will be unavailable: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_pre<MsgFlowGetInitNodeIndex>(on_msg_flow_get_init_node_index_pre);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook the message flow's starting-node lookup, talking to Zelda while "
+            "dismounted will open an empty/incorrect conversation: {}",
+            (int)result);
+    }
+
+    result = register_zelda_talk_flow();
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register Zelda's dismounted-talk message, talking to Zelda while "
+            "dismounted will be unavailable: {}",
             (int)result);
     }
 
@@ -1630,6 +2112,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         if (link != nullptr) {
             link->offHorseZelda();
         }
+        update_zelda_talk_interaction();
         return MOD_OK;
     }
 
@@ -1692,14 +2175,23 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         s_hideSpawnedZeldaInCutscene = false;
     }
 
+    if (zelda_talk_event_active()) {
+        s_hideSpawnedZeldaInCutscene = false;
+    }
+
     log_cutscene_diagnostics_if_changed(horse, is_title_screen(), inScriptedCutscene,
                                          storyHoZeldaActive);
+
+    update_zelda_talk_interaction();
 
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     remove_spawned_zelda();
+    remove_zelda_npc_proxy();
+    s_zeldaTalkGraph.reset();
+    s_zeldaTalkMessages.clear();
     mods::hook::uninstall<ActorDelete>();
     mods::hook::uninstall<HorseCallSubstance>();
     mods::hook::uninstall<HoZeldaSetMatrix>();
@@ -1710,6 +2202,10 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     mods::hook::uninstall<HoZeldaSetNeckAngle>();
     mods::hook::uninstall<ArrowShooting>();
     mods::hook::uninstall<ArrowExecute>();
+    mods::hook::uninstall<NpcZeldaDraw>();
+    mods::hook::uninstall<NpcZeldaSetCollision>();
+    mods::hook::uninstall<NpcZeldaExecute>();
+    mods::hook::uninstall<MsgFlowGetInitNodeIndex>();
     return MOD_OK;
 }
 }
