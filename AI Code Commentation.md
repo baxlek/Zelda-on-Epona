@@ -212,6 +212,16 @@ Trailing comments on the two early returns:
 > Re-registered every `on_hozelda_execute_pre()` tick (cheap to re-set; avoids tracking
 > creation/respawn state separately) rather than once at spawn, since the mod never observes
 > `daHoZelda_c::create()` run.
+>
+> Rotation axis: build #384's dual-joint fix did make `CHIN` visibly move, but only as a
+> side-to-side sweep with the mouth itself staying shut -- i.e. the joint choice was right but
+> the rotation axis wasn't. `daHoZelda_c::modelCallBack()`'s own neck/body code
+> (`d_a_hozelda.cpp`) settles this precisely for this exact skeleton:
+> `mDoMtx_stack_c::XrotM(mNeckAngle.y)` drives the yaw/turn component (`.y`) and
+> `mDoMtx_stack_c::ZrotM(-mNeckAngle.x)` drives the pitch/nod component (`.x`). We were using
+> `XrotM` -- the yaw axis, matching the reported side-to-side sweep exactly -- so switched to
+> `ZrotM`, the pitch axis real nodding uses, which should actually hinge the jaw open/closed
+> instead of sweeping it sideways.
 
 ## `find_zelda_npc_proxy()` (forward declaration)
 

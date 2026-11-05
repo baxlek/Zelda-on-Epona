@@ -550,7 +550,7 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 
     u16 jntNo = joint->getJntNo();
     mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
-    mDoMtx_stack_c::XrotM(s_zeldaMouthAngle);
+    mDoMtx_stack_c::ZrotM(s_zeldaMouthAngle);
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
