@@ -98,10 +98,13 @@ static bool epona_follow_active() {
 
 static ConfigVarHandle g_cvarAltZeldaFace = 0;
 
-// Experimental: borrows the standing/dialogue "Zelda" NPC's face texture-pattern (BTP) resource
-// instead of HoZelda's own, in case the two models share compatible material names. This can't be
-// verified from source alone (no access to the real model/texture data), so it's opt-in and may
-// render incorrectly on some HoZelda models.
+// Experimental/diagnostic: cycles HoZelda's face texture-pattern (BTP) through the standing/
+// dialogue "Zelda" NPC's two known face resources once per second, to make it visually obvious
+// whether borrowing her BTP data onto HoZelda's model has any effect at all. In-game build #395
+// testing showed no visible change with a single borrowed face, which could mean either the swap
+// is a no-op (material names don't match between the two models) or her two faces just look
+// nearly identical (ZELDA vs ZELDA_SIT, standing vs. sitting pose variants, not distinct
+// expressions) -- this cycling mode is meant to help tell those two cases apart.
 static bool alt_zelda_face_enabled() {
     bool value = false;
     if (g_cvarAltZeldaFace == 0 ||
@@ -576,15 +579,26 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 // daNpc_Zelda_c's "Zelda" archive is already loaded whenever the dismounted-talk proxy exists
 // (spawn_zelda_npc_proxy()), so the resource is available without any extra loading of our own.
 static constexpr char kNpcZeldaArcName[] = "Zelda";
-// l_faceMotionAnmData[0].mBtpFileIdx in daNpc_Zelda_c, her default/talking face BTP.
-static constexpr int kNpcZeldaFaceBtpIdx = 17;
+// daNpc_Zelda_c's resource header (res/Object/Zelda.h) only defines two BTP entries at all:
+// BTP_ZELDA_e (standing face) and BTP_ZELDA_SIT_e (sitting face) -- these are the only facial
+// resources she has, so that's the full cycle available to test with.
+static constexpr int kNpcZeldaFaceBtpIndices[] = {17, 18};
+static constexpr int kNpcZeldaFaceCount =
+    sizeof(kNpcZeldaFaceBtpIndices) / sizeof(kNpcZeldaFaceBtpIndices[0]);
+
+// Diagnostic cycling state: advances to the next face once per second so it's obvious from
+// watching her whether the BTP swap is actually taking visual effect at all.
+static constexpr u32 kNpcZeldaFaceCycleTicks = 60;  // ~1 second; HoZelda::execute() runs at 60Hz.
+static int s_npcZeldaFaceCycleIndex = 0;
+static u32 s_npcZeldaFaceCycleTimer = 0;
 
 static void apply_npc_zelda_face(daHoZelda_c* zelda) {
     // Guards the first (possibly multi-phase) create() call, where mpZeldaModel isn't built yet.
     if (zelda->mpZeldaModel == nullptr) {
         return;
     }
-    void* btpRes = dComIfG_getObjectRes(kNpcZeldaArcName, kNpcZeldaFaceBtpIdx);
+    int resIdx = kNpcZeldaFaceBtpIndices[s_npcZeldaFaceCycleIndex];
+    void* btpRes = dComIfG_getObjectRes(kNpcZeldaArcName, resIdx);
     if (btpRes == nullptr) {
         return;
     }
@@ -595,6 +609,18 @@ static void apply_npc_zelda_face(daHoZelda_c* zelda) {
                          static_cast<J3DAnmTexPattern*>(btpRes), 1, -1, 1.0f, 0, -1);
 }
 
+// Called every tick from HoZelda's execute() while the alt-face option is on: advances the cycle
+// index once per second and re-applies the (possibly new) face immediately on each change.
+static void update_npc_zelda_face_cycle(daHoZelda_c* zelda) {
+    if (s_npcZeldaFaceCycleTimer == 0) {
+        apply_npc_zelda_face(zelda);
+    }
+    if (++s_npcZeldaFaceCycleTimer >= kNpcZeldaFaceCycleTicks) {
+        s_npcZeldaFaceCycleTimer = 0;
+        s_npcZeldaFaceCycleIndex = (s_npcZeldaFaceCycleIndex + 1) % kNpcZeldaFaceCount;
+    }
+}
+
 DEFINE_HOOK(&daHoZelda_c::create, HoZeldaCreate);
 
 static void on_hozelda_create_post(ModContext*, void* args, void*, void*) {
@@ -602,6 +628,8 @@ static void on_hozelda_create_post(ModContext*, void* args, void*, void*) {
     if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
         return;
     }
+    s_npcZeldaFaceCycleIndex = 0;
+    s_npcZeldaFaceCycleTimer = 0;
     apply_npc_zelda_face(zelda);
 }
 
@@ -665,6 +693,10 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!is_spawned_zelda(zelda)) {
         return;
+    }
+
+    if (alt_zelda_face_enabled()) {
+        update_npc_zelda_face_cycle(zelda);
     }
 
     fopAc_ac_c* proxy = find_zelda_npc_proxy();
@@ -1933,7 +1965,7 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
 
     UiControlDesc altFaceControl = UI_CONTROL_DESC_INIT;
     altFaceControl.kind = UI_CONTROL_TOGGLE;
-    altFaceControl.label = "Use NPC Zelda's face (experimental)";
+    altFaceControl.label = "Cycle NPC Zelda's faces (diagnostic, experimental)";
     altFaceControl.binding = UI_BINDING_CONFIG_VAR;
     altFaceControl.config_var = g_cvarAltZeldaFace;
     svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
