@@ -39,6 +39,7 @@
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
 #include "JSystem/J3DGraphBase/J3DSys.h"
+#include "JSystem/J3DGraphBase/J3DTransform.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
@@ -94,6 +95,24 @@ static bool epona_follow_dismounted_enabled() {
 
 static bool epona_follow_active() {
     return epona_follow_dismounted_enabled();
+}
+
+static ConfigVarHandle g_cvarAltZeldaFace = 0;
+
+// Experimental/diagnostic: cycles HoZelda's face texture-pattern (BTP) through the standing/
+// dialogue "Zelda" NPC's two known face resources once per second, to make it visually obvious
+// whether borrowing her BTP data onto HoZelda's model has any effect at all. In-game build #395
+// testing showed no visible change with a single borrowed face, which could mean either the swap
+// is a no-op (material names don't match between the two models) or her two faces just look
+// nearly identical (ZELDA vs ZELDA_SIT, standing vs. sitting pose variants, not distinct
+// expressions) -- this cycling mode is meant to help tell those two cases apart.
+static bool alt_zelda_face_enabled() {
+    bool value = false;
+    if (g_cvarAltZeldaFace == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarAltZeldaFace, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
 }
 
 static constexpr bool kDiagnosticLoggingEnabled = false;
@@ -534,11 +553,268 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
 }
 
 static constexpr u16 kZelhJntChin = 0x5;
+static constexpr u16 kZelhJntMomiL1 = 0x6;
+static constexpr u16 kZelhJntMomiL2 = 0x7;
+static constexpr u16 kZelhJntMomiR1 = 0x8;
+static constexpr u16 kZelhJntMomiR2 = 0x9;
 static constexpr u16 kZelhJntMouth = 0xA;
-static constexpr u16 kZelhJntLipSync[] = {kZelhJntChin, kZelhJntMouth};
+// All face joints that get a custom callback: the chin/mouth pair drives the existing synthetic
+// lip-sync open/close, while the "momi" (cheek) joints are only ever touched by the experimental
+// smile pose below -- they have no native animation of their own to preserve.
+static constexpr u16 kZelhJntFace[] = {kZelhJntChin, kZelhJntMomiL1, kZelhJntMomiL2,
+                                        kZelhJntMomiR1, kZelhJntMomiR2, kZelhJntMouth};
 static s16 s_zeldaMouthAngle = 0;
 static u8 s_zeldaMouthFlapTimer = 0;
 static bool s_zeldaMouthFlapOpen = false;
+
+// Experimental smile pose: neither the "Zelda" nor "HoZelda" archives have a BTP texture that
+// touches the mouth (confirmed via the material-match diagnostic above -- every candidate's BTP
+// resource only ever targets the two eye materials). Two bone-driven mechanisms are offered,
+// selectable from the mods panel below:
+//  - "Manual sliders": small hand-tuned rotations applied directly to HoZelda's own mouth and
+//    cheek ("momi") joints, live-tunable since there's no way to know the right-looking angles
+//    without visual feedback in-game.
+//  - Borrowing a real smile BCK from another NPC that has one (e.g. BCK_ARU_FH_SMILE,
+//    BCK_THE_FH_SMILE) and sampling its *authored* per-joint rotation directly from the resource
+//    (no live actor/playback wrapper needed -- J3DAnmBase::setFrame() + J3DAnmTransform::
+//    getTransform() can be called on the raw resource object), then applying that rotation to
+//    HoZelda's corresponding joint. Only works while that NPC's archive happens to be resident
+//    (i.e. the player is near Telma's Bar or Kakariko), same residency constraint as the earlier
+//    BTP face-candidate diagnostic.
+static ConfigVarHandle g_cvarZeldaSmileSource = 0;
+
+// Degrees, not BinAngle, so the mods panel sliders are human-readable; converted at apply time.
+static s16 s_smileMouthRotX = 0;
+static s16 s_smileMouthRotY = 0;
+static s16 s_smileMouthRotZ = 0;
+static s16 s_smileCheekRotX = 0;
+static s16 s_smileCheekRotY = 0;
+static s16 s_smileCheekRotZ = 0;
+
+// Which frame of the borrowed source's (looping) smile BCK to sample, and a percentage scale
+// applied to the sampled rotation -- both live-tunable, since the "right" frame/strength can't be
+// known without visual feedback in-game either.
+static s16 s_boneSmileFrame = 0;
+static s16 s_boneSmileIntensityPct = 100;
+
+static s16 smile_deg_to_bin_angle(s16 deg) {
+    return static_cast<s16>((static_cast<s32>(deg) * 0x10000) / 360);
+}
+
+static void apply_smile_rotation(s16 degX, s16 degY, s16 degZ) {
+    mDoMtx_stack_c::XYZrotM(smile_deg_to_bin_angle(degX), smile_deg_to_bin_angle(degY),
+                            smile_deg_to_bin_angle(degZ));
+}
+
+// Maps one joint on a donor NPC's skeleton to the corresponding joint on HoZelda's skeleton.
+// Several donor joints have no destination at all (e.g. eyebrow joints -- HoZelda has none), and
+// a donor with fewer cheek sub-joints than HoZelda can feed the same sampled rotation to more than
+// one destination joint.
+struct SmileJointMap_c {
+    u16 srcJoint;
+    u16 dstJoint;
+};
+
+// "The" (Telma): a single, always-resident-with-her archive (no secondary dependency). Joint
+// indices below come from the decompiled THE_JNT resource enum (assets/.../The.h); her FH_SMILE
+// BCK (res idx 0x10) is a *looping* ambient expression (holds the pose), not a one-shot transition
+// into it, so any frame of it should already read as "smiling".
+static constexpr const char* kTheArcName = "The";
+static constexpr int kTheBckFhSmileIdx = 0x10;
+static constexpr u16 kTheJntChin = 0x5;
+static constexpr u16 kTheJntMomiL = 0x9;
+static constexpr u16 kTheJntMomiR = 0xA;
+static constexpr u16 kTheJntMouth = 0xB;
+// clang-format off
+static constexpr SmileJointMap_c kTheJointMap[] = {
+    {kTheJntChin, kZelhJntChin},
+    {kTheJntMomiL, kZelhJntMomiL1}, {kTheJntMomiL, kZelhJntMomiL2},
+    {kTheJntMomiR, kZelhJntMomiR1}, {kTheJntMomiR, kZelhJntMomiR2},
+    {kTheJntMouth, kZelhJntMouth},
+};
+// clang-format on
+
+// "Aru" (Ashei): her FH_SMILE pairing (BCK+BTP) lives in a *secondary* archive, "Aru1", which is
+// always loaded whenever the base "Aru" archive is (same load pattern for every NPC mode), so in
+// practice it's resident any time she is. Her skeleton (shared with the base "Aru" BMD) has no
+// cheek ("momi") joints at all -- only chin and mouth.
+static constexpr const char* kAruArcName = "Aru1";
+static constexpr int kAruBckFhSmileIdx = 0xE;
+static constexpr u16 kAruJntChin = 0x5;
+static constexpr u16 kAruJntMouth = 0x8;
+static constexpr SmileJointMap_c kAruJointMap[] = {
+    {kAruJntChin, kZelhJntChin},
+    {kAruJntMouth, kZelhJntMouth},
+};
+
+struct BoneSmileSource_c {
+    const char* arcName;  // nullptr for the non-sampling entries ("Off"/"Manual sliders")
+    int bckIdx;
+    const SmileJointMap_c* jointMap;
+    int jointMapCount;
+    const char* label;
+};
+
+// Index 0 and 1 are handled specially (no resource sampling); index >= 2 are real donor NPCs.
+static constexpr BoneSmileSource_c kBoneSmileSources[] = {
+    {nullptr, 0, nullptr, 0, "Off"},
+    {nullptr, 0, nullptr, 0, "Manual sliders"},
+    {kTheArcName, kTheBckFhSmileIdx, kTheJointMap,
+     sizeof(kTheJointMap) / sizeof(kTheJointMap[0]), "Telma (\"The\") FH_SMILE"},
+    {kAruArcName, kAruBckFhSmileIdx, kAruJointMap,
+     sizeof(kAruJointMap) / sizeof(kAruJointMap[0]), "Ashei (\"Aru\") FH_SMILE"},
+};
+static constexpr int kBoneSmileSourceCount =
+    sizeof(kBoneSmileSources) / sizeof(kBoneSmileSources[0]);
+static constexpr int kBoneSmileSourceManual = 1;
+static constexpr int kBoneSmileSourceFirstDonor = 2;
+
+static int zelda_smile_source_index() {
+    int64_t value = 0;
+    if (g_cvarZeldaSmileSource == 0 ||
+        svc_config->get_int(mod_ctx, g_cvarZeldaSmileSource, &value) != MOD_OK) {
+        return 0;
+    }
+    if (value < 0 || value >= kBoneSmileSourceCount) {
+        return 0;
+    }
+    return static_cast<int>(value);
+}
+
+// Samples a donor NPC's smile BCK resource at the live-tunable frame for one of its joints,
+// scaled by the live-tunable intensity percentage. Returns false (leaving the destination joint
+// untouched) if the donor's archive isn't currently loaded.
+static bool sample_bone_smile_rotation(const BoneSmileSource_c& source, u16 srcJoint,
+                                        S16Vec* out) {
+    void* res = dComIfG_getObjectRes(source.arcName, source.bckIdx);
+    if (res == nullptr) {
+        return false;
+    }
+    J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(res);
+    f32 frame = static_cast<f32>(s_boneSmileFrame);
+    f32 frameMax = static_cast<f32>(anm->getFrameMax());
+    if (frameMax > 0.0f && frame > frameMax) {
+        frame = frameMax;  // the real max frame is only known once the archive is loaded
+    }
+    anm->setFrame(frame);
+    J3DTransformInfo info;
+    anm->getTransform(srcJoint, &info);
+    out->x = static_cast<s16>((static_cast<s32>(info.mRotation.x) * s_boneSmileIntensityPct) /
+                               100);
+    out->y = static_cast<s16>((static_cast<s32>(info.mRotation.y) * s_boneSmileIntensityPct) /
+                               100);
+    out->z = static_cast<s16>((static_cast<s32>(info.mRotation.z) * s_boneSmileIntensityPct) /
+                               100);
+    return true;
+}
+
+// Logs, once per second, whether the currently-selected donor's archive is actually resident and
+// what rotation data it's producing for each mapped joint -- the only way to tell "no visible
+// effect" apart from "archive isn't loaded" (the donor NPC's archive is only resident while the
+// player is physically near where that NPC normally appears, e.g. Telma's Bar or Kakariko).
+static int s_lastLoggedSmileSourceIdx = -2;
+static u32 s_smileLogTimer = 0;
+static constexpr u32 kSmileLogTicks = 60;  // ~1 second; HoZelda::execute() runs at 60Hz.
+
+static void log_bone_smile_status(int sourceIdx) {
+    const BoneSmileSource_c& source = kBoneSmileSources[sourceIdx];
+    void* res = dComIfG_getObjectRes(source.arcName, source.bckIdx);
+    if (res == nullptr) {
+        mods::log::info(
+            "boneSmile diagnostic: \"{}\" (\"{}\" res idx {}) is NOT loaded -- get near where "
+            "that NPC normally appears in-game and this should start sampling",
+            source.label, source.arcName, source.bckIdx);
+        return;
+    }
+    J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(res);
+    mods::log::info("boneSmile diagnostic: \"{}\" loaded (frameMax {}), sampling frame {}:",
+                     source.label, anm->getFrameMax(), s_boneSmileFrame);
+    for (int i = 0; i < source.jointMapCount; i++) {
+        S16Vec rot;
+        bool ok = sample_bone_smile_rotation(source, source.jointMap[i].srcJoint, &rot);
+        mods::log::info("  src joint 0x{:X} -> dst joint 0x{:X}: rotation ({}, {}, {}){}",
+                         source.jointMap[i].srcJoint, source.jointMap[i].dstJoint, rot.x, rot.y,
+                         rot.z, ok ? "" : " -- sample failed");
+    }
+}
+
+// Called every tick from HoZelda's execute() while a donor smile source is selected.
+static void update_bone_smile_log(int sourceIdx) {
+    bool changed = sourceIdx != s_lastLoggedSmileSourceIdx;
+    if (changed) {
+        s_lastLoggedSmileSourceIdx = sourceIdx;
+        s_smileLogTimer = 0;
+    }
+    if (sourceIdx < kBoneSmileSourceFirstDonor) {
+        return;
+    }
+    if (!changed && ++s_smileLogTimer < kSmileLogTicks) {
+        return;
+    }
+    s_smileLogTimer = 0;
+    log_bone_smile_status(sourceIdx);
+}
+
+// Applies whichever smile mechanism is currently selected to the joint matrix already on the
+// stack (caller has already pushed HoZelda's own native anm matrix for this joint).
+static void apply_smile_pose_for_joint(u16 dstJoint, bool isMouthOrChin) {
+    int sourceIdx = zelda_smile_source_index();
+    if (sourceIdx == 0) {
+        return;  // Off
+    }
+    if (sourceIdx == kBoneSmileSourceManual) {
+        if (isMouthOrChin) {
+            apply_smile_rotation(s_smileMouthRotX, s_smileMouthRotY, s_smileMouthRotZ);
+        } else {
+            apply_smile_rotation(s_smileCheekRotX, s_smileCheekRotY, s_smileCheekRotZ);
+        }
+        return;
+    }
+
+    const BoneSmileSource_c& source = kBoneSmileSources[sourceIdx];
+    for (int i = 0; i < source.jointMapCount; i++) {
+        if (source.jointMap[i].dstJoint != dstJoint) {
+            continue;
+        }
+        S16Vec rot;
+        if (sample_bone_smile_rotation(source, source.jointMap[i].srcJoint, &rot)) {
+            mDoMtx_stack_c::XYZrotM(rot.x, rot.y, rot.z);
+        }
+        return;  // at most one source joint maps to a given destination joint
+    }
+}
+
+// Generic joint-probe diagnostic: the "momi" (cheek) joints assumed from HoZelda's decompiled
+// ZELH_JNT resource enum turned out, on live testing, to visibly move her hair braids instead of
+// her cheeks -- so that header's joint *names* can't be trusted at face value for this model, even
+// though CHIN/MOUTH (used for lip-sync long before this session) check out fine. This lets any
+// single joint index be probed with a large, obvious, oscillating rotation from the mods panel, so
+// the real cheek joints (if any) can be identified empirically instead of guessed from the header.
+static ConfigVarHandle g_cvarJointProbe = 0;
+static s16 s_jointProbeIndex = 0;
+static s16 s_jointProbeAngleDeg = 0;
+static s8 s_jointProbeDir = 1;
+
+static bool joint_probe_enabled() {
+    bool value = false;
+    if (g_cvarJointProbe == 0 || svc_config->get_bool(mod_ctx, g_cvarJointProbe, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
+// Advances the probe's oscillation (a slow -45..45 degree triangle wave) once per tick; called
+// from HoZelda's execute() pre-hook, not from the per-joint callback (which may run for several
+// joints per tick).
+static void update_joint_probe_angle() {
+    if (!joint_probe_enabled()) {
+        return;
+    }
+    s_jointProbeAngleDeg += s_jointProbeDir;
+    if (s_jointProbeAngleDeg >= 45 || s_jointProbeAngleDeg <= -45) {
+        s_jointProbeDir = -s_jointProbeDir;
+    }
+}
 
 static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
     if (phase != 0) {
@@ -552,10 +828,158 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 
     u16 jntNo = joint->getJntNo();
     mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
-    mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
+    if (joint_probe_enabled() && jntNo == static_cast<u16>(s_jointProbeIndex)) {
+        // Probing takes priority over the smile pose so it's unambiguous which joint is moving.
+        apply_smile_rotation(s_jointProbeAngleDeg, 0, 0);
+    } else {
+        bool isMouthOrChin = jntNo == kZelhJntMouth || jntNo == kZelhJntChin;
+        if (isMouthOrChin) {
+            mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
+        }
+        apply_smile_pose_for_joint(jntNo, isMouthOrChin);
+    }
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
+}
+
+
+// A candidate face resource to try borrowing onto HoZelda. "Zelda" (the standing/dialogue NPC)
+// is the only archive guaranteed resident, since this mod spawns her as a dismounted talk proxy;
+// the rest are generic villager archives with an explicit smile/happy BTP that aren't loaded
+// unless the player happens to be in an area where that NPC is also present. Any candidate whose
+// archive isn't currently loaded is skipped automatically (dComIfG_getObjectRes returns nullptr).
+struct FaceCandidate_c {
+    const char* arcName;
+    int btpIdx;
+    const char* label;  // for log output, so it's clear which one is currently showing
+};
+
+// clang-format off
+static constexpr FaceCandidate_c kFaceCandidates[] = {
+    {"Zelda",  0x11, "Zelda standing"},
+    {"Zelda",  0x12, "Zelda sitting"},
+    {"Ins",    0x18, "Ins happy"},
+    {"Henna",  0x34, "Henna smile-talk"},
+    {"Seira",  0x45, "Seira happy-talk"},
+    {"Uri",    0x14, "Uri happy"},
+    {"Shad",   0x18, "Shad happy"},
+    {"clerkB", 0x26, "bazaar clerk smile"},
+    {"fairy",  0x32, "Great Fairy smile"},
+};
+// clang-format on
+static constexpr int kFaceCandidateCount = sizeof(kFaceCandidates) / sizeof(kFaceCandidates[0]);
+
+// Diagnostic cycling state: steps to the next frame (and, once a resource's frames are exhausted,
+// the next candidate) once per second, so it's obvious from watching her whether any given
+// resource/frame combination has a visible effect at all. Each BTP resource is itself a
+// texture-pattern *animation* that can bake in several frames beyond just a blink cycle (HoZelda's
+// own blink logic only ever plays frame 0 upward for a left-eye/right-eye blink), so this walks
+// every frame of every candidate, not just the candidates themselves.
+static constexpr u32 kFaceCycleTicks = 60;  // ~1 second; HoZelda::execute() runs at 60Hz.
+static int s_faceCyclePos = 0;        // index into kFaceCandidates
+static int s_faceCycleFrame = 0;      // current frame within that candidate's BTP animation
+static int s_faceCycleLoadedPos = -1;  // which candidate mEyeBtp is currently init()'d with
+static u32 s_faceCycleTimer = 0;
+
+static J3DAnmTexPattern* get_face_candidate_btp(int pos) {
+    const FaceCandidate_c& candidate = kFaceCandidates[pos];
+    void* res = dComIfG_getObjectRes(candidate.arcName, candidate.btpIdx);
+    return static_cast<J3DAnmTexPattern*>(res);
+}
+
+// J3DAnmTexPattern::searchUpdateMaterialID() (called by mEyeBtp.init() below) matches each of the
+// BTP resource's own material entries, by name, against HoZelda's material table, and records
+// whether each one found a match. Logging this is the only way to get a definitive, verifiable
+// answer -- rather than guessing from visual appearance alone -- as to which of a candidate's
+// targeted materials (e.g. "eye" vs. "mouth") actually resolve onto HoZelda's own model.
+static void log_face_candidate_material_match(const FaceCandidate_c& candidate,
+                                               J3DAnmTexPattern* btp) {
+    u16 num = btp->getUpdateMaterialNum();
+    mods::log::info("altZeldaFace diagnostic: \"{}\" targets {} material(s) in HoZelda's model:",
+                     candidate.label, num);
+    for (u16 i = 0; i < num; i++) {
+        const char* name = btp->mUpdateMaterialName.getName(i);
+        mods::log::info("  [{}] \"{}\" -> {}", i, name != nullptr ? name : "?",
+                         btp->isValidUpdateMaterialID(i) ? "matched" : "NOT matched");
+    }
+}
+
+// Pins HoZelda's mEyeBtp to the current diagnostic candidate/frame every tick. Re-targets her own
+// material table against the other model's BTP data, which only looks right if both models' face
+// materials share names and texture layouts -- expected to work only for "Zelda" (the same
+// character's standing model) and to have no visible effect at all for unrelated NPCs whose
+// material names won't match anything in HoZelda's model.
+static void apply_face_candidate(daHoZelda_c* zelda) {
+    // Guards the first (possibly multi-phase) create() call, where mpZeldaModel isn't built yet.
+    if (zelda->mpZeldaModel == nullptr) {
+        return;
+    }
+    J3DAnmTexPattern* btp = get_face_candidate_btp(s_faceCyclePos);
+    if (btp == nullptr) {
+        return;
+    }
+    if (s_faceCycleLoadedPos != s_faceCyclePos) {
+        zelda->mEyeBtp.init(zelda->mpZeldaModel->getModelData(), btp, 1, -1, 1.0f, 0, -1);
+        s_faceCycleLoadedPos = s_faceCyclePos;
+        log_face_candidate_material_match(kFaceCandidates[s_faceCyclePos], btp);
+    }
+    // Re-pin every tick: HoZelda's own native blink logic would otherwise drift the frame forward
+    // on its own (it treats any BTP resource as a blink animation by default).
+    zelda->mEyeBtp.setFrame(static_cast<f32>(s_faceCycleFrame));
+}
+
+static void reset_face_cycle() {
+    s_faceCyclePos = 0;
+    s_faceCycleFrame = 0;
+    s_faceCycleLoadedPos = -1;
+    s_faceCycleTimer = 0;
+}
+
+// Called every tick from HoZelda's execute() while the alt-face option is on.
+static void update_face_cycle(daHoZelda_c* zelda) {
+    apply_face_candidate(zelda);
+
+    if (++s_faceCycleTimer < kFaceCycleTicks) {
+        return;
+    }
+    s_faceCycleTimer = 0;
+
+    J3DAnmTexPattern* btp = get_face_candidate_btp(s_faceCyclePos);
+    int frameMax = btp != nullptr ? static_cast<int>(btp->getFrameMax()) : 0;
+
+    s_faceCycleFrame++;
+    if (s_faceCycleFrame > frameMax) {
+        s_faceCycleFrame = 0;
+        s_faceCyclePos = (s_faceCyclePos + 1) % kFaceCandidateCount;
+    }
+
+    const FaceCandidate_c& candidate = kFaceCandidates[s_faceCyclePos];
+    bool loaded = get_face_candidate_btp(s_faceCyclePos) != nullptr;
+    mods::log::info("altZeldaFace diagnostic: now trying \"{}\" (\"{}\" res idx {}, frame {}){}",
+                     candidate.label, candidate.arcName, candidate.btpIdx, s_faceCycleFrame,
+                     loaded ? "" : " -- archive not loaded, skipping");
+}
+
+DEFINE_HOOK(&daHoZelda_c::create, HoZeldaCreate);
+
+static void on_hozelda_create_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
+        return;
+    }
+    reset_face_cycle();
+    apply_face_candidate(zelda);
+}
+
+DEFINE_HOOK(&daHoZelda_c::setNormalFace, HoZeldaSetNormalFace);
+
+static void on_hozelda_set_normal_face_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
+        return;
+    }
+    apply_face_candidate(zelda);
 }
 
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
@@ -566,9 +990,21 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
-    for (u16 jointIdx : kZelhJntLipSync) {
+    for (u16 jointIdx : kZelhJntFace) {
         zelda->mpZeldaModel->getModelData()->getJointNodePointer(jointIdx)->setCallBack(
             hozelda_mouth_joint_callback);
+    }
+    update_bone_smile_log(zelda_smile_source_index());
+
+    update_joint_probe_angle();
+    if (joint_probe_enabled()) {
+        u16 jointNum = zelda->mpZeldaModel->getModelData()->getJointNum();
+        if (jointNum > 0 && s_jointProbeIndex >= 0 &&
+            static_cast<u16>(s_jointProbeIndex) < jointNum) {
+            zelda->mpZeldaModel->getModelData()
+                ->getJointNodePointer(static_cast<u16>(s_jointProbeIndex))
+                ->setCallBack(hozelda_mouth_joint_callback);
+        }
     }
 
     daHorse_c* horse = dComIfGp_getHorseActor();
@@ -608,6 +1044,10 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!is_spawned_zelda(zelda)) {
         return;
+    }
+
+    if (alt_zelda_face_enabled()) {
+        update_face_cycle(zelda);
     }
 
     fopAc_ac_c* proxy = find_zelda_npc_proxy();
@@ -1852,6 +2292,35 @@ static void update_zelda_talk_interaction() {
     update_zelda_talk_heal_effect();
 }
 
+// Backs each smile slider directly with its s16 variable via user_data, so the mods panel can
+// tune every value live in-game without a rebuild per guess.
+static void smile_rot_get(ModContext*, void* user_data, UiControlValue* out_value) {
+    out_value->int_value = *static_cast<s16*>(user_data);
+}
+
+static void smile_rot_set(ModContext*, void* user_data, const UiControlValue* value) {
+    *static_cast<s16*>(user_data) = static_cast<s16>(value->int_value);
+}
+
+static bool smile_manual_controls_disabled(ModContext*, void*) {
+    return zelda_smile_source_index() != kBoneSmileSourceManual;
+}
+
+static bool smile_bone_controls_disabled(ModContext*, void*) {
+    return zelda_smile_source_index() < kBoneSmileSourceFirstDonor;
+}
+
+// Dropdown option labels, pulled straight from kBoneSmileSources so the two can't drift apart.
+static constexpr const char* kBoneSmileSourceLabels[] = {
+    kBoneSmileSources[0].label,
+    kBoneSmileSources[1].label,
+    kBoneSmileSources[2].label,
+    kBoneSmileSources[3].label,
+};
+static_assert(sizeof(kBoneSmileSourceLabels) / sizeof(kBoneSmileSourceLabels[0]) ==
+                  kBoneSmileSourceCount,
+              "kBoneSmileSourceLabels must list every entry in kBoneSmileSources");
+
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc autoTargetControl = UI_CONTROL_DESC_INIT;
     autoTargetControl.kind = UI_CONTROL_TOGGLE;
@@ -1873,6 +2342,64 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvarShowInCutscenes;
     svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
+
+    UiControlDesc altFaceControl = UI_CONTROL_DESC_INIT;
+    altFaceControl.kind = UI_CONTROL_TOGGLE;
+    altFaceControl.label = "Cycle alternate face expressions (diagnostic, experimental)";
+    altFaceControl.binding = UI_BINDING_CONFIG_VAR;
+    altFaceControl.config_var = g_cvarAltZeldaFace;
+    svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
+
+    UiControlDesc smileSourceControl = UI_CONTROL_DESC_INIT;
+    smileSourceControl.kind = UI_CONTROL_DROPDOWN;
+    smileSourceControl.label = "Experimental smile pose (bone-driven, tunable)";
+    smileSourceControl.binding = UI_BINDING_CONFIG_VAR;
+    smileSourceControl.config_var = g_cvarZeldaSmileSource;
+    smileSourceControl.options = kBoneSmileSourceLabels;
+    smileSourceControl.option_count = kBoneSmileSourceCount;
+    svc_ui->pane_add_control(mod_ctx, panel, &smileSourceControl, nullptr);
+
+    auto addSmileSlider = [&](const char* label, s16* value, int64_t min, int64_t max,
+                              const char* suffix, UiPredicateFn disabled) {
+        UiControlDesc desc = UI_CONTROL_DESC_INIT;
+        desc.kind = UI_CONTROL_NUMBER;
+        desc.label = label;
+        desc.binding = UI_BINDING_CALLBACKS;
+        desc.get = smile_rot_get;
+        desc.set = smile_rot_set;
+        desc.user_data = value;
+        desc.min = min;
+        desc.max = max;
+        desc.step = 1;
+        desc.suffix = suffix;
+        desc.is_disabled = disabled;
+        svc_ui->pane_add_control(mod_ctx, panel, &desc, nullptr);
+    };
+    addSmileSlider("Smile: mouth rotation X", &s_smileMouthRotX, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: mouth rotation Y", &s_smileMouthRotY, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: mouth rotation Z", &s_smileMouthRotZ, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation X", &s_smileCheekRotX, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation Y", &s_smileCheekRotY, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation Z", &s_smileCheekRotZ, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: borrowed-pose sample frame", &s_boneSmileFrame, 0, 60, "",
+                   smile_bone_controls_disabled);
+    addSmileSlider("Smile: borrowed-pose intensity", &s_boneSmileIntensityPct, -50, 200, "%",
+                   smile_bone_controls_disabled);
+
+    UiControlDesc jointProbeToggle = UI_CONTROL_DESC_INIT;
+    jointProbeToggle.kind = UI_CONTROL_TOGGLE;
+    jointProbeToggle.label = "Joint probe (diagnostic: oscillates one joint to identify it)";
+    jointProbeToggle.binding = UI_BINDING_CONFIG_VAR;
+    jointProbeToggle.config_var = g_cvarJointProbe;
+    svc_ui->pane_add_control(mod_ctx, panel, &jointProbeToggle, nullptr);
+
+    addSmileSlider("Joint probe: index", &s_jointProbeIndex, 0, 60, "", nullptr);
     return MOD_OK;
 }
 
@@ -1902,6 +2429,21 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook HoZelda setBowModel, her bow will stay visible with auto-targeting "
             "disabled: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HoZeldaCreate>(on_hozelda_create_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda create, the alternate face option won't apply at spawn: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HoZeldaSetNormalFace>(on_hozelda_set_normal_face_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda setNormalFace, the alternate face option won't stick after "
+            "damage/startle reactions: {}",
             (int)result);
     }
 
@@ -2132,6 +2674,38 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to register eponaFollowDismounted option, defaulting to following off: {}",
             (int)result);
+    }
+
+    ConfigVarDesc altFaceCvarDesc = CONFIG_VAR_DESC_INIT;
+    altFaceCvarDesc.name = "altZeldaFace";
+    altFaceCvarDesc.type = CONFIG_VAR_BOOL;
+    altFaceCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &altFaceCvarDesc, &g_cvarAltZeldaFace);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register altZeldaFace option, defaulting to HoZelda's own face: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc smileSourceCvarDesc = CONFIG_VAR_DESC_INIT;
+    smileSourceCvarDesc.name = "zeldaSmileSource";
+    smileSourceCvarDesc.type = CONFIG_VAR_INT;
+    smileSourceCvarDesc.default_int = 0;
+    result = svc_config->register_var(mod_ctx, &smileSourceCvarDesc, &g_cvarZeldaSmileSource);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register zeldaSmileSource option, defaulting to HoZelda's own face: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc jointProbeCvarDesc = CONFIG_VAR_DESC_INIT;
+    jointProbeCvarDesc.name = "zeldaJointProbe";
+    jointProbeCvarDesc.type = CONFIG_VAR_BOOL;
+    jointProbeCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &jointProbeCvarDesc, &g_cvarJointProbe);
+    if (result != MOD_OK) {
+        mods::log::warn("failed to register zeldaJointProbe option, diagnostic disabled: {}",
+                         (int)result);
     }
 
     UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
