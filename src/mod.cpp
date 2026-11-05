@@ -552,11 +552,53 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
 }
 
 static constexpr u16 kZelhJntChin = 0x5;
+static constexpr u16 kZelhJntMomiL1 = 0x6;
+static constexpr u16 kZelhJntMomiL2 = 0x7;
+static constexpr u16 kZelhJntMomiR1 = 0x8;
+static constexpr u16 kZelhJntMomiR2 = 0x9;
 static constexpr u16 kZelhJntMouth = 0xA;
-static constexpr u16 kZelhJntLipSync[] = {kZelhJntChin, kZelhJntMouth};
+// All face joints that get a custom callback: the chin/mouth pair drives the existing synthetic
+// lip-sync open/close, while the "momi" (cheek) joints are only ever touched by the experimental
+// smile pose below -- they have no native animation of their own to preserve.
+static constexpr u16 kZelhJntFace[] = {kZelhJntChin, kZelhJntMomiL1, kZelhJntMomiL2,
+                                        kZelhJntMomiR1, kZelhJntMomiR2, kZelhJntMouth};
 static s16 s_zeldaMouthAngle = 0;
 static u8 s_zeldaMouthFlapTimer = 0;
 static bool s_zeldaMouthFlapOpen = false;
+
+// Experimental, bone-driven smile pose: neither the "Zelda" nor "HoZelda" archives have a BTP
+// texture that touches the mouth (confirmed via the material-match diagnostic above -- every
+// candidate's BTP resource only ever targets the two eye materials), and other NPCs' dedicated
+// smile expressions (e.g. BCK_ARU_FH_SMILE, BCK_THE_F_SMILE) are baked skeletal animations, not
+// textures. So instead of a texture swap, this applies small manually-tuned rotations directly to
+// HoZelda's own mouth and cheek ("momi") joints, live-tunable from the mods panel below since
+// there's no way to know the right-looking angles without visual feedback in-game.
+static ConfigVarHandle g_cvarZeldaSmilePose = 0;
+static bool zelda_smile_pose_enabled() {
+    bool value = false;
+    if (g_cvarZeldaSmilePose == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarZeldaSmilePose, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
+// Degrees, not BinAngle, so the mods panel sliders are human-readable; converted at apply time.
+static s16 s_smileMouthRotX = 0;
+static s16 s_smileMouthRotY = 0;
+static s16 s_smileMouthRotZ = 0;
+static s16 s_smileCheekRotX = 0;
+static s16 s_smileCheekRotY = 0;
+static s16 s_smileCheekRotZ = 0;
+
+static s16 smile_deg_to_bin_angle(s16 deg) {
+    return static_cast<s16>((static_cast<s32>(deg) * 0x10000) / 360);
+}
+
+static void apply_smile_rotation(s16 degX, s16 degY, s16 degZ) {
+    mDoMtx_stack_c::XYZrotM(smile_deg_to_bin_angle(degX), smile_deg_to_bin_angle(degY),
+                            smile_deg_to_bin_angle(degZ));
+}
 
 static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
     if (phase != 0) {
@@ -570,7 +612,14 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 
     u16 jntNo = joint->getJntNo();
     mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
-    mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
+    if (jntNo == kZelhJntMouth || jntNo == kZelhJntChin) {
+        mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
+        if (zelda_smile_pose_enabled()) {
+            apply_smile_rotation(s_smileMouthRotX, s_smileMouthRotY, s_smileMouthRotZ);
+        }
+    } else if (zelda_smile_pose_enabled()) {
+        apply_smile_rotation(s_smileCheekRotX, s_smileCheekRotY, s_smileCheekRotZ);
+    }
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
@@ -722,7 +771,7 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
-    for (u16 jointIdx : kZelhJntLipSync) {
+    for (u16 jointIdx : kZelhJntFace) {
         zelda->mpZeldaModel->getModelData()->getJointNodePointer(jointIdx)->setCallBack(
             hozelda_mouth_joint_callback);
     }
@@ -2012,6 +2061,16 @@ static void update_zelda_talk_interaction() {
     update_zelda_talk_heal_effect();
 }
 
+// Backs each smile-pose slider directly with its s16 degree variable via user_data, so the mods
+// panel can tune all six axes live in-game without a rebuild per guess.
+static void smile_rot_get(ModContext*, void* user_data, UiControlValue* out_value) {
+    out_value->int_value = *static_cast<s16*>(user_data);
+}
+
+static void smile_rot_set(ModContext*, void* user_data, const UiControlValue* value) {
+    *static_cast<s16*>(user_data) = static_cast<s16>(value->int_value);
+}
+
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc autoTargetControl = UI_CONTROL_DESC_INIT;
     autoTargetControl.kind = UI_CONTROL_TOGGLE;
@@ -2040,6 +2099,34 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     altFaceControl.binding = UI_BINDING_CONFIG_VAR;
     altFaceControl.config_var = g_cvarAltZeldaFace;
     svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
+
+    UiControlDesc smilePoseControl = UI_CONTROL_DESC_INIT;
+    smilePoseControl.kind = UI_CONTROL_TOGGLE;
+    smilePoseControl.label = "Experimental smile pose (bone-driven, tunable)";
+    smilePoseControl.binding = UI_BINDING_CONFIG_VAR;
+    smilePoseControl.config_var = g_cvarZeldaSmilePose;
+    svc_ui->pane_add_control(mod_ctx, panel, &smilePoseControl, nullptr);
+
+    auto addSmileSlider = [&](const char* label, s16* value) {
+        UiControlDesc desc = UI_CONTROL_DESC_INIT;
+        desc.kind = UI_CONTROL_NUMBER;
+        desc.label = label;
+        desc.binding = UI_BINDING_CALLBACKS;
+        desc.get = smile_rot_get;
+        desc.set = smile_rot_set;
+        desc.user_data = value;
+        desc.min = -90;
+        desc.max = 90;
+        desc.step = 1;
+        desc.suffix = " deg";
+        svc_ui->pane_add_control(mod_ctx, panel, &desc, nullptr);
+    };
+    addSmileSlider("Smile: mouth rotation X", &s_smileMouthRotX);
+    addSmileSlider("Smile: mouth rotation Y", &s_smileMouthRotY);
+    addSmileSlider("Smile: mouth rotation Z", &s_smileMouthRotZ);
+    addSmileSlider("Smile: cheek rotation X", &s_smileCheekRotX);
+    addSmileSlider("Smile: cheek rotation Y", &s_smileCheekRotY);
+    addSmileSlider("Smile: cheek rotation Z", &s_smileCheekRotZ);
     return MOD_OK;
 }
 
@@ -2324,6 +2411,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to register altZeldaFace option, defaulting to HoZelda's own face: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc smilePoseCvarDesc = CONFIG_VAR_DESC_INIT;
+    smilePoseCvarDesc.name = "zeldaSmilePose";
+    smilePoseCvarDesc.type = CONFIG_VAR_BOOL;
+    smilePoseCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &smilePoseCvarDesc, &g_cvarZeldaSmilePose);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register zeldaSmilePose option, defaulting to HoZelda's own face: {}",
             (int)result);
     }
 
