@@ -1435,6 +1435,7 @@ static u16 s_zeldaTalkNodeId = 0;
 static u16 s_zeldaTalkWolfNodeId = 0;
 
 static MessageId s_zeldaTalkPage1MessageId = 0;
+static MessageId s_zeldaTalkWolfPage2MessageId = 0;
 
 static constexpr u16 kZeldaTalkWolfPauseFrames = 30;
 
@@ -1660,6 +1661,7 @@ static ModResult register_zelda_talk_flow() {
     const auto wolfPage2 = graph.add_message(wolfPage2Id).next(mods::flow::kEnd);
     const auto wolfPage1 = graph.add_message(wolfPage1Id).next(wolfPage2);
     s_zeldaTalkWolfNodeId = wolfPage1;
+    s_zeldaTalkWolfPage2MessageId = wolfPage2Id;
 
     s_zeldaTalkGraph = graph.commit();
     return s_zeldaTalkGraph.result();
@@ -1767,12 +1769,36 @@ static bool zelda_talk_is_active() {
 }
 
 static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
+static constexpr u8 kZeldaInstantFillFlapFrames = 10;
 
 static void update_zelda_mouth_animation(bool talking) {
+    static bool s_wasOnInstantFillPage = false;
+    static bool s_instantFlapFiredThisPage = false;
+    static s16 s_instantFlapFramesLeft = 0;
+
+    msg_class* msg_p = dMsgObject_c::getActor();
+    bool onInstantFillPage = talking && msg_p != nullptr &&
+                              msg_p->msg_idx == s_zeldaTalkWolfPage2MessageId;
+
+    if (!onInstantFillPage) {
+        s_wasOnInstantFillPage = false;
+        s_instantFlapFiredThisPage = false;
+        s_instantFlapFramesLeft = 0;
+    } else if (!s_wasOnInstantFillPage && !s_instantFlapFiredThisPage) {
+        s_instantFlapFramesLeft = kZeldaTalkWolfPauseFrames + kZeldaInstantFillFlapFrames * 2;
+        s_instantFlapFiredThisPage = true;
+    }
+    s_wasOnInstantFillPage = onInstantFillPage;
+
     bool mouthOpenBeat = talking && dMsgObject_isMouthCheck();
     s16 target = 0;
 
-    if (mouthOpenBeat) {
+    if (s_instantFlapFramesLeft > kZeldaInstantFillFlapFrames * 2) {
+        s_instantFlapFramesLeft--;
+    } else if (s_instantFlapFramesLeft > 0) {
+        target = (s_instantFlapFramesLeft > kZeldaInstantFillFlapFrames) ? kZeldaMouthOpenAngle : 0;
+        s_instantFlapFramesLeft--;
+    } else if (mouthOpenBeat) {
         if (s_zeldaMouthFlapTimer == 0) {
             s_zeldaMouthFlapOpen = !s_zeldaMouthFlapOpen;
             s_zeldaMouthFlapTimer = static_cast<u8>(2.0f + cM_rndF(4.0f));

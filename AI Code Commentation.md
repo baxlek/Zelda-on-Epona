@@ -648,6 +648,20 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > The jaw was also rotating the wrong way (upward instead of down, per build #384 testing) with
 > a bare `ZrotM(s_zeldaMouthAngle)`; mirrored the sign `daHoZelda_c::modelCallBack()` itself uses
 > for its own `ZrotM(-mNeckAngle.x)` pitch rotation and negated it to `ZrotM(-s_zeldaMouthAngle)`.
+>
+> Wolf-form page 2 (`"So undignified..."`) uses `raw_tag(0, MSGTAG_INSTANT, {})`
+> (`MSGTAG_GROUP(0)`'s `MSGTAG_INSTANT` case in `d_msg_class.cpp` just forces
+> `setCharAllAlphaRate(1.0f)`) to make its whole line pop in at once instead of typing out
+> letter by letter -- and since that bypasses the normal per-character reveal loop entirely,
+> `mMouthCheck` never gets set for it, so the generic flap logic above never fires for this
+> page (build #384 feedback: no mouth movement on the all-at-once line). Since we authored this
+> exact page ourselves, we know its tag sequence precisely -- `pause(kZeldaTalkWolfPauseFrames)`
+> then the instant-fill tag -- so `update_zelda_mouth_animation()` special-cases
+> `s_zeldaTalkWolfPage2MessageId` (the page's own `MessageId`, captured at registration): on
+> first seeing that page current, it schedules one deterministic open-then-closed flap timed to
+> land exactly `kZeldaTalkWolfPauseFrames` in, i.e. the instant the text visually pops in, lasting
+> `kZeldaInstantFillFlapFrames * 2` frames -- rather than trying to react to any engine-exposed
+> signal, since there isn't one for this reveal mode.
 
 ## `update_zelda_talk_heal_effect()`
 
