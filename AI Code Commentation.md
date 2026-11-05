@@ -672,10 +672,31 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > fire the flap then. `MSGTAG_INSTANT` only maxes out the per-character reveal rate *while* mode
 > is still `TYPING` -- it doesn't skip that state outright -- so this falling edge still lands on
 > the same tick the text becomes fully visible, with no dependency on matching our tick rate to
-> the engine's internal pause-tag timebase. Fires on the first tick the page is current with
-> mode already not `TYPING` (rather than requiring an observed `TYPING` tick first), covering
-> both the "we catch it mid-type" and "it's already past typing by the first tick we see it"
-> cases without needing to know which one actually happens for this reveal mode.
+> the engine's internal pause-tag timebase.
+>
+> That attempt fired on the first tick the page was current with mode already not `TYPING`,
+> without requiring an observed `TYPING` tick first -- meant as a hedge in case this reveal mode
+> skipped `TYPING` outright. That hedge was itself the bug (reported regression: Zelda's mouth
+> now held open noticeably longer at the *end of page 1's* text fill, and still never flapped for
+> page 2 itself). `dMsgFlow_c::messageNodeProc()`'s `mode == fopMsg_MODE_MSG_DISPLAYED_e` (0x0E)
+> case advances the flow's internal node index -- and with it, `msg_class::msg_idx` -- the moment
+> a page *finishes typing*, not when the player actually presses A to turn to the next page:
+> page 1's box sits fully typed and displayed, waiting on real player input, for an
+> unpredictable (player-controlled) number of ticks during which `msg_idx` has *already* flipped
+> to page 2's `MessageId` while `mode` is still whatever page 1 left it at (`DISPLAYED`, not
+> `TYPING`). The hedge's bare "not typing yet" check matched that premature window immediately,
+> firing (and latching `s_instantFlapFiredThisPage`) well before page 2's text ever actually
+> appeared -- both explaining the extended hold at the tail of page 1 and starving the real
+> page-2 reveal of its one-shot flap, since the latch was already spent.
+>
+> Fixed by requiring a confirmed rising edge into `TYPING` (`s_hasObservedTypingOnInstantPage`)
+> while `s_zeldaTalkWolfPage2MessageId` is current *before* watching for the falling edge back
+> out of it -- mirroring `update_zelda_talk_heal_effect()`'s own `s_wasTyping && !isTyping` gate
+> exactly, rather than the broadened "or already past it" fallback. This is safe specifically
+> because `MSGTAG_INSTANT` only maxes the reveal rate *while* mode is still `TYPING` (confirmed
+> above) rather than skipping that state, so a genuine, fresh `TYPING` tick is guaranteed once
+> page 2's box actually reopens for real -- the premature `msg_idx` flip during page 1's
+> wait-for-input window never produces a `TYPING` reading, so it can no longer satisfy the gate.
 
 ## `update_zelda_talk_heal_effect()`
 

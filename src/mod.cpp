@@ -1772,6 +1772,7 @@ static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
 static constexpr s16 kZeldaInstantFillFlapFrames = 20;
 
 static void update_zelda_mouth_animation(bool talking) {
+    static bool s_hasObservedTypingOnInstantPage = false;
     static bool s_instantFlapFiredThisPage = false;
     static s16 s_instantFlapFramesLeft = 0;
 
@@ -1780,9 +1781,12 @@ static void update_zelda_mouth_animation(bool talking) {
                               msg_p->msg_idx == s_zeldaTalkWolfPage2MessageId;
 
     if (!onInstantFillPage) {
+        s_hasObservedTypingOnInstantPage = false;
         s_instantFlapFiredThisPage = false;
         s_instantFlapFramesLeft = 0;
-    } else if (!s_instantFlapFiredThisPage && msg_p->mode != fopMsg_MODE_MSG_TYPING_e) {
+    } else if (msg_p->mode == fopMsg_MODE_MSG_TYPING_e) {
+        s_hasObservedTypingOnInstantPage = true;
+    } else if (s_hasObservedTypingOnInstantPage && !s_instantFlapFiredThisPage) {
         s_instantFlapFramesLeft = kZeldaInstantFillFlapFrames;
         s_instantFlapFiredThisPage = true;
     }
