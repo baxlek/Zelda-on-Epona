@@ -181,6 +181,48 @@ Trailing comments on the two early returns:
 - `if (!s_eponaFollowFacing) { return; }` — within the still distance; hold fully still, don't even turn to face Link
 - `if (s_eponaFollowApproaching && aligned) { return; }` — already aligned; native turning/movement handles this tick
 
+## `hozelda_mouth_joint_callback()` / `kZelhJntLipSync`
+
+> Faux lip-sync for the spawned Zelda's dialogue (see `update_zelda_mouth_animation()` further
+> down). Her model has no authored mouth-flap animation of its own, unlike native talking NPCs:
+> those rely on `daNpcT_c::ctrlMsgAnm()` (d_a_npc.cpp) toggling playback of an authored "talk"
+> BCK/BTP in bursts timed to `dMsgObject_isMouthCheck()`, using per-NPC-class motion-sequence-
+> manager infrastructure her class doesn't have. Her skeleton does have dedicated facial joints,
+> though -- `ZELH_JNT_CHIN_e = 0x5` and `ZELH_JNT_MOUTH_e = 0xA` in the decompiled `HoZelda.h`
+> resource header's `ZELH_JNT` enum (assets/RZDP01/res/Object/HoZelda.h) -- neither of which is
+> one of the four joints (`daHoZelda_c::create()`'s `getJointNodePointer(0/1/23/4)`) the native
+> code itself registers a callback on, so we register our own on both, reusing the exact matrix
+> idiom `daHoZelda_c::modelCallBack()` already applies to its own joints
+> (`mNeckAngle`/`mBodyAngle`): copy the joint's current anm matrix, apply an extra local
+> rotation, write it back, then mirror it into `J3DSys::mCurrentMtx` for
+> `J3DJoint::recursiveCalc()` to pick up.
+>
+> Driving both joints (rather than `ZELH_JNT_MOUTH_e` alone, as a first attempt did) is a
+> deliberate hedge: build #384 testing showed zero visible movement in-game from `MOUTH` alone.
+> `ZELH_JNT`'s index ordering is a depth-first joint-tree traversal (parent before children,
+> siblings grouped), and `CHIN` (0x5) sits immediately after `HEAD` (0x4) -- where a modeler
+> would place the primary jaw/mandible bone -- while `MOUTH` (0xA) only appears after both
+> hair-strand chains (`MOMIL1/2`, `MOMIR1/2`, indices 0x6-0x9) are fully traversed, meaning it's
+> a later-added sibling of `CHIN` under `HEAD`, not a child of it. That ordering suggests `CHIN`
+> is the bone modelers actually skinned the jaw/lower-mouth geometry to, and `MOUTH` may be a
+> lighter-weight corner-of-mouth or locator joint with little or no skin influence on its own --
+> but this still can't be confirmed without a render pipeline, so both are driven together to
+> maximize the odds of a visible result regardless of which guess is right.
+>
+> Re-registered every `on_hozelda_execute_pre()` tick (cheap to re-set; avoids tracking
+> creation/respawn state separately) rather than once at spawn, since the mod never observes
+> `daHoZelda_c::create()` run.
+>
+> Rotation axis: build #384's dual-joint fix did make `CHIN` visibly move, but only as a
+> side-to-side sweep with the mouth itself staying shut -- i.e. the joint choice was right but
+> the rotation axis wasn't. `daHoZelda_c::modelCallBack()`'s own neck/body code
+> (`d_a_hozelda.cpp`) settles this precisely for this exact skeleton:
+> `mDoMtx_stack_c::XrotM(mNeckAngle.y)` drives the yaw/turn component (`.y`) and
+> `mDoMtx_stack_c::ZrotM(-mNeckAngle.x)` drives the pitch/nod component (`.x`). We were using
+> `XrotM` -- the yaw axis, matching the reported side-to-side sweep exactly -- so switched to
+> `ZrotM`, the pitch axis real nodding uses, which should actually hinge the jaw open/closed
+> instead of sweeping it sideways.
+
 ## `find_zelda_npc_proxy()` (forward declaration)
 
 > Forward-declared: defined further down alongside the rest of the NPC-talk-proxy machinery, but
@@ -574,6 +616,94 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > Spawns/despawns the invisible talk proxy alongside the companion's own lifecycle: she only
 > needs to exist while the companion does, and self-heals (via find_zelda_npc_proxy()'s own
 > liveness check) if the engine ever deletes her out from under us.
+
+## `zelda_talk_is_active()` / `update_zelda_mouth_animation()`
+
+> Whether the conversation currently on screen is specifically the one we drive through the
+> proxy (as opposed to some other NPC's, or none at all) -- used to gate the companion's faux
+> lip-sync. Drives `s_zeldaMouthAngle` (applied every frame by `hozelda_mouth_joint_callback()`,
+> see its comment above) toward an "open" pose while our dialogue is the one actually on screen
+> and `dMsgObject_isMouthCheck()` -- the same engine-wide text-reveal-rhythm flag real talking
+> NPCs read in `ctrlMsgAnm()` -- says this instant is a "mouth open" beat, easing back to closed
+> the rest of the time (including whenever she isn't actively talking to us at all).
+>
+> `kZeldaMouthOpenAngle` was doubled from its original `0x500` (~7 degrees) to `0xA00`
+> (~14 degrees) after build #384 testing showed no observable movement at the smaller angle,
+> in case subtlety (rather than joint choice) was the whole problem.
+>
+> `dMsgObject_isMouthCheck()` isn't the rapid per-character toggle its name suggests -- native
+> `jmessage_tSequenceProcessor` (`d_msg_class.cpp`) only clears `mMouthCheck` back to 0 around
+> punctuation-driven pauses (`!`, full-width punctuation, page breaks), so for ordinary prose
+> it reads as "true" continuously for the whole run of characters between pauses. Real NPCs get
+> away with reading it directly because `ctrlMsgAnm()` only uses it to gate playback of an
+> already-authored, already-animated talk-loop BCK (`ANM_FLAG_4000`) -- the visual "flapping" is
+> baked into that loop, not into the boolean. Zelda has no such authored loop to gate, so easing
+> straight toward `kZeldaMouthOpenAngle` on a bare `isMouthCheck()` read held her jaw open and
+> static for the whole sentence instead of chattering (build #384 feedback). `s_zeldaMouthFlapTimer`
+> / `s_zeldaMouthFlapOpen` resynthesize the missing flap ourselves: while a mouth-open beat is
+> underway, flip the target between fully open and fully closed every `2 + cM_rndF(4)` frames
+> (randomized so it doesn't read as a metronome), snapping back to closed the instant the beat
+> ends.
+>
+> The jaw was also rotating the wrong way (upward instead of down, per build #384 testing) with
+> a bare `ZrotM(s_zeldaMouthAngle)`; mirrored the sign `daHoZelda_c::modelCallBack()` itself uses
+> for its own `ZrotM(-mNeckAngle.x)` pitch rotation and negated it to `ZrotM(-s_zeldaMouthAngle)`.
+>
+> Wolf-form page 2 (`"So undignified..."`) uses `raw_tag(0, MSGTAG_INSTANT, {})`
+> (`MSGTAG_GROUP(0)`'s `MSGTAG_INSTANT` case in `d_msg_class.cpp` just forces
+> `setCharAllAlphaRate(1.0f)`) to make its whole line pop in at once instead of typing out
+> letter by letter -- and since that bypasses the normal per-character reveal loop entirely,
+> `mMouthCheck` never gets set for it, so the generic flap logic above never fires for this
+> page (build #384 feedback: no mouth movement on the all-at-once line). `update_zelda_mouth_
+> animation()` special-cases `s_zeldaTalkWolfPage2MessageId` (the page's own `MessageId`,
+> captured at registration) to schedule one deterministic `kZeldaInstantFillFlapFrames`-long
+> open-then-closed flap for it.
+>
+> The first attempt at this (still build #384's regression) guessed the flap's start time from
+> our own authored `pause(kZeldaTalkWolfPauseFrames)` tag -- counting down that many of *our*
+> ticks from the moment the page became current, then holding open for a further fixed span --
+> but the user reported it still produced no visible movement. That approach assumed our
+> per-tick counter and the engine's own pause-tag countdown advance in lockstep, which was never
+> actually verified; any mismatch between the two clocks would shift the open window away from
+> the moment the text actually pops in, silently discarding the one user-visible open/close cycle
+> during the still-blank pause instead. Replaced it with the same falling-edge technique already
+> proven by `update_zelda_talk_heal_effect()` below: watch `msg_class::mode` for the tick it
+> stops reading `fopMsg_MODE_MSG_TYPING_e` while `s_zeldaTalkWolfPage2MessageId` is current, and
+> fire the flap then. `MSGTAG_INSTANT` only maxes out the per-character reveal rate *while* mode
+> is still `TYPING` -- it doesn't skip that state outright -- so this falling edge still lands on
+> the same tick the text becomes fully visible, with no dependency on matching our tick rate to
+> the engine's internal pause-tag timebase.
+>
+> That attempt fired on the first tick the page was current with mode already not `TYPING`,
+> without requiring an observed `TYPING` tick first -- meant as a hedge in case this reveal mode
+> skipped `TYPING` outright. That hedge was itself the bug (reported regression: Zelda's mouth
+> now held open noticeably longer at the *end of page 1's* text fill, and still never flapped for
+> page 2 itself). `dMsgFlow_c::messageNodeProc()`'s `mode == fopMsg_MODE_MSG_DISPLAYED_e` (0x0E)
+> case advances the flow's internal node index -- and with it, `msg_class::msg_idx` -- the moment
+> a page *finishes typing*, not when the player actually presses A to turn to the next page:
+> page 1's box sits fully typed and displayed, waiting on real player input, for an
+> unpredictable (player-controlled) number of ticks during which `msg_idx` has *already* flipped
+> to page 2's `MessageId` while `mode` is still whatever page 1 left it at (`DISPLAYED`, not
+> `TYPING`). The hedge's bare "not typing yet" check matched that premature window immediately,
+> firing (and latching `s_instantFlapFiredThisPage`) well before page 2's text ever actually
+> appeared -- both explaining the extended hold at the tail of page 1 and starving the real
+> page-2 reveal of its one-shot flap, since the latch was already spent.
+>
+> Fixed by requiring a confirmed rising edge into `TYPING` (`s_hasObservedTypingOnInstantPage`)
+> while `s_zeldaTalkWolfPage2MessageId` is current *before* watching for the falling edge back
+> out of it -- mirroring `update_zelda_talk_heal_effect()`'s own `s_wasTyping && !isTyping` gate
+> exactly, rather than the broadened "or already past it" fallback. This is safe specifically
+> because `MSGTAG_INSTANT` only maxes the reveal rate *while* mode is still `TYPING` (confirmed
+> above) rather than skipping that state, so a genuine, fresh `TYPING` tick is guaranteed once
+> page 2's box actually reopens for real -- the premature `msg_idx` flip during page 1's
+> wait-for-input window never produces a `TYPING` reading, so it can no longer satisfy the gate.
+>
+> `kZeldaInstantFillFlapFrames` started at 20 (an arbitrary guess once the timing itself was
+> fixed), but held the jaw open noticeably longer than a natural flap: the normal per-character
+> talk flap (`s_zeldaMouthFlapTimer`'s `2 + cM_rndF(4)`, i.e. 2-6 ticks per open/closed half)
+> never holds a single phase anywhere near that long. Shortened to 6 to match that range's upper
+> bound, so the scripted one-shot reads as a single ordinary-looking flap rather than a
+> conspicuous held-open pose.
 
 ## `update_zelda_talk_heal_effect()`
 

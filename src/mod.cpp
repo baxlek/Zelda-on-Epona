@@ -533,12 +533,42 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     return search.best;
 }
 
+static constexpr u16 kZelhJntChin = 0x5;
+static constexpr u16 kZelhJntMouth = 0xA;
+static constexpr u16 kZelhJntLipSync[] = {kZelhJntChin, kZelhJntMouth};
+static s16 s_zeldaMouthAngle = 0;
+static u8 s_zeldaMouthFlapTimer = 0;
+static bool s_zeldaMouthFlapOpen = false;
+
+static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
+    if (phase != 0) {
+        return 1;
+    }
+
+    daHoZelda_c* zelda = reinterpret_cast<daHoZelda_c*>(j3dSys.getModel()->getUserArea());
+    if (!is_spawned_zelda(zelda)) {
+        return 1;
+    }
+
+    u16 jntNo = joint->getJntNo();
+    mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
+    mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
+    zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
+    mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
+    return 1;
+}
+
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
 
 static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) {
     daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
     if (!is_spawned_zelda(zelda)) {
         return HOOK_CONTINUE;
+    }
+
+    for (u16 jointIdx : kZelhJntLipSync) {
+        zelda->mpZeldaModel->getModelData()->getJointNodePointer(jointIdx)->setCallBack(
+            hozelda_mouth_joint_callback);
     }
 
     daHorse_c* horse = dComIfGp_getHorseActor();
@@ -1405,6 +1435,7 @@ static u16 s_zeldaTalkNodeId = 0;
 static u16 s_zeldaTalkWolfNodeId = 0;
 
 static MessageId s_zeldaTalkPage1MessageId = 0;
+static MessageId s_zeldaTalkWolfPage2MessageId = 0;
 
 static constexpr u16 kZeldaTalkWolfPauseFrames = 30;
 
@@ -1630,6 +1661,7 @@ static ModResult register_zelda_talk_flow() {
     const auto wolfPage2 = graph.add_message(wolfPage2Id).next(mods::flow::kEnd);
     const auto wolfPage1 = graph.add_message(wolfPage1Id).next(wolfPage2);
     s_zeldaTalkWolfNodeId = wolfPage1;
+    s_zeldaTalkWolfPage2MessageId = wolfPage2Id;
 
     s_zeldaTalkGraph = graph.commit();
     return s_zeldaTalkGraph.result();
@@ -1732,6 +1764,55 @@ static void sync_zelda_npc_proxy_lifecycle(fopAc_ac_c* companion) {
     }
 }
 
+static bool zelda_talk_is_active() {
+    return zelda_talk_event_active() && dMsgObject_isTalkNowCheck();
+}
+
+static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
+static constexpr s16 kZeldaInstantFillFlapFrames = 6;
+
+static void update_zelda_mouth_animation(bool talking) {
+    static bool s_hasObservedTypingOnInstantPage = false;
+    static bool s_instantFlapFiredThisPage = false;
+    static s16 s_instantFlapFramesLeft = 0;
+
+    msg_class* msg_p = dMsgObject_c::getActor();
+    bool onInstantFillPage = talking && msg_p != nullptr &&
+                              msg_p->msg_idx == s_zeldaTalkWolfPage2MessageId;
+
+    if (!onInstantFillPage) {
+        s_hasObservedTypingOnInstantPage = false;
+        s_instantFlapFiredThisPage = false;
+        s_instantFlapFramesLeft = 0;
+    } else if (msg_p->mode == fopMsg_MODE_MSG_TYPING_e) {
+        s_hasObservedTypingOnInstantPage = true;
+    } else if (s_hasObservedTypingOnInstantPage && !s_instantFlapFiredThisPage) {
+        s_instantFlapFramesLeft = kZeldaInstantFillFlapFrames;
+        s_instantFlapFiredThisPage = true;
+    }
+
+    bool mouthOpenBeat = talking && dMsgObject_isMouthCheck();
+    s16 target = 0;
+
+    if (s_instantFlapFramesLeft > 0) {
+        target = kZeldaMouthOpenAngle;
+        s_instantFlapFramesLeft--;
+    } else if (mouthOpenBeat) {
+        if (s_zeldaMouthFlapTimer == 0) {
+            s_zeldaMouthFlapOpen = !s_zeldaMouthFlapOpen;
+            s_zeldaMouthFlapTimer = static_cast<u8>(2.0f + cM_rndF(4.0f));
+        } else {
+            s_zeldaMouthFlapTimer--;
+        }
+        target = s_zeldaMouthFlapOpen ? kZeldaMouthOpenAngle : 0;
+    } else {
+        s_zeldaMouthFlapTimer = 0;
+        s_zeldaMouthFlapOpen = false;
+    }
+
+    daPy_addCalcShort(&s_zeldaMouthAngle, target, 3, 0x1000, 0x100);
+}
+
 static void update_zelda_talk_heal_effect() {
     if (s_zeldaTalkHealEffectFramesLeft >= 0) {
         if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
@@ -1767,6 +1848,7 @@ static void update_zelda_talk_heal_effect() {
 static void update_zelda_talk_interaction() {
     fopAc_ac_c* companion = find_spawned_zelda();
     sync_zelda_npc_proxy_lifecycle(companion);
+    update_zelda_mouth_animation(zelda_talk_is_active());
     update_zelda_talk_heal_effect();
 }
 
