@@ -96,6 +96,21 @@ static bool epona_follow_active() {
     return epona_follow_dismounted_enabled();
 }
 
+static ConfigVarHandle g_cvarAltZeldaFace = 0;
+
+// Experimental: borrows the standing/dialogue "Zelda" NPC's face texture-pattern (BTP) resource
+// instead of HoZelda's own, in case the two models share compatible material names. This can't be
+// verified from source alone (no access to the real model/texture data), so it's opt-in and may
+// render incorrectly on some HoZelda models.
+static bool alt_zelda_face_enabled() {
+    bool value = false;
+    if (g_cvarAltZeldaFace == 0 ||
+        svc_config->get_bool(mod_ctx, g_cvarAltZeldaFace, &value) != MOD_OK) {
+        return false;
+    }
+    return value;
+}
+
 static constexpr bool kDiagnosticLoggingEnabled = false;
 
 static const char* kHoZeldaStageName = "HoZelda";
@@ -556,6 +571,48 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
+}
+
+// daNpc_Zelda_c's "Zelda" archive is already loaded whenever the dismounted-talk proxy exists
+// (spawn_zelda_npc_proxy()), so the resource is available without any extra loading of our own.
+static constexpr char kNpcZeldaArcName[] = "Zelda";
+// l_faceMotionAnmData[0].mBtpFileIdx in daNpc_Zelda_c, her default/talking face BTP.
+static constexpr int kNpcZeldaFaceBtpIdx = 17;
+
+static void apply_npc_zelda_face(daHoZelda_c* zelda) {
+    // Guards the first (possibly multi-phase) create() call, where mpZeldaModel isn't built yet.
+    if (zelda->mpZeldaModel == nullptr) {
+        return;
+    }
+    void* btpRes = dComIfG_getObjectRes(kNpcZeldaArcName, kNpcZeldaFaceBtpIdx);
+    if (btpRes == nullptr) {
+        return;
+    }
+    // Re-targets HoZelda's own material table against the NPC Zelda model's BTP data. This only
+    // looks right if both models' face materials share names and texture layouts; untested
+    // against real game assets.
+    zelda->mEyeBtp.init(zelda->mpZeldaModel->getModelData(),
+                         static_cast<J3DAnmTexPattern*>(btpRes), 1, -1, 1.0f, 0, -1);
+}
+
+DEFINE_HOOK(&daHoZelda_c::create, HoZeldaCreate);
+
+static void on_hozelda_create_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
+        return;
+    }
+    apply_npc_zelda_face(zelda);
+}
+
+DEFINE_HOOK(&daHoZelda_c::setNormalFace, HoZeldaSetNormalFace);
+
+static void on_hozelda_set_normal_face_post(ModContext*, void* args, void*, void*) {
+    daHoZelda_c* zelda = mods::arg<daHoZelda_c*>(args, 0);
+    if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
+        return;
+    }
+    apply_npc_zelda_face(zelda);
 }
 
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
@@ -1873,6 +1930,13 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvarShowInCutscenes;
     svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
+
+    UiControlDesc altFaceControl = UI_CONTROL_DESC_INIT;
+    altFaceControl.kind = UI_CONTROL_TOGGLE;
+    altFaceControl.label = "Use NPC Zelda's face (experimental)";
+    altFaceControl.binding = UI_BINDING_CONFIG_VAR;
+    altFaceControl.config_var = g_cvarAltZeldaFace;
+    svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
     return MOD_OK;
 }
 
@@ -1902,6 +1966,21 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         mods::log::warn(
             "failed to hook HoZelda setBowModel, her bow will stay visible with auto-targeting "
             "disabled: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HoZeldaCreate>(on_hozelda_create_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda create, the alternate face option won't apply at spawn: {}",
+            (int)result);
+    }
+
+    result = mods::hook::add_post<HoZeldaSetNormalFace>(on_hozelda_set_normal_face_post);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to hook HoZelda setNormalFace, the alternate face option won't stick after "
+            "damage/startle reactions: {}",
             (int)result);
     }
 
@@ -2131,6 +2210,17 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         mods::log::warn(
             "failed to register eponaFollowDismounted option, defaulting to following off: {}",
+            (int)result);
+    }
+
+    ConfigVarDesc altFaceCvarDesc = CONFIG_VAR_DESC_INIT;
+    altFaceCvarDesc.name = "altZeldaFace";
+    altFaceCvarDesc.type = CONFIG_VAR_BOOL;
+    altFaceCvarDesc.default_bool = false;
+    result = svc_config->register_var(mod_ctx, &altFaceCvarDesc, &g_cvarAltZeldaFace);
+    if (result != MOD_OK) {
+        mods::log::warn(
+            "failed to register altZeldaFace option, defaulting to HoZelda's own face: {}",
             (int)result);
     }
 
