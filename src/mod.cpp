@@ -39,6 +39,7 @@
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
 #include "JSystem/J3DGraphBase/J3DSys.h"
+#include "JSystem/J3DGraphBase/J3DTransform.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
@@ -566,22 +567,21 @@ static s16 s_zeldaMouthAngle = 0;
 static u8 s_zeldaMouthFlapTimer = 0;
 static bool s_zeldaMouthFlapOpen = false;
 
-// Experimental, bone-driven smile pose: neither the "Zelda" nor "HoZelda" archives have a BTP
-// texture that touches the mouth (confirmed via the material-match diagnostic above -- every
-// candidate's BTP resource only ever targets the two eye materials), and other NPCs' dedicated
-// smile expressions (e.g. BCK_ARU_FH_SMILE, BCK_THE_F_SMILE) are baked skeletal animations, not
-// textures. So instead of a texture swap, this applies small manually-tuned rotations directly to
-// HoZelda's own mouth and cheek ("momi") joints, live-tunable from the mods panel below since
-// there's no way to know the right-looking angles without visual feedback in-game.
-static ConfigVarHandle g_cvarZeldaSmilePose = 0;
-static bool zelda_smile_pose_enabled() {
-    bool value = false;
-    if (g_cvarZeldaSmilePose == 0 ||
-        svc_config->get_bool(mod_ctx, g_cvarZeldaSmilePose, &value) != MOD_OK) {
-        return false;
-    }
-    return value;
-}
+// Experimental smile pose: neither the "Zelda" nor "HoZelda" archives have a BTP texture that
+// touches the mouth (confirmed via the material-match diagnostic above -- every candidate's BTP
+// resource only ever targets the two eye materials). Two bone-driven mechanisms are offered,
+// selectable from the mods panel below:
+//  - "Manual sliders": small hand-tuned rotations applied directly to HoZelda's own mouth and
+//    cheek ("momi") joints, live-tunable since there's no way to know the right-looking angles
+//    without visual feedback in-game.
+//  - Borrowing a real smile BCK from another NPC that has one (e.g. BCK_ARU_FH_SMILE,
+//    BCK_THE_FH_SMILE) and sampling its *authored* per-joint rotation directly from the resource
+//    (no live actor/playback wrapper needed -- J3DAnmBase::setFrame() + J3DAnmTransform::
+//    getTransform() can be called on the raw resource object), then applying that rotation to
+//    HoZelda's corresponding joint. Only works while that NPC's archive happens to be resident
+//    (i.e. the player is near Telma's Bar or Kakariko), same residency constraint as the earlier
+//    BTP face-candidate diagnostic.
+static ConfigVarHandle g_cvarZeldaSmileSource = 0;
 
 // Degrees, not BinAngle, so the mods panel sliders are human-readable; converted at apply time.
 static s16 s_smileMouthRotX = 0;
@@ -591,6 +591,12 @@ static s16 s_smileCheekRotX = 0;
 static s16 s_smileCheekRotY = 0;
 static s16 s_smileCheekRotZ = 0;
 
+// Which frame of the borrowed source's (looping) smile BCK to sample, and a percentage scale
+// applied to the sampled rotation -- both live-tunable, since the "right" frame/strength can't be
+// known without visual feedback in-game either.
+static s16 s_boneSmileFrame = 0;
+static s16 s_boneSmileIntensityPct = 100;
+
 static s16 smile_deg_to_bin_angle(s16 deg) {
     return static_cast<s16>((static_cast<s32>(deg) * 0x10000) / 360);
 }
@@ -598,6 +604,137 @@ static s16 smile_deg_to_bin_angle(s16 deg) {
 static void apply_smile_rotation(s16 degX, s16 degY, s16 degZ) {
     mDoMtx_stack_c::XYZrotM(smile_deg_to_bin_angle(degX), smile_deg_to_bin_angle(degY),
                             smile_deg_to_bin_angle(degZ));
+}
+
+// Maps one joint on a donor NPC's skeleton to the corresponding joint on HoZelda's skeleton.
+// Several donor joints have no destination at all (e.g. eyebrow joints -- HoZelda has none), and
+// a donor with fewer cheek sub-joints than HoZelda can feed the same sampled rotation to more than
+// one destination joint.
+struct SmileJointMap_c {
+    u16 srcJoint;
+    u16 dstJoint;
+};
+
+// "The" (Telma): a single, always-resident-with-her archive (no secondary dependency). Joint
+// indices below come from the decompiled THE_JNT resource enum (assets/.../The.h); her FH_SMILE
+// BCK (res idx 0x10) is a *looping* ambient expression (holds the pose), not a one-shot transition
+// into it, so any frame of it should already read as "smiling".
+static constexpr const char* kTheArcName = "The";
+static constexpr int kTheBckFhSmileIdx = 0x10;
+static constexpr u16 kTheJntChin = 0x5;
+static constexpr u16 kTheJntMomiL = 0x9;
+static constexpr u16 kTheJntMomiR = 0xA;
+static constexpr u16 kTheJntMouth = 0xB;
+// clang-format off
+static constexpr SmileJointMap_c kTheJointMap[] = {
+    {kTheJntChin, kZelhJntChin},
+    {kTheJntMomiL, kZelhJntMomiL1}, {kTheJntMomiL, kZelhJntMomiL2},
+    {kTheJntMomiR, kZelhJntMomiR1}, {kTheJntMomiR, kZelhJntMomiR2},
+    {kTheJntMouth, kZelhJntMouth},
+};
+// clang-format on
+
+// "Aru" (Ashei): her FH_SMILE pairing (BCK+BTP) lives in a *secondary* archive, "Aru1", which is
+// always loaded whenever the base "Aru" archive is (same load pattern for every NPC mode), so in
+// practice it's resident any time she is. Her skeleton (shared with the base "Aru" BMD) has no
+// cheek ("momi") joints at all -- only chin and mouth.
+static constexpr const char* kAruArcName = "Aru1";
+static constexpr int kAruBckFhSmileIdx = 0xE;
+static constexpr u16 kAruJntChin = 0x5;
+static constexpr u16 kAruJntMouth = 0x8;
+static constexpr SmileJointMap_c kAruJointMap[] = {
+    {kAruJntChin, kZelhJntChin},
+    {kAruJntMouth, kZelhJntMouth},
+};
+
+struct BoneSmileSource_c {
+    const char* arcName;  // nullptr for the non-sampling entries ("Off"/"Manual sliders")
+    int bckIdx;
+    const SmileJointMap_c* jointMap;
+    int jointMapCount;
+    const char* label;
+};
+
+// Index 0 and 1 are handled specially (no resource sampling); index >= 2 are real donor NPCs.
+static constexpr BoneSmileSource_c kBoneSmileSources[] = {
+    {nullptr, 0, nullptr, 0, "Off"},
+    {nullptr, 0, nullptr, 0, "Manual sliders"},
+    {kTheArcName, kTheBckFhSmileIdx, kTheJointMap,
+     sizeof(kTheJointMap) / sizeof(kTheJointMap[0]), "Telma (\"The\") FH_SMILE"},
+    {kAruArcName, kAruBckFhSmileIdx, kAruJointMap,
+     sizeof(kAruJointMap) / sizeof(kAruJointMap[0]), "Ashei (\"Aru\") FH_SMILE"},
+};
+static constexpr int kBoneSmileSourceCount =
+    sizeof(kBoneSmileSources) / sizeof(kBoneSmileSources[0]);
+static constexpr int kBoneSmileSourceManual = 1;
+static constexpr int kBoneSmileSourceFirstDonor = 2;
+
+static int zelda_smile_source_index() {
+    int64_t value = 0;
+    if (g_cvarZeldaSmileSource == 0 ||
+        svc_config->get_int(mod_ctx, g_cvarZeldaSmileSource, &value) != MOD_OK) {
+        return 0;
+    }
+    if (value < 0 || value >= kBoneSmileSourceCount) {
+        return 0;
+    }
+    return static_cast<int>(value);
+}
+
+// Samples a donor NPC's smile BCK resource at the live-tunable frame for one of its joints,
+// scaled by the live-tunable intensity percentage. Returns false (leaving the destination joint
+// untouched) if the donor's archive isn't currently loaded.
+static bool sample_bone_smile_rotation(const BoneSmileSource_c& source, u16 srcJoint,
+                                        S16Vec* out) {
+    void* res = dComIfG_getObjectRes(source.arcName, source.bckIdx);
+    if (res == nullptr) {
+        return false;
+    }
+    J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(res);
+    f32 frame = static_cast<f32>(s_boneSmileFrame);
+    f32 frameMax = static_cast<f32>(anm->getFrameMax());
+    if (frameMax > 0.0f && frame > frameMax) {
+        frame = frameMax;  // the real max frame is only known once the archive is loaded
+    }
+    anm->setFrame(frame);
+    J3DTransformInfo info;
+    anm->getTransform(srcJoint, &info);
+    out->x = static_cast<s16>((static_cast<s32>(info.mRotation.x) * s_boneSmileIntensityPct) /
+                               100);
+    out->y = static_cast<s16>((static_cast<s32>(info.mRotation.y) * s_boneSmileIntensityPct) /
+                               100);
+    out->z = static_cast<s16>((static_cast<s32>(info.mRotation.z) * s_boneSmileIntensityPct) /
+                               100);
+    return true;
+}
+
+// Applies whichever smile mechanism is currently selected to the joint matrix already on the
+// stack (caller has already pushed HoZelda's own native anm matrix for this joint).
+static void apply_smile_pose_for_joint(u16 dstJoint, bool isMouthOrChin) {
+    int sourceIdx = zelda_smile_source_index();
+    if (sourceIdx == 0) {
+        return;  // Off
+    }
+    if (sourceIdx == kBoneSmileSourceManual) {
+        if (isMouthOrChin) {
+            apply_smile_rotation(s_smileMouthRotX, s_smileMouthRotY, s_smileMouthRotZ);
+        } else {
+            apply_smile_rotation(s_smileCheekRotX, s_smileCheekRotY, s_smileCheekRotZ);
+        }
+        return;
+    }
+
+    const BoneSmileSource_c& source = kBoneSmileSources[sourceIdx];
+    for (int i = 0; i < source.jointMapCount; i++) {
+        if (source.jointMap[i].dstJoint != dstJoint) {
+            continue;
+        }
+        S16Vec rot;
+        if (sample_bone_smile_rotation(source, source.jointMap[i].srcJoint, &rot)) {
+            mDoMtx_stack_c::XYZrotM(rot.x, rot.y, rot.z);
+        }
+        return;  // at most one source joint maps to a given destination joint
+    }
 }
 
 static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
@@ -612,14 +749,11 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 
     u16 jntNo = joint->getJntNo();
     mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
-    if (jntNo == kZelhJntMouth || jntNo == kZelhJntChin) {
+    bool isMouthOrChin = jntNo == kZelhJntMouth || jntNo == kZelhJntChin;
+    if (isMouthOrChin) {
         mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
-        if (zelda_smile_pose_enabled()) {
-            apply_smile_rotation(s_smileMouthRotX, s_smileMouthRotY, s_smileMouthRotZ);
-        }
-    } else if (zelda_smile_pose_enabled()) {
-        apply_smile_rotation(s_smileCheekRotX, s_smileCheekRotY, s_smileCheekRotZ);
     }
+    apply_smile_pose_for_joint(jntNo, isMouthOrChin);
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
@@ -2061,8 +2195,8 @@ static void update_zelda_talk_interaction() {
     update_zelda_talk_heal_effect();
 }
 
-// Backs each smile-pose slider directly with its s16 degree variable via user_data, so the mods
-// panel can tune all six axes live in-game without a rebuild per guess.
+// Backs each smile slider directly with its s16 variable via user_data, so the mods panel can
+// tune every value live in-game without a rebuild per guess.
 static void smile_rot_get(ModContext*, void* user_data, UiControlValue* out_value) {
     out_value->int_value = *static_cast<s16*>(user_data);
 }
@@ -2070,6 +2204,25 @@ static void smile_rot_get(ModContext*, void* user_data, UiControlValue* out_valu
 static void smile_rot_set(ModContext*, void* user_data, const UiControlValue* value) {
     *static_cast<s16*>(user_data) = static_cast<s16>(value->int_value);
 }
+
+static bool smile_manual_controls_disabled(ModContext*, void*) {
+    return zelda_smile_source_index() != kBoneSmileSourceManual;
+}
+
+static bool smile_bone_controls_disabled(ModContext*, void*) {
+    return zelda_smile_source_index() < kBoneSmileSourceFirstDonor;
+}
+
+// Dropdown option labels, pulled straight from kBoneSmileSources so the two can't drift apart.
+static constexpr const char* kBoneSmileSourceLabels[] = {
+    kBoneSmileSources[0].label,
+    kBoneSmileSources[1].label,
+    kBoneSmileSources[2].label,
+    kBoneSmileSources[3].label,
+};
+static_assert(sizeof(kBoneSmileSourceLabels) / sizeof(kBoneSmileSourceLabels[0]) ==
+                  kBoneSmileSourceCount,
+              "kBoneSmileSourceLabels must list every entry in kBoneSmileSources");
 
 static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc autoTargetControl = UI_CONTROL_DESC_INIT;
@@ -2100,14 +2253,17 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
     altFaceControl.config_var = g_cvarAltZeldaFace;
     svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
 
-    UiControlDesc smilePoseControl = UI_CONTROL_DESC_INIT;
-    smilePoseControl.kind = UI_CONTROL_TOGGLE;
-    smilePoseControl.label = "Experimental smile pose (bone-driven, tunable)";
-    smilePoseControl.binding = UI_BINDING_CONFIG_VAR;
-    smilePoseControl.config_var = g_cvarZeldaSmilePose;
-    svc_ui->pane_add_control(mod_ctx, panel, &smilePoseControl, nullptr);
+    UiControlDesc smileSourceControl = UI_CONTROL_DESC_INIT;
+    smileSourceControl.kind = UI_CONTROL_DROPDOWN;
+    smileSourceControl.label = "Experimental smile pose (bone-driven, tunable)";
+    smileSourceControl.binding = UI_BINDING_CONFIG_VAR;
+    smileSourceControl.config_var = g_cvarZeldaSmileSource;
+    smileSourceControl.options = kBoneSmileSourceLabels;
+    smileSourceControl.option_count = kBoneSmileSourceCount;
+    svc_ui->pane_add_control(mod_ctx, panel, &smileSourceControl, nullptr);
 
-    auto addSmileSlider = [&](const char* label, s16* value) {
+    auto addSmileSlider = [&](const char* label, s16* value, int64_t min, int64_t max,
+                              const char* suffix, UiPredicateFn disabled) {
         UiControlDesc desc = UI_CONTROL_DESC_INIT;
         desc.kind = UI_CONTROL_NUMBER;
         desc.label = label;
@@ -2115,18 +2271,29 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
         desc.get = smile_rot_get;
         desc.set = smile_rot_set;
         desc.user_data = value;
-        desc.min = -90;
-        desc.max = 90;
+        desc.min = min;
+        desc.max = max;
         desc.step = 1;
-        desc.suffix = " deg";
+        desc.suffix = suffix;
+        desc.is_disabled = disabled;
         svc_ui->pane_add_control(mod_ctx, panel, &desc, nullptr);
     };
-    addSmileSlider("Smile: mouth rotation X", &s_smileMouthRotX);
-    addSmileSlider("Smile: mouth rotation Y", &s_smileMouthRotY);
-    addSmileSlider("Smile: mouth rotation Z", &s_smileMouthRotZ);
-    addSmileSlider("Smile: cheek rotation X", &s_smileCheekRotX);
-    addSmileSlider("Smile: cheek rotation Y", &s_smileCheekRotY);
-    addSmileSlider("Smile: cheek rotation Z", &s_smileCheekRotZ);
+    addSmileSlider("Smile: mouth rotation X", &s_smileMouthRotX, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: mouth rotation Y", &s_smileMouthRotY, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: mouth rotation Z", &s_smileMouthRotZ, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation X", &s_smileCheekRotX, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation Y", &s_smileCheekRotY, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: cheek rotation Z", &s_smileCheekRotZ, -90, 90, " deg",
+                   smile_manual_controls_disabled);
+    addSmileSlider("Smile: borrowed-pose sample frame", &s_boneSmileFrame, 0, 60, "",
+                   smile_bone_controls_disabled);
+    addSmileSlider("Smile: borrowed-pose intensity", &s_boneSmileIntensityPct, -50, 200, "%",
+                   smile_bone_controls_disabled);
     return MOD_OK;
 }
 
@@ -2414,14 +2581,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
             (int)result);
     }
 
-    ConfigVarDesc smilePoseCvarDesc = CONFIG_VAR_DESC_INIT;
-    smilePoseCvarDesc.name = "zeldaSmilePose";
-    smilePoseCvarDesc.type = CONFIG_VAR_BOOL;
-    smilePoseCvarDesc.default_bool = false;
-    result = svc_config->register_var(mod_ctx, &smilePoseCvarDesc, &g_cvarZeldaSmilePose);
+    ConfigVarDesc smileSourceCvarDesc = CONFIG_VAR_DESC_INIT;
+    smileSourceCvarDesc.name = "zeldaSmileSource";
+    smileSourceCvarDesc.type = CONFIG_VAR_INT;
+    smileSourceCvarDesc.default_int = 0;
+    result = svc_config->register_var(mod_ctx, &smileSourceCvarDesc, &g_cvarZeldaSmileSource);
     if (result != MOD_OK) {
         mods::log::warn(
-            "failed to register zeldaSmilePose option, defaulting to HoZelda's own face: {}",
+            "failed to register zeldaSmileSource option, defaulting to HoZelda's own face: {}",
             (int)result);
     }
 
