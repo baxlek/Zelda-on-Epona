@@ -181,20 +181,33 @@ Trailing comments on the two early returns:
 - `if (!s_eponaFollowFacing) { return; }` — within the still distance; hold fully still, don't even turn to face Link
 - `if (s_eponaFollowApproaching && aligned) { return; }` — already aligned; native turning/movement handles this tick
 
-## `hozelda_mouth_joint_callback()` / `kZelhJntMouth`
+## `hozelda_mouth_joint_callback()` / `kZelhJntLipSync`
 
 > Faux lip-sync for the spawned Zelda's dialogue (see `update_zelda_mouth_animation()` further
 > down). Her model has no authored mouth-flap animation of its own, unlike native talking NPCs:
 > those rely on `daNpcT_c::ctrlMsgAnm()` (d_a_npc.cpp) toggling playback of an authored "talk"
 > BCK/BTP in bursts timed to `dMsgObject_isMouthCheck()`, using per-NPC-class motion-sequence-
-> manager infrastructure her class doesn't have. Her skeleton does have a dedicated mouth joint,
-> though -- `ZELH_JNT_MOUTH_e = 0xA` in the decompiled `HoZelda.h` resource header's `ZELH_JNT`
-> enum (assets/RZDP01/res/Object/HoZelda.h) -- which isn't one of the four joints
-> (`daHoZelda_c::create()`'s `getJointNodePointer(0/1/23/4)`) the native code itself registers a
-> callback on, so we register our own, reusing the exact matrix idiom
-> `daHoZelda_c::modelCallBack()` already applies to its own joints (`mNeckAngle`/`mBodyAngle`):
-> copy the joint's current anm matrix, apply an extra local rotation, write it back, then mirror
-> it into `J3DSys::mCurrentMtx` for `J3DJoint::recursiveCalc()` to pick up.
+> manager infrastructure her class doesn't have. Her skeleton does have dedicated facial joints,
+> though -- `ZELH_JNT_CHIN_e = 0x5` and `ZELH_JNT_MOUTH_e = 0xA` in the decompiled `HoZelda.h`
+> resource header's `ZELH_JNT` enum (assets/RZDP01/res/Object/HoZelda.h) -- neither of which is
+> one of the four joints (`daHoZelda_c::create()`'s `getJointNodePointer(0/1/23/4)`) the native
+> code itself registers a callback on, so we register our own on both, reusing the exact matrix
+> idiom `daHoZelda_c::modelCallBack()` already applies to its own joints
+> (`mNeckAngle`/`mBodyAngle`): copy the joint's current anm matrix, apply an extra local
+> rotation, write it back, then mirror it into `J3DSys::mCurrentMtx` for
+> `J3DJoint::recursiveCalc()` to pick up.
+>
+> Driving both joints (rather than `ZELH_JNT_MOUTH_e` alone, as a first attempt did) is a
+> deliberate hedge: build #384 testing showed zero visible movement in-game from `MOUTH` alone.
+> `ZELH_JNT`'s index ordering is a depth-first joint-tree traversal (parent before children,
+> siblings grouped), and `CHIN` (0x5) sits immediately after `HEAD` (0x4) -- where a modeler
+> would place the primary jaw/mandible bone -- while `MOUTH` (0xA) only appears after both
+> hair-strand chains (`MOMIL1/2`, `MOMIR1/2`, indices 0x6-0x9) are fully traversed, meaning it's
+> a later-added sibling of `CHIN` under `HEAD`, not a child of it. That ordering suggests `CHIN`
+> is the bone modelers actually skinned the jaw/lower-mouth geometry to, and `MOUTH` may be a
+> lighter-weight corner-of-mouth or locator joint with little or no skin influence on its own --
+> but this still can't be confirmed without a render pipeline, so both are driven together to
+> maximize the odds of a visible result regardless of which guess is right.
 >
 > Re-registered every `on_hozelda_execute_pre()` tick (cheap to re-set; avoids tracking
 > creation/respawn state separately) rather than once at spawn, since the mod never observes
@@ -603,6 +616,10 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > and `dMsgObject_isMouthCheck()` -- the same engine-wide text-reveal-rhythm flag real talking
 > NPCs read in `ctrlMsgAnm()` -- says this instant is a "mouth open" beat, easing back to closed
 > the rest of the time (including whenever she isn't actively talking to us at all).
+>
+> `kZeldaMouthOpenAngle` was doubled from its original `0x500` (~7 degrees) to `0xA00`
+> (~14 degrees) after build #384 testing showed no observable movement at the smaller angle,
+> in case subtlety (rather than joint choice) was the whole problem.
 
 ## `update_zelda_talk_heal_effect()`
 

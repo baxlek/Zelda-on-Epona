@@ -533,7 +533,9 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     return search.best;
 }
 
+static constexpr u16 kZelhJntChin = 0x5;
 static constexpr u16 kZelhJntMouth = 0xA;
+static constexpr u16 kZelhJntLipSync[] = {kZelhJntChin, kZelhJntMouth};
 static s16 s_zeldaMouthAngle = 0;
 
 static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
@@ -562,8 +564,10 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
         return HOOK_CONTINUE;
     }
 
-    zelda->mpZeldaModel->getModelData()->getJointNodePointer(kZelhJntMouth)->setCallBack(
-        hozelda_mouth_joint_callback);
+    for (u16 jointIdx : kZelhJntLipSync) {
+        zelda->mpZeldaModel->getModelData()->getJointNodePointer(jointIdx)->setCallBack(
+            hozelda_mouth_joint_callback);
+    }
 
     daHorse_c* horse = dComIfGp_getHorseActor();
     bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
@@ -1760,7 +1764,7 @@ static bool zelda_talk_is_active() {
     return zelda_talk_event_active() && dMsgObject_isTalkNowCheck();
 }
 
-static constexpr s16 kZeldaMouthOpenAngle = 0x500;
+static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
 
 static void update_zelda_mouth_animation(bool talking) {
     s16 target = (talking && dMsgObject_isMouthCheck()) ? kZeldaMouthOpenAngle : 0;
