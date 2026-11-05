@@ -533,6 +533,27 @@ static fopAc_ac_c* find_nearest_enemy(daHoZelda_c* zelda, bool i_behind) {
     return search.best;
 }
 
+static constexpr u16 kZelhJntMouth = 0xA;
+static s16 s_zeldaMouthAngle = 0;
+
+static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
+    if (phase != 0) {
+        return 1;
+    }
+
+    daHoZelda_c* zelda = reinterpret_cast<daHoZelda_c*>(j3dSys.getModel()->getUserArea());
+    if (!is_spawned_zelda(zelda)) {
+        return 1;
+    }
+
+    u16 jntNo = joint->getJntNo();
+    mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
+    mDoMtx_stack_c::XrotM(s_zeldaMouthAngle);
+    zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
+    mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
+    return 1;
+}
+
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
 
 static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) {
@@ -540,6 +561,9 @@ static HookAction on_hozelda_execute_pre(ModContext*, void* args, void*, void*) 
     if (!is_spawned_zelda(zelda)) {
         return HOOK_CONTINUE;
     }
+
+    zelda->mpZeldaModel->getModelData()->getJointNodePointer(kZelhJntMouth)->setCallBack(
+        hozelda_mouth_joint_callback);
 
     daHorse_c* horse = dComIfGp_getHorseActor();
     bool inCutscene = horse != nullptr && horse->checkHorseDemoMode() && !is_title_screen();
@@ -1732,6 +1756,17 @@ static void sync_zelda_npc_proxy_lifecycle(fopAc_ac_c* companion) {
     }
 }
 
+static bool zelda_talk_is_active() {
+    return zelda_talk_event_active() && dMsgObject_isTalkNowCheck();
+}
+
+static constexpr s16 kZeldaMouthOpenAngle = 0x500;
+
+static void update_zelda_mouth_animation(bool talking) {
+    s16 target = (talking && dMsgObject_isMouthCheck()) ? kZeldaMouthOpenAngle : 0;
+    daPy_addCalcShort(&s_zeldaMouthAngle, target, 3, 0x1000, 0x100);
+}
+
 static void update_zelda_talk_heal_effect() {
     if (s_zeldaTalkHealEffectFramesLeft >= 0) {
         if (daPy_py_c* player = daPy_getLinkPlayerActorClass()) {
@@ -1767,6 +1802,7 @@ static void update_zelda_talk_heal_effect() {
 static void update_zelda_talk_interaction() {
     fopAc_ac_c* companion = find_spawned_zelda();
     sync_zelda_npc_proxy_lifecycle(companion);
+    update_zelda_mouth_animation(zelda_talk_is_active());
     update_zelda_talk_heal_effect();
 }
 

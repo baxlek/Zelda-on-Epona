@@ -181,6 +181,25 @@ Trailing comments on the two early returns:
 - `if (!s_eponaFollowFacing) { return; }` — within the still distance; hold fully still, don't even turn to face Link
 - `if (s_eponaFollowApproaching && aligned) { return; }` — already aligned; native turning/movement handles this tick
 
+## `hozelda_mouth_joint_callback()` / `kZelhJntMouth`
+
+> Faux lip-sync for the spawned Zelda's dialogue (see `update_zelda_mouth_animation()` further
+> down). Her model has no authored mouth-flap animation of its own, unlike native talking NPCs:
+> those rely on `daNpcT_c::ctrlMsgAnm()` (d_a_npc.cpp) toggling playback of an authored "talk"
+> BCK/BTP in bursts timed to `dMsgObject_isMouthCheck()`, using per-NPC-class motion-sequence-
+> manager infrastructure her class doesn't have. Her skeleton does have a dedicated mouth joint,
+> though -- `ZELH_JNT_MOUTH_e = 0xA` in the decompiled `HoZelda.h` resource header's `ZELH_JNT`
+> enum (assets/RZDP01/res/Object/HoZelda.h) -- which isn't one of the four joints
+> (`daHoZelda_c::create()`'s `getJointNodePointer(0/1/23/4)`) the native code itself registers a
+> callback on, so we register our own, reusing the exact matrix idiom
+> `daHoZelda_c::modelCallBack()` already applies to its own joints (`mNeckAngle`/`mBodyAngle`):
+> copy the joint's current anm matrix, apply an extra local rotation, write it back, then mirror
+> it into `J3DSys::mCurrentMtx` for `J3DJoint::recursiveCalc()` to pick up.
+>
+> Re-registered every `on_hozelda_execute_pre()` tick (cheap to re-set; avoids tracking
+> creation/respawn state separately) rather than once at spawn, since the mod never observes
+> `daHoZelda_c::create()` run.
+
 ## `find_zelda_npc_proxy()` (forward declaration)
 
 > Forward-declared: defined further down alongside the rest of the NPC-talk-proxy machinery, but
@@ -574,6 +593,16 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > Spawns/despawns the invisible talk proxy alongside the companion's own lifecycle: she only
 > needs to exist while the companion does, and self-heals (via find_zelda_npc_proxy()'s own
 > liveness check) if the engine ever deletes her out from under us.
+
+## `zelda_talk_is_active()` / `update_zelda_mouth_animation()`
+
+> Whether the conversation currently on screen is specifically the one we drive through the
+> proxy (as opposed to some other NPC's, or none at all) -- used to gate the companion's faux
+> lip-sync. Drives `s_zeldaMouthAngle` (applied every frame by `hozelda_mouth_joint_callback()`,
+> see its comment above) toward an "open" pose while our dialogue is the one actually on screen
+> and `dMsgObject_isMouthCheck()` -- the same engine-wide text-reveal-rhythm flag real talking
+> NPCs read in `ctrlMsgAnm()` -- says this instant is a "mouth open" beat, easing back to closed
+> the rest of the time (including whenever she isn't actively talking to us at all).
 
 ## `update_zelda_talk_heal_effect()`
 
