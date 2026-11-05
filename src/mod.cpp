@@ -576,49 +576,103 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
     return 1;
 }
 
-// daNpc_Zelda_c's "Zelda" archive is already loaded whenever the dismounted-talk proxy exists
-// (spawn_zelda_npc_proxy()), so the resource is available without any extra loading of our own.
-static constexpr char kNpcZeldaArcName[] = "Zelda";
-// daNpc_Zelda_c's resource header (res/Object/Zelda.h) only defines two BTP entries at all:
-// BTP_ZELDA_e (standing face) and BTP_ZELDA_SIT_e (sitting face) -- these are the only facial
-// resources she has, so that's the full cycle available to test with.
-static constexpr int kNpcZeldaFaceBtpIndices[] = {17, 18};
-static constexpr int kNpcZeldaFaceCount =
-    sizeof(kNpcZeldaFaceBtpIndices) / sizeof(kNpcZeldaFaceBtpIndices[0]);
+// A candidate face resource to try borrowing onto HoZelda. "Zelda" (the standing/dialogue NPC)
+// is the only archive guaranteed resident, since this mod spawns her as a dismounted talk proxy;
+// the rest are generic villager archives with an explicit smile/happy BTP that aren't loaded
+// unless the player happens to be in an area where that NPC is also present. Any candidate whose
+// archive isn't currently loaded is skipped automatically (dComIfG_getObjectRes returns nullptr).
+struct FaceCandidate_c {
+    const char* arcName;
+    int btpIdx;
+    const char* label;  // for log output, so it's clear which one is currently showing
+};
 
-// Diagnostic cycling state: advances to the next face once per second so it's obvious from
-// watching her whether the BTP swap is actually taking visual effect at all.
-static constexpr u32 kNpcZeldaFaceCycleTicks = 60;  // ~1 second; HoZelda::execute() runs at 60Hz.
-static int s_npcZeldaFaceCycleIndex = 0;
-static u32 s_npcZeldaFaceCycleTimer = 0;
+// clang-format off
+static constexpr FaceCandidate_c kFaceCandidates[] = {
+    {"Zelda",  0x11, "Zelda standing"},
+    {"Zelda",  0x12, "Zelda sitting"},
+    {"Ins",    0x18, "Ins happy"},
+    {"Henna",  0x34, "Henna smile-talk"},
+    {"Seira",  0x45, "Seira happy-talk"},
+    {"Uri",    0x14, "Uri happy"},
+    {"Shad",   0x18, "Shad happy"},
+    {"clerkB", 0x26, "bazaar clerk smile"},
+    {"fairy",  0x32, "Great Fairy smile"},
+};
+// clang-format on
+static constexpr int kFaceCandidateCount = sizeof(kFaceCandidates) / sizeof(kFaceCandidates[0]);
 
-static void apply_npc_zelda_face(daHoZelda_c* zelda) {
+// Diagnostic cycling state: steps to the next frame (and, once a resource's frames are exhausted,
+// the next candidate) once per second, so it's obvious from watching her whether any given
+// resource/frame combination has a visible effect at all. Each BTP resource is itself a
+// texture-pattern *animation* that can bake in several frames beyond just a blink cycle (HoZelda's
+// own blink logic only ever plays frame 0 upward for a left-eye/right-eye blink), so this walks
+// every frame of every candidate, not just the candidates themselves.
+static constexpr u32 kFaceCycleTicks = 60;  // ~1 second; HoZelda::execute() runs at 60Hz.
+static int s_faceCyclePos = 0;        // index into kFaceCandidates
+static int s_faceCycleFrame = 0;      // current frame within that candidate's BTP animation
+static int s_faceCycleLoadedPos = -1;  // which candidate mEyeBtp is currently init()'d with
+static u32 s_faceCycleTimer = 0;
+
+static J3DAnmTexPattern* get_face_candidate_btp(int pos) {
+    const FaceCandidate_c& candidate = kFaceCandidates[pos];
+    void* res = dComIfG_getObjectRes(candidate.arcName, candidate.btpIdx);
+    return static_cast<J3DAnmTexPattern*>(res);
+}
+
+// Pins HoZelda's mEyeBtp to the current diagnostic candidate/frame every tick. Re-targets her own
+// material table against the other model's BTP data, which only looks right if both models' face
+// materials share names and texture layouts -- expected to work only for "Zelda" (the same
+// character's standing model) and to have no visible effect at all for unrelated NPCs whose
+// material names won't match anything in HoZelda's model.
+static void apply_face_candidate(daHoZelda_c* zelda) {
     // Guards the first (possibly multi-phase) create() call, where mpZeldaModel isn't built yet.
     if (zelda->mpZeldaModel == nullptr) {
         return;
     }
-    int resIdx = kNpcZeldaFaceBtpIndices[s_npcZeldaFaceCycleIndex];
-    void* btpRes = dComIfG_getObjectRes(kNpcZeldaArcName, resIdx);
-    if (btpRes == nullptr) {
+    J3DAnmTexPattern* btp = get_face_candidate_btp(s_faceCyclePos);
+    if (btp == nullptr) {
         return;
     }
-    // Re-targets HoZelda's own material table against the NPC Zelda model's BTP data. This only
-    // looks right if both models' face materials share names and texture layouts; untested
-    // against real game assets.
-    zelda->mEyeBtp.init(zelda->mpZeldaModel->getModelData(),
-                         static_cast<J3DAnmTexPattern*>(btpRes), 1, -1, 1.0f, 0, -1);
+    if (s_faceCycleLoadedPos != s_faceCyclePos) {
+        zelda->mEyeBtp.init(zelda->mpZeldaModel->getModelData(), btp, 1, -1, 1.0f, 0, -1);
+        s_faceCycleLoadedPos = s_faceCyclePos;
+    }
+    // Re-pin every tick: HoZelda's own native blink logic would otherwise drift the frame forward
+    // on its own (it treats any BTP resource as a blink animation by default).
+    zelda->mEyeBtp.setFrame(static_cast<f32>(s_faceCycleFrame));
 }
 
-// Called every tick from HoZelda's execute() while the alt-face option is on: advances the cycle
-// index once per second and re-applies the (possibly new) face immediately on each change.
-static void update_npc_zelda_face_cycle(daHoZelda_c* zelda) {
-    if (s_npcZeldaFaceCycleTimer == 0) {
-        apply_npc_zelda_face(zelda);
+static void reset_face_cycle() {
+    s_faceCyclePos = 0;
+    s_faceCycleFrame = 0;
+    s_faceCycleLoadedPos = -1;
+    s_faceCycleTimer = 0;
+}
+
+// Called every tick from HoZelda's execute() while the alt-face option is on.
+static void update_face_cycle(daHoZelda_c* zelda) {
+    apply_face_candidate(zelda);
+
+    if (++s_faceCycleTimer < kFaceCycleTicks) {
+        return;
     }
-    if (++s_npcZeldaFaceCycleTimer >= kNpcZeldaFaceCycleTicks) {
-        s_npcZeldaFaceCycleTimer = 0;
-        s_npcZeldaFaceCycleIndex = (s_npcZeldaFaceCycleIndex + 1) % kNpcZeldaFaceCount;
+    s_faceCycleTimer = 0;
+
+    J3DAnmTexPattern* btp = get_face_candidate_btp(s_faceCyclePos);
+    int frameMax = btp != nullptr ? static_cast<int>(btp->getFrameMax()) : 0;
+
+    s_faceCycleFrame++;
+    if (s_faceCycleFrame > frameMax) {
+        s_faceCycleFrame = 0;
+        s_faceCyclePos = (s_faceCyclePos + 1) % kFaceCandidateCount;
     }
+
+    const FaceCandidate_c& candidate = kFaceCandidates[s_faceCyclePos];
+    bool loaded = get_face_candidate_btp(s_faceCyclePos) != nullptr;
+    mods::log::info("altZeldaFace diagnostic: now trying \"{}\" (\"{}\" res idx {}, frame {}){}",
+                     candidate.label, candidate.arcName, candidate.btpIdx, s_faceCycleFrame,
+                     loaded ? "" : " -- archive not loaded, skipping");
 }
 
 DEFINE_HOOK(&daHoZelda_c::create, HoZeldaCreate);
@@ -628,9 +682,8 @@ static void on_hozelda_create_post(ModContext*, void* args, void*, void*) {
     if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
         return;
     }
-    s_npcZeldaFaceCycleIndex = 0;
-    s_npcZeldaFaceCycleTimer = 0;
-    apply_npc_zelda_face(zelda);
+    reset_face_cycle();
+    apply_face_candidate(zelda);
 }
 
 DEFINE_HOOK(&daHoZelda_c::setNormalFace, HoZeldaSetNormalFace);
@@ -640,7 +693,7 @@ static void on_hozelda_set_normal_face_post(ModContext*, void* args, void*, void
     if (!is_spawned_zelda(zelda) || !alt_zelda_face_enabled()) {
         return;
     }
-    apply_npc_zelda_face(zelda);
+    apply_face_candidate(zelda);
 }
 
 DEFINE_HOOK(&daHoZelda_c::execute, HoZeldaExecute);
@@ -696,7 +749,7 @@ static void on_hozelda_execute_post(ModContext*, void* args, void*, void*) {
     }
 
     if (alt_zelda_face_enabled()) {
-        update_npc_zelda_face_cycle(zelda);
+        update_face_cycle(zelda);
     }
 
     fopAc_ac_c* proxy = find_zelda_npc_proxy();
@@ -1965,7 +2018,7 @@ static ModResult build_mods_panel(ModContext*, UiElementHandle panel, void*, Mod
 
     UiControlDesc altFaceControl = UI_CONTROL_DESC_INIT;
     altFaceControl.kind = UI_CONTROL_TOGGLE;
-    altFaceControl.label = "Cycle NPC Zelda's faces (diagnostic, experimental)";
+    altFaceControl.label = "Cycle alternate face expressions (diagnostic, experimental)";
     altFaceControl.binding = UI_BINDING_CONFIG_VAR;
     altFaceControl.config_var = g_cvarAltZeldaFace;
     svc_ui->pane_add_control(mod_ctx, panel, &altFaceControl, nullptr);
