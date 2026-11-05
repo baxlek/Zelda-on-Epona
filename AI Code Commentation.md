@@ -697,6 +697,13 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > above) rather than skipping that state, so a genuine, fresh `TYPING` tick is guaranteed once
 > page 2's box actually reopens for real -- the premature `msg_idx` flip during page 1's
 > wait-for-input window never produces a `TYPING` reading, so it can no longer satisfy the gate.
+>
+> `kZeldaInstantFillFlapFrames` started at 20 (an arbitrary guess once the timing itself was
+> fixed), but held the jaw open noticeably longer than a natural flap: the normal per-character
+> talk flap (`s_zeldaMouthFlapTimer`'s `2 + cM_rndF(4)`, i.e. 2-6 ticks per open/closed half)
+> never holds a single phase anywhere near that long. Shortened to 6 to match that range's upper
+> bound, so the scripted one-shot reads as a single ordinary-looking flap rather than a
+> conspicuous held-open pose.
 
 ## `update_zelda_talk_heal_effect()`
 

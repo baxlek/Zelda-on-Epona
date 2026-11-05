@@ -1769,7 +1769,7 @@ static bool zelda_talk_is_active() {
 }
 
 static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
-static constexpr s16 kZeldaInstantFillFlapFrames = 20;
+static constexpr s16 kZeldaInstantFillFlapFrames = 6;
 
 static void update_zelda_mouth_animation(bool talking) {
     static bool s_hasObservedTypingOnInstantPage = false;
