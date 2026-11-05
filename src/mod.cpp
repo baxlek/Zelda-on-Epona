@@ -1769,10 +1769,9 @@ static bool zelda_talk_is_active() {
 }
 
 static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
-static constexpr u8 kZeldaInstantFillFlapFrames = 10;
+static constexpr s16 kZeldaInstantFillFlapFrames = 20;
 
 static void update_zelda_mouth_animation(bool talking) {
-    static bool s_wasOnInstantFillPage = false;
     static bool s_instantFlapFiredThisPage = false;
     static s16 s_instantFlapFramesLeft = 0;
 
@@ -1781,22 +1780,18 @@ static void update_zelda_mouth_animation(bool talking) {
                               msg_p->msg_idx == s_zeldaTalkWolfPage2MessageId;
 
     if (!onInstantFillPage) {
-        s_wasOnInstantFillPage = false;
         s_instantFlapFiredThisPage = false;
         s_instantFlapFramesLeft = 0;
-    } else if (!s_wasOnInstantFillPage && !s_instantFlapFiredThisPage) {
-        s_instantFlapFramesLeft = kZeldaTalkWolfPauseFrames + kZeldaInstantFillFlapFrames * 2;
+    } else if (!s_instantFlapFiredThisPage && msg_p->mode != fopMsg_MODE_MSG_TYPING_e) {
+        s_instantFlapFramesLeft = kZeldaInstantFillFlapFrames;
         s_instantFlapFiredThisPage = true;
     }
-    s_wasOnInstantFillPage = onInstantFillPage;
 
     bool mouthOpenBeat = talking && dMsgObject_isMouthCheck();
     s16 target = 0;
 
-    if (s_instantFlapFramesLeft > kZeldaInstantFillFlapFrames * 2) {
-        s_instantFlapFramesLeft--;
-    } else if (s_instantFlapFramesLeft > 0) {
-        target = (s_instantFlapFramesLeft > kZeldaInstantFillFlapFrames) ? kZeldaMouthOpenAngle : 0;
+    if (s_instantFlapFramesLeft > 0) {
+        target = kZeldaMouthOpenAngle;
         s_instantFlapFramesLeft--;
     } else if (mouthOpenBeat) {
         if (s_zeldaMouthFlapTimer == 0) {

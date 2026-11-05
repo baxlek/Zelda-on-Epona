@@ -654,14 +654,28 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > `setCharAllAlphaRate(1.0f)`) to make its whole line pop in at once instead of typing out
 > letter by letter -- and since that bypasses the normal per-character reveal loop entirely,
 > `mMouthCheck` never gets set for it, so the generic flap logic above never fires for this
-> page (build #384 feedback: no mouth movement on the all-at-once line). Since we authored this
-> exact page ourselves, we know its tag sequence precisely -- `pause(kZeldaTalkWolfPauseFrames)`
-> then the instant-fill tag -- so `update_zelda_mouth_animation()` special-cases
-> `s_zeldaTalkWolfPage2MessageId` (the page's own `MessageId`, captured at registration): on
-> first seeing that page current, it schedules one deterministic open-then-closed flap timed to
-> land exactly `kZeldaTalkWolfPauseFrames` in, i.e. the instant the text visually pops in, lasting
-> `kZeldaInstantFillFlapFrames * 2` frames -- rather than trying to react to any engine-exposed
-> signal, since there isn't one for this reveal mode.
+> page (build #384 feedback: no mouth movement on the all-at-once line). `update_zelda_mouth_
+> animation()` special-cases `s_zeldaTalkWolfPage2MessageId` (the page's own `MessageId`,
+> captured at registration) to schedule one deterministic `kZeldaInstantFillFlapFrames`-long
+> open-then-closed flap for it.
+>
+> The first attempt at this (still build #384's regression) guessed the flap's start time from
+> our own authored `pause(kZeldaTalkWolfPauseFrames)` tag -- counting down that many of *our*
+> ticks from the moment the page became current, then holding open for a further fixed span --
+> but the user reported it still produced no visible movement. That approach assumed our
+> per-tick counter and the engine's own pause-tag countdown advance in lockstep, which was never
+> actually verified; any mismatch between the two clocks would shift the open window away from
+> the moment the text actually pops in, silently discarding the one user-visible open/close cycle
+> during the still-blank pause instead. Replaced it with the same falling-edge technique already
+> proven by `update_zelda_talk_heal_effect()` below: watch `msg_class::mode` for the tick it
+> stops reading `fopMsg_MODE_MSG_TYPING_e` while `s_zeldaTalkWolfPage2MessageId` is current, and
+> fire the flap then. `MSGTAG_INSTANT` only maxes out the per-character reveal rate *while* mode
+> is still `TYPING` -- it doesn't skip that state outright -- so this falling edge still lands on
+> the same tick the text becomes fully visible, with no dependency on matching our tick rate to
+> the engine's internal pause-tag timebase. Fires on the first tick the page is current with
+> mode already not `TYPING` (rather than requiring an observed `TYPING` tick first), covering
+> both the "we catch it mid-type" and "it's already past typing by the first tick we see it"
+> cases without needing to know which one actually happens for this reveal mode.
 
 ## `update_zelda_talk_heal_effect()`
 
