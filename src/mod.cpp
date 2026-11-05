@@ -620,6 +620,23 @@ static J3DAnmTexPattern* get_face_candidate_btp(int pos) {
     return static_cast<J3DAnmTexPattern*>(res);
 }
 
+// J3DAnmTexPattern::searchUpdateMaterialID() (called by mEyeBtp.init() below) matches each of the
+// BTP resource's own material entries, by name, against HoZelda's material table, and records
+// whether each one found a match. Logging this is the only way to get a definitive, verifiable
+// answer -- rather than guessing from visual appearance alone -- as to which of a candidate's
+// targeted materials (e.g. "eye" vs. "mouth") actually resolve onto HoZelda's own model.
+static void log_face_candidate_material_match(const FaceCandidate_c& candidate,
+                                               J3DAnmTexPattern* btp) {
+    u16 num = btp->getUpdateMaterialNum();
+    mods::log::info("altZeldaFace diagnostic: \"{}\" targets {} material(s) in HoZelda's model:",
+                     candidate.label, num);
+    for (u16 i = 0; i < num; i++) {
+        const char* name = btp->mUpdateMaterialName.getName(i);
+        mods::log::info("  [{}] \"{}\" -> {}", i, name != nullptr ? name : "?",
+                         btp->isValidUpdateMaterialID(i) ? "matched" : "NOT matched");
+    }
+}
+
 // Pins HoZelda's mEyeBtp to the current diagnostic candidate/frame every tick. Re-targets her own
 // material table against the other model's BTP data, which only looks right if both models' face
 // materials share names and texture layouts -- expected to work only for "Zelda" (the same
@@ -637,6 +654,7 @@ static void apply_face_candidate(daHoZelda_c* zelda) {
     if (s_faceCycleLoadedPos != s_faceCyclePos) {
         zelda->mEyeBtp.init(zelda->mpZeldaModel->getModelData(), btp, 1, -1, 1.0f, 0, -1);
         s_faceCycleLoadedPos = s_faceCyclePos;
+        log_face_candidate_material_match(kFaceCandidates[s_faceCyclePos], btp);
     }
     // Re-pin every tick: HoZelda's own native blink logic would otherwise drift the frame forward
     // on its own (it treats any BTP resource as a blink animation by default).
