@@ -630,6 +630,24 @@ Above the declaration of `kZeldaTalkMessageGroup` and the rest of the Zelda-talk
 > `kZeldaMouthOpenAngle` was doubled from its original `0x500` (~7 degrees) to `0xA00`
 > (~14 degrees) after build #384 testing showed no observable movement at the smaller angle,
 > in case subtlety (rather than joint choice) was the whole problem.
+>
+> `dMsgObject_isMouthCheck()` isn't the rapid per-character toggle its name suggests -- native
+> `jmessage_tSequenceProcessor` (`d_msg_class.cpp`) only clears `mMouthCheck` back to 0 around
+> punctuation-driven pauses (`!`, full-width punctuation, page breaks), so for ordinary prose
+> it reads as "true" continuously for the whole run of characters between pauses. Real NPCs get
+> away with reading it directly because `ctrlMsgAnm()` only uses it to gate playback of an
+> already-authored, already-animated talk-loop BCK (`ANM_FLAG_4000`) -- the visual "flapping" is
+> baked into that loop, not into the boolean. Zelda has no such authored loop to gate, so easing
+> straight toward `kZeldaMouthOpenAngle` on a bare `isMouthCheck()` read held her jaw open and
+> static for the whole sentence instead of chattering (build #384 feedback). `s_zeldaMouthFlapTimer`
+> / `s_zeldaMouthFlapOpen` resynthesize the missing flap ourselves: while a mouth-open beat is
+> underway, flip the target between fully open and fully closed every `2 + cM_rndF(4)` frames
+> (randomized so it doesn't read as a metronome), snapping back to closed the instant the beat
+> ends.
+>
+> The jaw was also rotating the wrong way (upward instead of down, per build #384 testing) with
+> a bare `ZrotM(s_zeldaMouthAngle)`; mirrored the sign `daHoZelda_c::modelCallBack()` itself uses
+> for its own `ZrotM(-mNeckAngle.x)` pitch rotation and negated it to `ZrotM(-s_zeldaMouthAngle)`.
 
 ## `update_zelda_talk_heal_effect()`
 

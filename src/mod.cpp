@@ -537,6 +537,8 @@ static constexpr u16 kZelhJntChin = 0x5;
 static constexpr u16 kZelhJntMouth = 0xA;
 static constexpr u16 kZelhJntLipSync[] = {kZelhJntChin, kZelhJntMouth};
 static s16 s_zeldaMouthAngle = 0;
+static u8 s_zeldaMouthFlapTimer = 0;
+static bool s_zeldaMouthFlapOpen = false;
 
 static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
     if (phase != 0) {
@@ -550,7 +552,7 @@ static int hozelda_mouth_joint_callback(J3DJoint* joint, int phase) {
 
     u16 jntNo = joint->getJntNo();
     mDoMtx_stack_c::copy(zelda->mpZeldaModel->getAnmMtx(jntNo));
-    mDoMtx_stack_c::ZrotM(s_zeldaMouthAngle);
+    mDoMtx_stack_c::ZrotM(-s_zeldaMouthAngle);
     zelda->mpZeldaModel->setAnmMtx(jntNo, mDoMtx_stack_c::get());
     mDoMtx_copy(zelda->mpZeldaModel->getAnmMtx(jntNo), J3DSys::mCurrentMtx);
     return 1;
@@ -1767,7 +1769,22 @@ static bool zelda_talk_is_active() {
 static constexpr s16 kZeldaMouthOpenAngle = 0xA00;
 
 static void update_zelda_mouth_animation(bool talking) {
-    s16 target = (talking && dMsgObject_isMouthCheck()) ? kZeldaMouthOpenAngle : 0;
+    bool mouthOpenBeat = talking && dMsgObject_isMouthCheck();
+    s16 target = 0;
+
+    if (mouthOpenBeat) {
+        if (s_zeldaMouthFlapTimer == 0) {
+            s_zeldaMouthFlapOpen = !s_zeldaMouthFlapOpen;
+            s_zeldaMouthFlapTimer = static_cast<u8>(2.0f + cM_rndF(4.0f));
+        } else {
+            s_zeldaMouthFlapTimer--;
+        }
+        target = s_zeldaMouthFlapOpen ? kZeldaMouthOpenAngle : 0;
+    } else {
+        s_zeldaMouthFlapTimer = 0;
+        s_zeldaMouthFlapOpen = false;
+    }
+
     daPy_addCalcShort(&s_zeldaMouthAngle, target, 3, 0x1000, 0x100);
 }
 
